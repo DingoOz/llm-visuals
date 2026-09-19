@@ -125,9 +125,10 @@ console, pass `--color truecolor` if colours look flat.
   rate counts every read the process makes (files, pipes, sockets), so it runs
   higher than on Linux. PCIe traffic needs `nvidia-smi dmon`, which Windows
   drivers may not support; the meter switches itself off after three failures.
-- **Servers in WSL2 or Docker** are not visible to a native Windows build. To
-  watch those, build and run llm-visuals inside WSL2 too; it then behaves
-  exactly as on Linux.
+- **Servers in WSL2 or Docker** are reachable via their published localhost
+  ports. Auto-detection probes local inference ports (e.g. 7000, 8000, 8080,
+  11434, 30000), or you can point directly at the server with
+  `--endpoint http://localhost:7000/v1` (or set `LLM_ENDPOINT`).
 
 ### What to test
 
@@ -482,7 +483,9 @@ MTP.
 ```
 --demo               synthetic servers and GPUs; exercises every panel
 --demo-models N      how many synthetic servers --demo runs (default 2)
---model <id|auto>    `auto` (default) observes the running servers;
+--endpoint <url>     inference server endpoint URL (e.g. http://localhost:7000/v1)
+--model <id|url|auto>`auto` (default) observes running servers or local endpoints;
+                     an HTTP URL attaches to that inference endpoint;
                      an HF id streams real attention via the Python bridge
 --max-models N       most models to watch at once (default 8)
 --pid A,B            only watch these PIDs (default: every model found)

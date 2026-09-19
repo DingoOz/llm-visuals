@@ -21,7 +21,7 @@ fn env_dir(key: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn home() -> Option<PathBuf> {
+pub fn home() -> Option<PathBuf> {
     env_dir("HOME").or_else(|| env_dir("USERPROFILE"))
 }
 
@@ -293,6 +293,13 @@ impl SettingsForm {
                 args.max_heads.to_string(),
                 "Heads per layer shown in the attention view; 0 = all".into(),
             ),
+            field(
+                "Endpoint",
+                "endpoint",
+                Kind::Text,
+                args.endpoint.clone().unwrap_or_default(),
+                "Inference server URL, e.g. http://localhost:7000/v1 (empty for auto)".into(),
+            ),
         ];
         // The GPU collector is spawned once with its filter.
         if let Some(f) = fields.iter_mut().find(|f| f.flag == "gpu") {
@@ -320,10 +327,11 @@ impl SettingsForm {
         self.fields
             .iter()
             .filter(|f| f.flag != LOG_SWITCH)
-            .map(|f| match f.flag {
-                LOG_FILE if !logging => (f.flag, "off".to_string()),
-                LOG_FILE if f.value.is_empty() => (f.flag, "auto".to_string()),
-                _ => (f.flag, f.value.clone()),
+            .filter_map(|f| match f.flag {
+                LOG_FILE if !logging => Some((f.flag, "off".to_string())),
+                LOG_FILE if f.value.is_empty() => Some((f.flag, "auto".to_string())),
+                "endpoint" if f.value.trim().is_empty() => None,
+                _ => Some((f.flag, f.value.clone())),
             })
             .collect()
     }

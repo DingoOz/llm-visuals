@@ -316,19 +316,19 @@ pub fn parse_slots(body: &str) -> Option<LiveStats> {
 
 pub async fn http_get(host: &str, port: u16, path: &str) -> Result<String, String> {
     let connect = TcpStream::connect((host, port));
-    let mut stream = tokio::time::timeout(Duration::from_millis(400), connect)
+    let mut stream = tokio::time::timeout(Duration::from_millis(500), connect)
         .await
         .map_err(|_| "connect timeout".to_string())?
         .map_err(|e| e.to_string())?;
     let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nAccept: application/json\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nAccept: application/json, text/plain, */*\r\n\r\n"
     );
     stream
         .write_all(req.as_bytes())
         .await
         .map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
-    tokio::time::timeout(Duration::from_millis(800), stream.read_to_end(&mut buf))
+    tokio::time::timeout(Duration::from_millis(1500), stream.read_to_end(&mut buf))
         .await
         .map_err(|_| "read timeout".to_string())?
         .map_err(|e| e.to_string())?;

@@ -98,7 +98,37 @@ impl ModelSlot {
 /// filter excludes, capped at `--max-models`.
 async fn discover(args: &Args) -> Vec<DetectedModel> {
     let filter = args.pid_filter();
-    let mut found = model_detect::detect_models();
+    let mut found = Vec::new();
+
+    // 1. Explicit endpoint URL (--endpoint, --model http://..., or LLM_ENDPOINT)
+    if let Some(ep) = args.endpoint_url() {
+        if let Some((host, port, path)) = model_detect::parse_endpoint(&ep) {
+            if let Some(m) = model_detect::probe_endpoint(&host, port, &path).await {
+                found.push(m);
+            }
+        }
+    }
+
+    // 2. Scan processes for running LLM servers
+    let mut proc_models = model_detect::detect_models();
+
+    // 3. If no models found yet, probe local candidate endpoints (vLLM, llama.cpp, etc.)
+    if found.is_empty() {
+        let endpoint_models = model_detect::probe_local_endpoints().await;
+        for m in endpoint_models {
+            if !proc_models.iter().any(|pm| pm.port == m.port) {
+                proc_models.push(m);
+            }
+        }
+    }
+
+    // Merge discovered models, avoiding duplicate ports
+    for m in proc_models {
+        if !found.iter().any(|fm| fm.port == m.port && fm.port.is_some()) {
+            found.push(m);
+        }
+    }
+
     if !filter.is_empty() {
         found.retain(|m| filter.contains(&m.pid));
     }
@@ -949,3 +979,65 @@ fn fade_sample_from_live(
         n_heads: detected.map(|d| d.n_heads()).unwrap_or(1).max(1),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[tokio::test]
+    async fn discover_with_explicit_endpoint() {
+        let args = Args::try_parse_from(["llm-visuals", "--endpoint", "http://localhost:7000/v1"]).unwrap();
+        assert!(args.is_endpoint());
+        assert_eq!(args.endpoint_url().as_deref(), Some("http://localhost:7000/v1"));
+        if tokio::net::TcpStream::connect(("127.0.0.1", 7000)).await.is_err() {
+            eprintln!("Skipping live endpoint test: port 7000 is not reachable");
+            return;
+        }
+        let models = discover(&args).await;
+        assert!(!models.is_empty(), "Expected to detect model from http://localhost:7000/v1");
+        let m = &models[0];
+        assert_eq!(m.engine, "vllm");
+        assert_eq!(m.port, Some(7000));
+        assert_eq!(m.name, "LFM-2.6B-Longevity");
+        assert_eq!(m.ctx_max, Some(32768));
+        assert_eq!(m.n_layers(), 30);
+        assert_eq!(m.n_heads(), 32);
+        assert!(!m.gpu_indices.is_empty());
+    }
+
+    #[tokio::test]
+    async fn discover_with_model_url() {
+        let args = Args::try_parse_from(["llm-visuals", "--model", "http://localhost:7000/v1"]).unwrap();
+        assert!(args.is_endpoint());
+        assert_eq!(args.endpoint_url().as_deref(), Some("http://localhost:7000/v1"));
+        if tokio::net::TcpStream::connect(("127.0.0.1", 7000)).await.is_err() {
+            eprintln!("Skipping live endpoint test: port 7000 is not reachable");
+            return;
+        }
+        let models = discover(&args).await;
+        assert!(!models.is_empty(), "Expected model to be detected via --model URL");
+        let m = &models[0];
+        assert_eq!(m.engine, "vllm");
+        assert_eq!(m.port, Some(7000));
+        assert_eq!(m.name, "LFM-2.6B-Longevity");
+        assert_eq!(m.n_layers(), 30);
+        assert_eq!(m.n_heads(), 32);
+    }
+
+    #[tokio::test]
+    async fn discover_auto_finds_local_port_7000() {
+        let args = Args::try_parse_from(["llm-visuals", "--model", "auto"]).unwrap();
+        assert!(!args.is_endpoint());
+        if tokio::net::TcpStream::connect(("127.0.0.1", 7000)).await.is_err() {
+            eprintln!("Skipping live endpoint test: port 7000 is not reachable");
+            return;
+        }
+        let models = discover(&args).await;
+        assert!(!models.is_empty(), "Expected auto-detection to find local port 7000");
+        let m = &models[0];
+        assert_eq!(m.engine, "vllm");
+        assert_eq!(m.port, Some(7000));
+    }
+}
+

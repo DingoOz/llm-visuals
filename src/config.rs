@@ -44,6 +44,10 @@ pub struct Args {
     #[arg(long, default_value = "auto")]
     pub model: String,
 
+    /// Inference server endpoint URL (e.g. http://localhost:7000/v1, http://localhost:8000)
+    #[arg(long)]
+    pub endpoint: Option<String>,
+
     /// Prompt to generate from
     #[arg(long, default_value = "Once upon a time")]
     pub prompt: String,
@@ -158,9 +162,34 @@ impl Args {
         }
     }
 
-    /// Whether to auto-detect the running model (explicit flag or "auto" value)
+    /// Whether to auto-detect the running model (explicit flag, "auto" value, or an endpoint URL)
     pub fn auto_detect(&self) -> bool {
-        self.detect_auto || self.model == "auto"
+        self.detect_auto || self.model == "auto" || self.is_endpoint()
+    }
+
+    /// Whether an endpoint was configured either via --endpoint, --model http(s)://..., or env vars
+    pub fn is_endpoint(&self) -> bool {
+        self.endpoint_url().is_some()
+    }
+
+    /// The configured endpoint URL, if any.
+    pub fn endpoint_url(&self) -> Option<String> {
+        if let Some(ep) = self.endpoint.as_deref().filter(|s| !s.trim().is_empty()) {
+            Some(ep.to_string())
+        } else if self.model.starts_with("http://") || self.model.starts_with("https://") {
+            Some(self.model.clone())
+        } else if let Ok(ep) = std::env::var("LLM_ENDPOINT")
+            .or_else(|_| std::env::var("VLLM_BASE_URL"))
+            .or_else(|_| std::env::var("OPENAI_BASE_URL"))
+        {
+            if !ep.trim().is_empty() {
+                Some(ep)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 
     /// PIDs the user restricted monitoring to. Empty means every model found.
