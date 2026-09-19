@@ -783,6 +783,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        // Preserve the 30 FPS animation cadence while a request is active and
+        // while its heat/fade effects settle. Once fully idle, fresh telemetry
+        // or input drives rendering at the 200 ms sample cadence. The loop
+        // still wakes at 30 Hz, so interaction and new requests stay prompt.
+        if slots.iter().any(|slot| slot.live.processing) {
+            last_visual_activity = now;
+        }
+        let animate = now.duration_since(last_visual_activity) < Duration::from_secs(3);
+        if !animate && !ui_changed {
+            if !running && !done {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(33)).await;
+            continue;
+        }
+
         let frame_dt = (now - last_frame).as_secs_f32().clamp(0.0, 1.0);
         last_frame = now;
         for slot in &mut slots {
@@ -805,18 +821,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Keep the dashboard up; stop writing and say why.
                 status = format!("--log-db stopped: {e}");
                 db = None;
-                ui_changed = true;
             }
         }
-
-        // Preserve the 30 FPS animation cadence while a request is active and
-        // while its heat/fade effects settle. Once fully idle, redraw only for
-        // fresh telemetry or input instead of flushing identical terminal
-        // frames 30 times per second. GPU samples still arrive every 200 ms.
-        if slots.iter().any(|slot| slot.live.processing) {
-            last_visual_activity = now;
-        }
-        let animate = now.duration_since(last_visual_activity) < Duration::from_secs(3);
 
         focus = focus.min(slots.len().saturating_sub(1));
         let views: Vec<ModelView> = slots.iter().map(ModelSlot::view).collect();
@@ -844,9 +850,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             experts: cur.and_then(|v| v.experts),
             settings: settings_form.as_ref(),
         };
-        if animate || ui_changed {
-            renderer.render_frame(&mut terminal, &dash);
-        }
+        renderer.render_frame(&mut terminal, &dash);
 
         if !running && !done {
             break;
