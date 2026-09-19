@@ -451,6 +451,17 @@ For a systemd unit, a drop-in with two `Environment=` lines is enough; see
 at start and after `r`, and stops asking after three failures, so unpatched
 servers cost nothing.
 
+### API keys and LM Studio
+
+A llama-server started with `--api-key` or `--api-key-file` answers `/slots`,
+`/metrics` and `/props` with 401. The dashboard reads the key from that
+server's command line and sends it as a bearer token, so no setup is needed.
+
+LM Studio starts every model it loads as such a llama-server, with its own
+port and key, so press `r` after it loads a different model. It has no switch
+for `--metrics`, but the llama-server it starts inherits its environment:
+launch LM Studio with `LLAMA_ARG_ENDPOINT_METRICS=1` set to get the MTP panel.
+
 ### SGLang
 
 SGLang is detected from `python -m sglang.launch_server` (and the `sglang`

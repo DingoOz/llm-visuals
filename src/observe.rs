@@ -314,14 +314,37 @@ pub fn parse_slots(body: &str) -> Option<LiveStats> {
     })
 }
 
+/// Bearer keys by port, for servers started with `--api-key`. LM Studio
+/// always starts llama-server that way, with a fresh key per model load, and
+/// llama-server answers /slots, /metrics and /props with 401 without it.
+static API_KEYS: std::sync::Mutex<Vec<(u16, String)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn set_api_key(port: u16, key: Option<String>) {
+    let mut keys = API_KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    keys.retain(|(p, _)| *p != port);
+    if let Some(k) = key {
+        keys.push((port, k));
+    }
+}
+
+fn api_key(port: u16) -> Option<String> {
+    let keys = API_KEYS.lock().unwrap_or_else(|e| e.into_inner());
+    keys.iter()
+        .find(|(p, _)| *p == port)
+        .map(|(_, k)| k.clone())
+}
+
 pub async fn http_get(host: &str, port: u16, path: &str) -> Result<String, String> {
     let connect = TcpStream::connect((host, port));
     let mut stream = tokio::time::timeout(Duration::from_millis(400), connect)
         .await
         .map_err(|_| "connect timeout".to_string())?
         .map_err(|e| e.to_string())?;
+    let auth = api_key(port)
+        .map(|k| format!("Authorization: Bearer {k}\r\n"))
+        .unwrap_or_default();
     let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nAccept: application/json\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nAccept: application/json\r\n{auth}\r\n"
     );
     stream
         .write_all(req.as_bytes())

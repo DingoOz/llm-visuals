@@ -941,6 +941,31 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
     parsed
 }
 
+/// The server's API key: `--api-key` (first of a comma list) or the first
+/// line of `--api-key-file`. llama-server answers /slots, /metrics and /props
+/// with 401 without it.
+pub fn api_key_from(cmdline: &str) -> Option<String> {
+    let tokens: Vec<&str> = cmdline.split_whitespace().collect();
+    for (i, t) in tokens.iter().enumerate() {
+        let (key, inline) = match t.split_once('=') {
+            Some((k, v)) => (k, Some(v)),
+            None => (*t, None),
+        };
+        let value = || inline.or_else(|| tokens.get(i + 1).copied());
+        let found = match key {
+            "--api-key" => value()
+                .and_then(|v| v.split(',').next())
+                .map(str::to_string),
+            "--api-key-file" => value()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|s| s.lines().next().map(|l| l.trim().to_string())),
+            _ => continue,
+        };
+        return found.filter(|k| !k.is_empty());
+    }
+    None
+}
+
 #[cfg(target_os = "linux")]
 fn walk_proc_llms() -> Vec<(u32, String, String)> {
     let mut out = Vec::new();
@@ -1130,6 +1155,17 @@ mod tests {
         assert!(p.tensor_split.is_empty());
         let p = parse_cmdline("llama-server", "llama-server -m m.gguf --tensor-split 0,0");
         assert!(p.tensor_split.is_empty());
+    }
+
+    #[test]
+    fn api_key_from_server_cmdline() {
+        assert_eq!(api_key_from(LM_STUDIO_CMD).as_deref(), Some("K2Zzsecret"));
+        assert_eq!(
+            api_key_from("llama-server --api-key=a,b").as_deref(),
+            Some("a")
+        );
+        assert_eq!(api_key_from("llama-server --port 8080"), None);
+        assert_eq!(api_key_from("llama-server --api-key"), None);
     }
 
     #[test]
