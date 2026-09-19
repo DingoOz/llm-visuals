@@ -408,10 +408,11 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | request log | one record per `id_task`; averages from accumulated deltas |
 | util, VRAM, power, °C, clocks, fan, PCIe | `nvidia-smi --query-gpu=…` every poll |
 | VRAM weights vs KV | llama.cpp: **estimate** from GGUF file size × `--tensor-split`. SGLang: `memory.weight_gb` and `memory.kv_cache_gb` from `/v1/loads` |
-| layers, heads, experts, MTP depth, engram, quant | GGUF header, or HuggingFace `config.json` (`num_hidden_layers`, `num_attention_heads`, `num_experts` / `num_local_experts`, `num_experts_per_tok`) for safetensors dirs |
+| layers, heads, experts, MTP layers, engram, quant | GGUF header, or HuggingFace `config.json` (`num_hidden_layers`, `num_attention_heads`, `num_experts` / `num_local_experts`, `num_experts_per_tok`) for safetensors dirs |
 | layer → GPU | `--tensor-split` proportions |
 | layer activity | utilisation of the GPU the layer lives on, smoothed |
 | expert blocks | real top-k routing from `GET /experts` (patched server), else a deterministic stand-in keyed by layer and token step |
+| MTP / speculative depth (tokens drafted per step) | llama.cpp: `--spec-draft-n-max` (or `--draft-max`) on the command line, else the model's MTP layer count. vLLM: number of per-position acceptance counters. SGLang: `speculative_num_draft_tokens` |
 | MTP acceptance, tok/step, steps/s | deltas of `spec_decode_num_draft_tokens_total`, `…accepted_tokens_total`, `…drafts_total` from `GET /metrics`, 1.5 s window |
 | disk MB/s, faults/s | deltas of sectors read in `/proc/diskstats` (whole disks), `read_bytes` in `/proc/<pid>/io`, `majflt` in `/proc/<pid>/stat` |
 | resident weights | `RssFile` in `/proc/<pid>/status` |

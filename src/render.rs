@@ -1032,11 +1032,21 @@ impl Renderer {
                 .and_then(|m| m.spec_type.clone())
                 .unwrap_or_default()
         };
-        let depth = d
-            .detected
-            .and_then(|m| m.gguf.as_ref())
-            .map(|g| g.n_mtp)
-            .unwrap_or(d.live.spec_depth);
+        // llama.cpp applies the model's MTP layers (the header's "MTP ×N") up
+        // to this many times per verification step.
+        let draft_max = d.detected.and_then(|m| {
+            cmd_arg(&m.cmdline, "--spec-draft-n-max")
+                .or_else(|| cmd_arg(&m.cmdline, "--draft-max"))
+                .or_else(|| cmd_arg(&m.cmdline, "--draft"))
+        });
+        // Depth is tokens drafted per step, as vLLM and SGLang report it. The
+        // MTP layer count is only a fallback: one layer can draft several.
+        let depth = draft_max
+            .as_deref()
+            .and_then(|n| n.parse().ok())
+            .or((d.live.spec_depth > 0).then_some(d.live.spec_depth))
+            .or_else(|| d.detected.and_then(|m| m.gguf.as_ref()).map(|g| g.n_mtp))
+            .unwrap_or(0);
         let enabled = !spec_type.is_empty() && spec_type != "none";
         let mtp = spec_type.to_ascii_lowercase().contains("mtp");
         let title = if !enabled {
@@ -1080,10 +1090,7 @@ impl Renderer {
                         Style::default().fg(pal::c(pal::TEAL)),
                     ));
                 }
-                if let Some(n) = cmd_arg(&m.cmdline, "--spec-draft-n-max")
-                    .or_else(|| cmd_arg(&m.cmdline, "--draft-max"))
-                    .or_else(|| cmd_arg(&m.cmdline, "--draft"))
-                {
+                if let Some(n) = &draft_max {
                     facts.push(Span::styled(
                         format!("  ·  draft max {n}"),
                         Style::default().fg(pal::c(pal::TEXT)),
