@@ -128,7 +128,10 @@ console, pass `--color truecolor` if colours look flat.
 - **Servers in WSL2 or Docker** are reachable via their published localhost
   ports. Auto-detection probes local inference ports (e.g. 7000, 8000, 8080,
   11434, 30000), or you can point directly at the server with
-  `--endpoint http://localhost:7000/v1` (or set `LLM_ENDPOINT`).
+  `--endpoint http://localhost:7000/v1` (or set `LLM_ENDPOINT`). Note that endpoints
+  use plain HTTP over TCP (HTTPS / TLS is not supported). Specifying an explicit
+  `--endpoint` (or `--model http://...`) attaches to that server directly and is
+  exempt from `--pid` filtering.
 
 ### What to test
 

@@ -22,6 +22,7 @@ use serde_json::Value;
 /// Static fields from `GET /server_info` (or the older `/get_server_info`).
 #[derive(Debug, Clone, Default)]
 pub struct SglangServerInfo {
+    pub model_path: Option<String>,
     pub context_length: Option<usize>,
     pub speculative_algorithm: Option<String>,
     pub speculative_num_draft_tokens: Option<u32>,
@@ -60,7 +61,11 @@ pub fn parse_server_info(body: &str) -> Option<SglangServerInfo> {
     let algo = json_str(&v, "speculative_algorithm")
         .or_else(|| json_str(&v, "speculative-algorithm"))
         .filter(|s| !s.is_empty() && s != "None" && s != "none" && s != "null");
+    let model_path = json_str(&v, "model_path")
+        .or_else(|| json_str(&v, "model"))
+        .filter(|s| !s.is_empty() && s != "None" && s != "none" && s != "null");
     Some(SglangServerInfo {
+        model_path,
         context_length: json_usize(&v, "context_length")
             .or_else(|| json_usize(&v, "context-length")),
         speculative_algorithm: algo,
@@ -467,6 +472,7 @@ mod tests {
     fn parse_server_info_spec_and_ctx() {
         let body = r#"{"context_length":40960,"speculative_algorithm":"EAGLE","speculative_num_draft_tokens":5,"model_path":"/m"}"#;
         let i = parse_server_info(body).unwrap();
+        assert_eq!(i.model_path.as_deref(), Some("/m"));
         assert_eq!(i.context_length, Some(40960));
         assert_eq!(i.speculative_algorithm.as_deref(), Some("EAGLE"));
         assert_eq!(i.speculative_num_draft_tokens, Some(5));

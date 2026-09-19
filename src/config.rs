@@ -174,19 +174,30 @@ impl Args {
 
     /// The configured endpoint URL, if any.
     pub fn endpoint_url(&self) -> Option<String> {
-        if let Some(ep) = self.endpoint.as_deref().filter(|s| !s.trim().is_empty()) {
-            Some(ep.to_string())
-        } else if self.model.starts_with("http://") || self.model.starts_with("https://") {
-            Some(self.model.clone())
-        } else if let Ok(ep) = std::env::var("LLM_ENDPOINT")
+        let env_ep = std::env::var("LLM_ENDPOINT")
             .or_else(|_| std::env::var("VLLM_BASE_URL"))
             .or_else(|_| std::env::var("OPENAI_BASE_URL"))
-        {
-            if !ep.trim().is_empty() {
-                Some(ep)
-            } else {
-                None
-            }
+            .ok();
+        Self::resolve_endpoint(self.endpoint.as_deref(), &self.model, env_ep.as_deref())
+    }
+
+    /// Pure resolution logic for endpoint precedence:
+    /// 1. Explicit `--endpoint <URL>` takes top priority.
+    /// 2. `--model http(s)://...` takes next priority.
+    /// 3. Environment variables (LLM_ENDPOINT, VLLM_BASE_URL, OPENAI_BASE_URL)
+    ///    are only consulted if no endpoint was given AND `--model` is `auto`.
+    ///    This prevents ambient env vars from hijacking explicit `--model <hf-id>` bridge mode.
+    pub fn resolve_endpoint(
+        endpoint_arg: Option<&str>,
+        model_arg: &str,
+        env_ep: Option<&str>,
+    ) -> Option<String> {
+        if let Some(ep) = endpoint_arg.filter(|s| !s.trim().is_empty()) {
+            Some(ep.to_string())
+        } else if model_arg.starts_with("http://") || model_arg.starts_with("https://") {
+            Some(model_arg.to_string())
+        } else if model_arg == "auto" {
+            env_ep.filter(|s| !s.trim().is_empty()).map(String::from)
         } else {
             None
         }
@@ -212,5 +223,38 @@ impl Args {
             .split(',')
             .filter_map(|s| s.trim().parse::<usize>().ok())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_precedence_and_model_hijack_prevention() {
+        // 1. Explicit endpoint flag wins even if model and env are set
+        let res = Args::resolve_endpoint(
+            Some("http://explicit:8000"),
+            "http://model:8000",
+            Some("http://env:8000"),
+        );
+        assert_eq!(res.as_deref(), Some("http://explicit:8000"));
+
+        // 2. Model URL wins if endpoint flag is absent
+        let res = Args::resolve_endpoint(None, "http://model:8000", Some("http://env:8000"));
+        assert_eq!(res.as_deref(), Some("http://model:8000"));
+
+        // 3. Explicit HuggingFace model must NOT be hijacked by ambient env var
+        let res =
+            Args::resolve_endpoint(None, "mistralai/Mistral-7B-v0.1", Some("http://env:8000"));
+        assert_eq!(res, None, "Explicit model ID should ignore OPENAI_BASE_URL");
+
+        // 4. Default model "auto" uses ambient env var
+        let res = Args::resolve_endpoint(None, "auto", Some("http://env:8000"));
+        assert_eq!(res.as_deref(), Some("http://env:8000"));
+
+        // 5. Empty strings are ignored
+        let res = Args::resolve_endpoint(Some("   "), "auto", Some("   "));
+        assert_eq!(res, None);
     }
 }

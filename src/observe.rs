@@ -314,24 +314,47 @@ pub fn parse_slots(body: &str) -> Option<LiveStats> {
     })
 }
 
-pub async fn http_get(host: &str, port: u16, path: &str) -> Result<String, String> {
+#[derive(Debug)]
+pub enum HttpError {
+    ConnectTimeout,
+    Connect(std::io::Error),
+    Write(std::io::Error),
+    ReadTimeout,
+    Read(std::io::Error),
+}
+
+impl std::fmt::Display for HttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ConnectTimeout => write!(f, "connect timeout"),
+            Self::Connect(e) => write!(f, "connect error: {e}"),
+            Self::Write(e) => write!(f, "write error: {e}"),
+            Self::ReadTimeout => write!(f, "read timeout"),
+            Self::Read(e) => write!(f, "read error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for HttpError {}
+
+pub async fn http_get(host: &str, port: u16, path: &str) -> Result<String, HttpError> {
     let connect = TcpStream::connect((host, port));
     let mut stream = tokio::time::timeout(Duration::from_millis(500), connect)
         .await
-        .map_err(|_| "connect timeout".to_string())?
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| HttpError::ConnectTimeout)?
+        .map_err(HttpError::Connect)?;
     let req = format!(
         "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nAccept: application/json, text/plain, */*\r\n\r\n"
     );
     stream
         .write_all(req.as_bytes())
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(HttpError::Write)?;
     let mut buf = Vec::new();
     tokio::time::timeout(Duration::from_millis(1500), stream.read_to_end(&mut buf))
         .await
-        .map_err(|_| "read timeout".to_string())?
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| HttpError::ReadTimeout)?
+        .map_err(HttpError::Read)?;
     let text = String::from_utf8_lossy(&buf);
     let body = text
         .split("\r\n\r\n")

@@ -327,11 +327,10 @@ impl SettingsForm {
         self.fields
             .iter()
             .filter(|f| f.flag != LOG_SWITCH)
-            .filter_map(|f| match f.flag {
-                LOG_FILE if !logging => Some((f.flag, "off".to_string())),
-                LOG_FILE if f.value.is_empty() => Some((f.flag, "auto".to_string())),
-                "endpoint" if f.value.trim().is_empty() => None,
-                _ => Some((f.flag, f.value.clone())),
+            .map(|f| match f.flag {
+                LOG_FILE if !logging => (f.flag, "off".to_string()),
+                LOG_FILE if f.value.is_empty() => (f.flag, "auto".to_string()),
+                _ => (f.flag, f.value.clone()),
             })
             .collect()
     }
@@ -421,12 +420,16 @@ fn merge(
     flags: Vec<(&'static str, String)>,
     defaults: Vec<(&'static str, String)>,
 ) {
-    for ((flag, value), (_, default)) in flags.into_iter().zip(defaults) {
-        if value == default {
-            saved.remove(flag);
-        } else {
-            saved.insert(flag.to_string(), value);
+    let def_map: std::collections::HashMap<&str, &str> =
+        defaults.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    for (flag, value) in flags {
+        if let Some(&default) = def_map.get(flag) {
+            if value == default {
+                saved.remove(flag);
+                continue;
+            }
         }
+        saved.insert(flag.to_string(), value);
     }
 }
 
@@ -516,5 +519,30 @@ mod tests {
         assert_eq!(saved.get("theme").map(String::as_str), Some("neon"));
         assert!(!saved.contains_key("poll-ms"));
         assert_eq!(saved.get("model").map(String::as_str), Some("auto"));
+    }
+
+    #[test]
+    fn saving_and_clearing_endpoint_in_settings() {
+        let defaults = SettingsForm::new(&Args::parse_from([APP]));
+        let mut form = SettingsForm::new(&Args::parse_from([APP]));
+        let mut saved = Saved::new();
+
+        // Set an endpoint in settings
+        let ep_idx = form
+            .fields
+            .iter()
+            .position(|f| f.flag == "endpoint")
+            .unwrap();
+        form.fields[ep_idx].value = "http://localhost:7000/v1".into();
+        merge(&mut saved, form.flags(), defaults.flags());
+        assert_eq!(
+            saved.get("endpoint").map(String::as_str),
+            Some("http://localhost:7000/v1")
+        );
+
+        // Clearing endpoint in settings removes it from saved
+        form.fields[ep_idx].value = "".into();
+        merge(&mut saved, form.flags(), defaults.flags());
+        assert!(!saved.contains_key("endpoint"));
     }
 }
