@@ -29,7 +29,7 @@
 //! With the guard such a slot's samples are rejected and the poll loop
 //! decays it to idle instead of lying.
 
-use crate::observe::{http_get, ClosingRequest, LiveStats, SpecMetrics};
+use crate::observe::{http_get, ClosingRequest, HttpAuth, LiveStats, SpecMetrics};
 
 /// Engine-wide vLLM counters (summed across engines/replicas) as scraped
 /// from `/metrics`.
@@ -147,8 +147,9 @@ pub async fn poll_vllm(
     port: u16,
     expected_name: &str,
     other_models: &[(String, u16)],
+    auth: &HttpAuth,
 ) -> Option<VllmCounters> {
-    let body = http_get("127.0.0.1", port, "/metrics").await.ok()?;
+    let body = http_get("127.0.0.1", port, "/metrics", auth).await.ok()?;
     let c = parse_vllm_metrics(&body)?;
     if c.model_name
         .as_deref()

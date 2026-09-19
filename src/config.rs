@@ -104,6 +104,10 @@ pub struct Args {
     #[arg(long, default_value_t = 200)]
     pub poll_ms: u64,
 
+    /// File containing a bearer token for inference-server HTTP requests
+    #[arg(long, value_name = "PATH")]
+    pub api_key_file: Option<PathBuf>,
+
     /// Demo: number of synthetic models to run side by side
     #[arg(long, default_value_t = 2)]
     pub demo_models: usize,

@@ -1,7 +1,49 @@
 use serde_json::Value;
+use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+/// Optional bearer authentication shared by every inference-server probe.
+/// The token itself never enters clap state, saved settings, or diagnostics.
+#[derive(Clone, Debug, Default)]
+pub struct HttpAuth(Option<Arc<str>>);
+
+impl HttpAuth {
+    pub fn from_key_file(path: Option<&Path>) -> Result<Self, String> {
+        let Some(path) = path else {
+            return Ok(Self::default());
+        };
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read API key file {}: {e}", path.display()))?;
+        let token = raw.trim();
+        if token.is_empty() {
+            return Err(format!("API key file {} is empty", path.display()));
+        }
+        if token.contains(['\r', '\n']) {
+            return Err(format!(
+                "API key file {} contains a newline",
+                path.display()
+            ));
+        }
+        Ok(Self(Some(Arc::from(token))))
+    }
+
+    fn authorization_header(&self) -> String {
+        self.0
+            .as_deref()
+            .map(|token| format!("Authorization: Bearer {token}\r\n"))
+            .unwrap_or_default()
+    }
+}
+
+fn http_request(host: &str, port: u16, path: &str, auth: &HttpAuth) -> String {
+    format!(
+        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nAccept: application/json\r\n{}\r\n",
+        auth.authorization_header()
+    )
+}
 
 /// Live numbers from an inference HTTP API (llama.cpp /slots, etc.).
 #[derive(Debug, Clone, Default)]
@@ -98,8 +140,8 @@ pub struct SpecMetrics {
     pub tokens_predicted: u64,
 }
 
-pub async fn poll_metrics(port: u16) -> Option<SpecMetrics> {
-    let body = http_get("127.0.0.1", port, "/metrics").await.ok()?;
+pub async fn poll_metrics(port: u16, auth: &HttpAuth) -> Option<SpecMetrics> {
+    let body = http_get("127.0.0.1", port, "/metrics", auth).await.ok()?;
     parse_metrics(&body)
 }
 
@@ -165,8 +207,8 @@ impl ExpertStats {
     }
 }
 
-pub async fn poll_experts(port: u16) -> Option<ExpertStats> {
-    let body = http_get("127.0.0.1", port, "/experts").await.ok()?;
+pub async fn poll_experts(port: u16, auth: &HttpAuth) -> Option<ExpertStats> {
+    let body = http_get("127.0.0.1", port, "/experts", auth).await.ok()?;
     parse_experts(&body)
 }
 
@@ -216,8 +258,8 @@ pub fn parse_experts(body: &str) -> Option<ExpertStats> {
     })
 }
 
-pub async fn poll_llama(port: u16) -> Option<LiveStats> {
-    let body = http_get("127.0.0.1", port, "/slots").await.ok()?;
+pub async fn poll_llama(port: u16, auth: &HttpAuth) -> Option<LiveStats> {
+    let body = http_get("127.0.0.1", port, "/slots", auth).await.ok()?;
     parse_slots(&body)
 }
 
@@ -227,8 +269,8 @@ pub struct LlamaProps {
     pub model_alias: Option<String>,
 }
 
-pub async fn poll_llama_props(port: u16) -> Option<LlamaProps> {
-    let body = http_get("127.0.0.1", port, "/props").await.ok()?;
+pub async fn poll_llama_props(port: u16, auth: &HttpAuth) -> Option<LlamaProps> {
+    let body = http_get("127.0.0.1", port, "/props", auth).await.ok()?;
     parse_llama_props(&body)
 }
 
@@ -314,15 +356,18 @@ pub fn parse_slots(body: &str) -> Option<LiveStats> {
     })
 }
 
-pub async fn http_get(host: &str, port: u16, path: &str) -> Result<String, String> {
+pub async fn http_get(
+    host: &str,
+    port: u16,
+    path: &str,
+    auth: &HttpAuth,
+) -> Result<String, String> {
     let connect = TcpStream::connect((host, port));
     let mut stream = tokio::time::timeout(Duration::from_millis(400), connect)
         .await
         .map_err(|_| "connect timeout".to_string())?
         .map_err(|e| e.to_string())?;
-    let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\nAccept: application/json\r\n\r\n"
-    );
+    let req = http_request(host, port, path, auth);
     stream
         .write_all(req.as_bytes())
         .await
@@ -344,6 +389,17 @@ pub async fn http_get(host: &str, port: u16, path: &str) -> Result<String, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authenticated_request_uses_bearer_header() {
+        let auth = HttpAuth(Some(Arc::from("test-secret")));
+        let request = http_request("127.0.0.1", 11434, "/metrics", &auth);
+        assert!(request.contains("Authorization: Bearer test-secret\r\n"));
+        assert!(request.ends_with("\r\n\r\n"));
+
+        let request = http_request("127.0.0.1", 11434, "/metrics", &HttpAuth::default());
+        assert!(!request.contains("Authorization:"));
+    }
 
     #[test]
     fn parse_llama_slots_sample() {

@@ -28,7 +28,7 @@ use gguf::layer_device;
 use gpu::{GpuMonitor, GpuSample, GpuStats};
 use host::{HostMonitor, HostSample};
 use model_detect::DetectedModel;
-use observe::{ExpertStats, LiveStats, SpecMetrics};
+use observe::{ExpertStats, HttpAuth, LiveStats, SpecMetrics};
 use perf::PerfTracker;
 use pipeline::{ActivityAggregator, GeneratedText, TokenBuffer};
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -96,7 +96,7 @@ impl ModelSlot {
 
 /// The servers to watch: everything detected, minus anything the `--pid`
 /// filter excludes, capped at `--max-models`.
-async fn discover(args: &Args) -> Vec<DetectedModel> {
+async fn discover(args: &Args, auth: &HttpAuth) -> Vec<DetectedModel> {
     let filter = args.pid_filter();
     let mut found = model_detect::detect_models();
     if !filter.is_empty() {
@@ -110,7 +110,8 @@ async fn discover(args: &Args) -> Vec<DetectedModel> {
     for (index, model) in found.iter().enumerate() {
         if model.engine == "llama.cpp" && model.gguf.is_none() {
             if let Some(port) = model.port {
-                probes.spawn(async move { (index, observe::poll_llama_props(port).await) });
+                let auth = auth.clone();
+                probes.spawn(async move { (index, observe::poll_llama_props(port, &auth).await) });
             }
         }
     }
@@ -136,6 +137,7 @@ fn spawn_pollers(
     spec_tx: &mpsc::Sender<(u32, SpecMetrics)>,
     experts_tx: &mpsc::Sender<(u32, ExpertStats)>,
     poll: Duration,
+    auth: &HttpAuth,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     // Cross-wiring guard input: every other detected model's (name, port)
     // pair, so a vLLM slot can reject samples whose model_name label
@@ -151,12 +153,21 @@ fn spawn_pollers(
             let live_tx = live_tx.clone();
             let spec_tx = spec_tx.clone();
             let experts_tx = experts_tx.clone();
-            let others = others.clone();
+            let context = PollContext {
+                others: others.clone(),
+                auth: auth.clone(),
+            };
             tokio::spawn(async move {
-                poll_server(m, port, live_tx, spec_tx, experts_tx, others, poll).await
+                poll_server(m, port, live_tx, spec_tx, experts_tx, context, poll).await
             })
         })
         .collect()
+}
+
+#[derive(Clone)]
+struct PollContext {
+    others: Vec<(String, u16)>,
+    auth: HttpAuth,
 }
 
 async fn poll_server(
@@ -165,16 +176,17 @@ async fn poll_server(
     live_tx: mpsc::Sender<(u32, LiveStats)>,
     spec_tx: mpsc::Sender<(u32, SpecMetrics)>,
     experts_tx: mpsc::Sender<(u32, ExpertStats)>,
-    others: Vec<(String, u16)>,
+    context: PollContext,
     poll: Duration,
 ) {
+    let PollContext { others, auth } = context;
     let pid = model.key();
     if model.engine == "sglang" {
         // SGLang has no /slots. /v1/loads is always on; /server_info is
         // fetched once at attach. Each poll is a line in SGLang's access
         // log, so we never go faster than 400 ms.
         let mut adapter = sglang::SglangAdapter::new();
-        let mut info = sglang::poll_server_info(port).await;
+        let mut info = sglang::poll_server_info(port, &auth).await;
         let mut metrics_ok = true;
         let mut metrics_misses = 0u32;
         let mut misses = 0u32;
@@ -193,10 +205,10 @@ async fn poll_server(
             .unwrap_or(0);
         loop {
             if info.is_none() {
-                info = sglang::poll_server_info(port).await;
+                info = sglang::poll_server_info(port, &auth).await;
             }
             let metrics = if metrics_ok {
-                match sglang::poll_sglang_metrics(port).await {
+                match sglang::poll_sglang_metrics(port, &auth).await {
                     Some(m) => Some(m),
                     None => {
                         metrics_misses += 1;
@@ -209,7 +221,7 @@ async fn poll_server(
             } else {
                 None
             };
-            if let Some(c) = sglang::poll_loads(port).await {
+            if let Some(c) = sglang::poll_loads(port, &auth).await {
                 misses = 0;
                 let (mut stats, spec_pair) = adapter.observe(&c, metrics.as_ref());
                 stats.ctx_max = info
@@ -265,7 +277,7 @@ async fn poll_server(
         let mut adapter = vllm::VllmAdapter::new();
         let mut misses = 0u32;
         loop {
-            if let Some(c) = vllm::poll_vllm(port, &model.name, &others).await {
+            if let Some(c) = vllm::poll_vllm(port, &model.name, &others, &auth).await {
                 misses = 0;
                 let (mut stats, spec) = adapter.observe(&c);
                 stats.ctx_max = model.ctx_max.unwrap_or(0);
@@ -296,13 +308,13 @@ async fn poll_server(
     let mut experts_ok = true;
     let mut experts_misses = 0u32;
     loop {
-        if let Some(stats) = observe::poll_llama(port).await {
+        if let Some(stats) = observe::poll_llama(port, &auth).await {
             let _ = live_tx.try_send((pid, stats));
         }
         // Draft/MTP counters live on /metrics; skip once we know this server
         // was started without --metrics.
         if metrics_ok {
-            match observe::poll_metrics(port).await {
+            match observe::poll_metrics(port, &auth).await {
                 Some(m) => {
                     let _ = spec_tx.try_send((pid, m));
                 }
@@ -314,7 +326,7 @@ async fn poll_server(
         }
         // Real MoE routing needs the patched server (--expert-stats).
         if experts_ok {
-            match observe::poll_experts(port).await {
+            match observe::poll_experts(port, &auth).await {
                 Some(e) => {
                     let _ = experts_tx.try_send((pid, e));
                 }
@@ -368,6 +380,7 @@ fn status_for(slots: &[ModelSlot], rescanned: bool) -> String {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let launch = settings::launch();
     let mut args = launch.args.clone();
+    let auth = HttpAuth::from_key_file(args.api_key_file.as_deref())?;
     colors::init_color_mode(&args.color);
     let mut theme_name = args.theme.clone();
     let theme = colors::get_theme(&theme_name);
@@ -378,7 +391,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(ModelSlot::new)
             .collect()
     } else {
-        discover(&args)
+        discover(&args, &auth)
             .await
             .into_iter()
             .map(ModelSlot::new)
@@ -483,6 +496,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &spec_tx,
             &experts_tx,
             poll,
+            &auth,
         );
         tokio::spawn(async move {
             GpuMonitor::new().run(gpu_tx, gpu_filter).await;
@@ -635,7 +649,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 h.abort();
             }
             // Keep the counters of models that are still up.
-            let found = discover(&args).await;
+            let found = discover(&args, &auth).await;
             let mut kept: Vec<ModelSlot> = Vec::with_capacity(found.len());
             for m in found {
                 match slots.iter().position(|s| s.model.key() == m.key()) {
@@ -666,6 +680,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &spec_tx,
                 &experts_tx,
                 poll,
+                &auth,
             );
             status = status_for(&slots, true);
         }

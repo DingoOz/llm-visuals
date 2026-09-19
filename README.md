@@ -488,6 +488,7 @@ MTP.
 --pid A,B            only watch these PIDs (default: every model found)
 --gpu 0,1            nvidia-smi indices to show (default: all)
 --poll-ms 200        sampling interval for the server and nvidia-smi
+--api-key-file PATH  bearer token file for inference-server HTTP requests
 --color auto|truecolor|256
 --theme defrag|neon|fire|ocean|monochrome
 --max-layers N, --max-heads N     caps for the attention view
@@ -497,6 +498,12 @@ MTP.
 ```
 
 `llm-visuals --help` lists everything.
+
+When the inference server requires authentication, point `--api-key-file` at
+a file containing only the bearer token. The token is read at launch, is never
+stored in saved settings or the metrics database, and is attached to all HTTP
+probes made to the detected inference server. Keep the file readable only by
+the account running the dashboard.
 
 ### Settings screen and saved defaults
 
