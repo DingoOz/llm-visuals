@@ -3,9 +3,9 @@
 **A live terminal dashboard for the LLM running on your machine.**
 
 It finds the inference servers you already have up (llama.cpp `llama-server`,
-ollama, vLLM, SGLang, …), reads their counters and `nvidia-smi`, and turns them into a
-truecolor picture of what the model is doing right now: tokens per second, time
-to first token, GPU load and memory, context fill, speculative-decoding
+ollama, vLLM, SGLang, …), reads their counters and NVIDIA or AMD GPU
+telemetry, and turns them into a truecolor picture of what the model is doing
+right now: tokens per second, time to first token, GPU load and memory, context fill, speculative-decoding
 acceptance, which layers are busy on which GPU, and, with a small server patch,
 exactly which experts a mixture-of-experts model routed the last token through.
 
@@ -40,9 +40,9 @@ a Tesla P100 under llama.cpp, mid-request.</sub>
 
 ## Quick start
 
-Requirements: a Rust toolchain (1.75+), `nvidia-smi` on the path for GPU
-panels, and a locally listening `llama-server` for throughput panels. Nothing
-at all is needed for demo mode.
+Requirements: a Rust toolchain (1.75+), `nvidia-smi` for NVIDIA GPU panels or
+the Linux amdgpu driver for AMD GPU panels, and a locally listening
+`llama-server` for throughput panels. Nothing at all is needed for demo mode.
 
 On Windows 11, see [Windows](#windows) for setup; on a Mac, see
 [macOS](#macos). Prebuilt binaries for all three, on x86-64 and ARM64, are
@@ -317,8 +317,8 @@ verdict names RAM as the bound at 2.5 tok/s.</sub>
 |---|---|---|
 | DISK | MB/s read from every whole block device | `/proc/diskstats`, plus the server's own reads and major page faults from `/proc/<pid>/io` and `/proc/<pid>/stat` |
 | RAM | GB/s of weights the CPU streams out of system RAM, *estimate* | CPU-side bytes × active fraction × steps/s; CPU-side bytes = GGUF size minus what the cards hold |
-| PCIe | host→device MB/s per GPU, scaled to the link (gen × lanes) | `nvidia-smi dmon -s t` |
-| VRAM | memory-controller busy % per GPU, plus the estimated GB/s of weights streamed | `nvidia-smi utilization.memory`; bytes per step from the GGUF tensor table |
+| PCIe | host→device MB/s per GPU, scaled to the link (gen × lanes) | `nvidia-smi dmon -s t` (NVIDIA; unavailable for AMD) |
+| VRAM | memory-controller busy % per GPU, plus the estimated GB/s of weights streamed | NVIDIA `utilization.memory` or AMD `mem_busy_percent`; bytes per step from the GGUF tensor table |
 | PREFILL | prompt tokens/s | `/slots` |
 | DECODE | generated tokens/s | `/slots` |
 
@@ -406,7 +406,7 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | tok/J | decode tok/s ÷ summed GPU power draw |
 | cache hit | llama.cpp: `n_prompt_tokens_cache / n_prompt_tokens`. SGLang without `--enable-metrics` is unknown (shown as "—") |
 | request log | one record per `id_task`; averages from accumulated deltas |
-| util, VRAM, power, °C, clocks, fan, PCIe | `nvidia-smi --query-gpu=…` every poll |
+| util, VRAM, power, °C, clocks, fan, PCIe link | NVIDIA `nvidia-smi --query-gpu=…`, or Linux amdgpu sysfs and hwmon, every poll |
 | VRAM weights vs KV | llama.cpp: **estimate** from GGUF file size × `--tensor-split`. SGLang: `memory.weight_gb` and `memory.kv_cache_gb` from `/v1/loads` |
 | layers, heads, experts, MTP depth, engram, quant | GGUF header, or HuggingFace `config.json` (`num_hidden_layers`, `num_attention_heads`, `num_experts` / `num_local_experts`, `num_experts_per_tok`) for safetensors dirs |
 | layer → GPU | `--tensor-split` proportions |
@@ -416,7 +416,7 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | disk MB/s, faults/s | deltas of sectors read in `/proc/diskstats` (whole disks), `read_bytes` in `/proc/<pid>/io`, `majflt` in `/proc/<pid>/stat` |
 | resident weights | `RssFile` in `/proc/<pid>/status` |
 | PCIe MB/s | `nvidia-smi dmon -s t -c 1` rx/tx per GPU; samples above the link cap are dropped (dmon emits the odd garbage row) |
-| VRAM busy % | `utilization.memory` from `nvidia-smi` (memory-controller busy time) |
+| VRAM busy % | NVIDIA `utilization.memory` or AMD `mem_busy_percent` (memory-controller busy time) |
 | bytes per step, RAM / VRAM GB/s | **estimate**: GGUF tensor table (sizes from offset gaps, summed over every shard of a split file), expert tensors × used/total, embedding and engram tables excluded, split CPU vs GPU by what the cards hold, × steps/s |
 
 Per-request `timings` only appear inside completion responses, which the
@@ -486,8 +486,8 @@ MTP.
                      an HF id streams real attention via the Python bridge
 --max-models N       most models to watch at once (default 8)
 --pid A,B            only watch these PIDs (default: every model found)
---gpu 0,1            nvidia-smi indices to show (default: all)
---poll-ms 200        sampling interval for the server and nvidia-smi
+--gpu 0,1            GPU indices to show (default: all)
+--poll-ms 200        sampling interval for the server and GPU telemetry
 --color auto|truecolor|256
 --theme defrag|neon|fire|ocean|monochrome
 --max-layers N, --max-heads N     caps for the attention view
@@ -555,6 +555,11 @@ failing: the NVIDIA userspace was upgraded under a running kernel module.
 Reload the modules or reboot. The panel shows whatever `nvidia-smi` prints so
 the cause is visible.
 
+**AMD GPU panel is unavailable.** AMD telemetry requires Linux with the
+`amdgpu` driver and readable DRM sysfs/hwmon files under `/sys/class/drm`.
+No ROCm installation or privileged access is required. On other operating
+systems the dashboard continues to use the existing NVIDIA collector.
+
 **MTP panel says "start llama-server with --metrics".** Exactly that; see
 above.
 
@@ -567,9 +572,10 @@ nothing to route.
 **Colours look flat.** Your terminal did not advertise truecolor. Run with
 `--color truecolor`, or export `COLORTERM=truecolor`.
 
-**PCIe strip says "nvidia-smi dmon unavailable".** The driver does not
-report PCIe counters for this card, or `dmon` failed three times in a row;
-the other stages still work. Press `r` to retry.
+**PCIe strip says "PCIe throughput unavailable".** Live PCIe throughput is
+currently NVIDIA-only. The driver may not report it for a particular NVIDIA
+card, and AMD cards still show their link generation and width but not live
+PCIe traffic. The other stages continue to work. Press `r` to retry.
 
 **RAM strip says "no tensor table".** The model path on the server's command
 line could not be opened as a GGUF (ollama blobs, remote paths, or a
@@ -606,8 +612,8 @@ this is what you are hitting. Running the server with `-np 1` avoids it.
 
 `docs/ARCHITECTURE.md` has the module map and data contracts. In short:
 one poller per model reads its `/slots`, `/metrics` and `/experts` while
-shared collectors read `nvidia-smi` and the host's `/proc` counters every
-200 ms into channels; samples are tagged with the model's PID, and the frame
+shared collectors read NVIDIA or AMD GPU telemetry and the host's `/proc`
+counters every 200 ms into channels; samples are tagged with the model's PID, and the frame
 loop routes each into that model's `PerfTracker` (sliding-window rates,
 request lifecycle, peak hold) and `FadeState` (attack/release smoothing,
 expert heat), then renders with ratatui at about 30 fps. Tests cover every
@@ -622,7 +628,7 @@ src/
 ├── host.rs          /proc disk, faults, RSS; nvidia-smi dmon PCIe
 ├── fade.rs          smoothing and expert heat
 ├── observe.rs       /slots, /metrics, /experts parsers
-├── gpu.rs           nvidia-smi collector, demo GPUs
+├── gpu.rs           NVIDIA/AMD collectors, demo GPUs
 ├── model_detect.rs  finds the servers, parses their command lines
 ├── gguf.rs          GGUF header reader, layer → GPU mapping
 ├── demo.rs          synthetic servers for --demo

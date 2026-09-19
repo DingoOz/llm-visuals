@@ -350,7 +350,7 @@ fn status_for(slots: &[ModelSlot], rescanned: bool) -> String {
     let prefix = if rescanned { "re-scanned: " } else { "" };
     match slots.len() {
         0 => format!(
-            "{prefix}no running LLM found (nvidia-smi / llama-server / ollama) — press r to rescan"
+            "{prefix}no running LLM found (llama-server / ollama / vLLM / SGLang) — press r to rescan"
         ),
         1 => format!("{prefix}attached to {}", slots[0].model),
         n => format!(
@@ -488,7 +488,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             GpuMonitor::new().run(gpu_tx, gpu_filter).await;
         });
         tokio::spawn(async move {
-            // Two nvidia-smi calls per poll would be heavy; host counters at half rate is plenty.
+            // Host counters at half the GPU polling rate are plenty.
             HostMonitor::new(poll.max(Duration::from_millis(400)))
                 .run(host_tx, pids_rx)
                 .await;
@@ -532,11 +532,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         status = note;
     }
     let mut settings_form: Option<settings::SettingsForm> = None;
+    let mut last_visual_activity = Instant::now();
 
     loop {
         tokio::task::yield_now().await;
         let mut rescan = false;
+        let mut ui_changed = false;
         if event::poll(Duration::from_millis(0))? {
+            ui_changed = true;
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press && settings_form.is_some() {
                     let form = settings_form.as_mut().unwrap();
@@ -631,6 +634,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if rescan {
+            ui_changed = true;
             for h in pollers.drain(..) {
                 h.abort();
             }
@@ -673,6 +677,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
         let mut gpu_updated = false;
         while let Ok(sample) = gpu_rx.try_recv() {
+            ui_changed = true;
             match sample {
                 Ok(stats) => {
                     latest_gpu = stats;
@@ -692,6 +697,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             slot.routing = None;
         }
         while let Ok((pid, e)) = experts_rx.try_recv() {
+            ui_changed = true;
             let Some(slot) = slot_of.get(&pid).and_then(|i| slots.get_mut(*i)) else {
                 continue;
             };
@@ -709,11 +715,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             slot.experts = Some(e);
         }
         while let Ok((pid, m)) = spec_rx.try_recv() {
+            ui_changed = true;
             if let Some(slot) = slot_of.get(&pid).and_then(|i| slots.get_mut(*i)) {
                 slot.perf.observe_spec(&m, now);
             }
         }
         while let Ok(batch) = host_rx.try_recv() {
+            ui_changed = true;
             for (pid, h) in batch {
                 if let Some(slot) = slot_of.get(&pid).and_then(|i| slots.get_mut(*i)) {
                     slot.perf.observe_host(&h, now);
@@ -721,6 +729,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         while let Ok((pid, s)) = live_rx.try_recv() {
+            ui_changed = true;
             if let Some(slot) = slot_of.get(&pid).and_then(|i| slots.get_mut(*i)) {
                 if s.ctx_max > 0 {
                     slot.ctx_max = s.ctx_max;
@@ -731,6 +740,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         while let Ok(event) = events_rx.try_recv() {
+            ui_changed = true;
             match event {
                 llm::LlmEvent::ModelInfo {
                     num_layers: nl,
@@ -771,6 +781,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     running = false;
                 }
             }
+        }
+
+        // Preserve the 30 FPS animation cadence while a request is active and
+        // while its heat/fade effects settle. Once fully idle, fresh telemetry
+        // or input drives rendering at the 200 ms sample cadence. The loop
+        // still wakes at 30 Hz, so interaction and new requests stay prompt.
+        if slots.iter().any(|slot| slot.live.processing) {
+            last_visual_activity = now;
+        }
+        let animate = now.duration_since(last_visual_activity) < Duration::from_secs(3);
+        if !animate && !ui_changed {
+            if !running && !done {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(33)).await;
+            continue;
         }
 
         let frame_dt = (now - last_frame).as_secs_f32().clamp(0.0, 1.0);

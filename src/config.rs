@@ -100,7 +100,7 @@ pub struct Args {
     #[arg(long, default_value_t = 4)]
     pub moe_experts: usize,
 
-    /// Poll interval for the inference server and nvidia-smi, in ms
+    /// Poll interval for the inference server and GPU telemetry, in ms
     #[arg(long, default_value_t = 200)]
     pub poll_ms: u64,
 

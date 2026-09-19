@@ -435,7 +435,10 @@ fn is_ipv4(s: &str) -> bool {
 /// Every server found is returned, best first; the caller decides how many
 /// to monitor.
 pub fn detect_models() -> Vec<DetectedModel> {
-    let gpu_procs = nvidia_compute_apps();
+    let mut gpu_procs = nvidia_compute_apps();
+    if gpu_procs.is_empty() {
+        gpu_procs = amd_compute_apps();
+    }
     let mut by_pid: std::collections::HashMap<u32, DetectedModel> =
         std::collections::HashMap::new();
     // SGLang workers hold the GPU memory; fold it onto the launcher PID.
@@ -1094,6 +1097,120 @@ fn nvidia_compute_apps() -> Vec<ComputeApp> {
     apps
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct AmdClient {
+    pdev: String,
+    client_id: String,
+    mem_used_kib: u64,
+}
+
+fn parse_amd_fdinfo(text: &str) -> Option<AmdClient> {
+    let value = |key: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(key))
+            .map(str::trim)
+    };
+    if value("drm-driver:")? != "amdgpu" {
+        return None;
+    }
+    let mem_used_kib = value("drm-memory-vram:")?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    Some(AmdClient {
+        pdev: value("drm-pdev:")?.to_string(),
+        client_id: value("drm-client-id:")?.to_string(),
+        mem_used_kib,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn amd_compute_apps() -> Vec<ComputeApp> {
+    use std::collections::HashMap;
+
+    let mut cards: Vec<(String, PathBuf)> = std::fs::read_dir("/sys/class/drm")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let suffix = name.to_str()?.strip_prefix("card")?.to_string();
+            if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let device = entry.path().join("device");
+            let vendor = std::fs::read_to_string(device.join("vendor")).ok()?;
+            (vendor.trim() == "0x1002").then_some((suffix, device))
+        })
+        .collect();
+    cards.sort_by_key(|(card, _)| card.parse::<u32>().unwrap_or(u32::MAX));
+    let pdev_to_index: HashMap<String, u32> = cards
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, (_, device))| {
+            let uevent = std::fs::read_to_string(device.join("uevent")).ok()?;
+            let pdev = uevent
+                .lines()
+                .find_map(|line| line.strip_prefix("PCI_SLOT_NAME="))?;
+            Some((pdev.to_string(), index as u32))
+        })
+        .collect();
+    if pdev_to_index.is_empty() {
+        return Vec::new();
+    }
+
+    let mut clients: HashMap<(u32, u32, String), u64> = HashMap::new();
+    let Ok(proc_dir) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    for process in proc_dir.flatten() {
+        let Ok(pid) = process.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(fdinfo) = std::fs::read_dir(process.path().join("fdinfo")) else {
+            continue;
+        };
+        for fd in fdinfo.flatten() {
+            let Ok(text) = std::fs::read_to_string(fd.path()) else {
+                continue;
+            };
+            let Some(client) = parse_amd_fdinfo(&text) else {
+                continue;
+            };
+            let Some(&gpu_index) = pdev_to_index.get(&client.pdev) else {
+                continue;
+            };
+            clients
+                .entry((pid, gpu_index, client.client_id))
+                .and_modify(|mem| *mem = (*mem).max(client.mem_used_kib))
+                .or_insert(client.mem_used_kib);
+        }
+    }
+
+    let mut per_process: HashMap<(u32, u32), u64> = HashMap::new();
+    for ((pid, gpu_index, _), mem_kib) in clients {
+        *per_process.entry((pid, gpu_index)).or_default() += mem_kib;
+    }
+    per_process
+        .into_iter()
+        .map(|((pid, gpu_index), mem_kib)| ComputeApp {
+            pid,
+            process_name: std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                .unwrap_or_default()
+                .trim()
+                .to_string(),
+            gpu_index,
+            mem_used_mb: mem_kib / 1024,
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn amd_compute_apps() -> Vec<ComputeApp> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1112,6 +1229,23 @@ mod tests {
             .path
             .unwrap()
             .ends_with("Qwen3.6-35B-A3B-MTP-UD-Q3_K_XL.gguf"));
+    }
+
+    #[test]
+    fn parses_amd_drm_client_memory() {
+        let text = "drm-driver:\tamdgpu\n\
+                    drm-client-id:\t39\n\
+                    drm-pdev:\t0000:43:00.0\n\
+                    drm-memory-vram:\t15203992 KiB\n";
+        assert_eq!(
+            parse_amd_fdinfo(text),
+            Some(AmdClient {
+                pdev: "0000:43:00.0".into(),
+                client_id: "39".into(),
+                mem_used_kib: 15_203_992,
+            })
+        );
+        assert!(parse_amd_fdinfo("drm-driver:\ti915\n").is_none());
     }
 
     #[test]

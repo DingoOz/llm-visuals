@@ -1,6 +1,6 @@
 //! Host-side counters behind the memory pipeline: disk reads (system-wide
 //! and by the inference process), page faults, resident weights in RAM, and
-//! PCIe traffic per GPU from `nvidia-smi dmon`. Everything is a cumulative
+//! PCIe traffic per NVIDIA GPU from `nvidia-smi dmon`. Everything is a cumulative
 //! counter or an instantaneous reading; `perf::BandwidthStats` turns them
 //! into rates.
 // The /proc parsers are Linux-only at runtime but stay tested everywhere.
@@ -41,8 +41,8 @@ impl HostMonitor {
     /// Poll until the receiver goes away. `pids_rx` follows the detected
     /// servers so a rescan retargets the per-process counters. One sample is
     /// produced per PID: the system-wide fields (disk, memory, PCIe) are read
-    /// once and shared, so watching six models costs no more `nvidia-smi`
-    /// calls than watching one.
+    /// once and shared, so watching six models costs no more collector calls
+    /// than watching one.
     pub async fn run(
         self,
         tx: mpsc::Sender<Vec<(u32, HostSample)>>,
