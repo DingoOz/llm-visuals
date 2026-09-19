@@ -103,6 +103,11 @@ async fn discover(args: &Args) -> Vec<DetectedModel> {
         found.retain(|m| filter.contains(&m.pid));
     }
     found.truncate(args.max_models.max(1));
+    for model in &found {
+        if let Some(port) = model.port {
+            observe::set_api_key(port, model_detect::api_key_from(&model.cmdline));
+        }
+    }
     // `llama-server -hf owner/repo:quant` does not put a local GGUF path on
     // its command line. Current llama.cpp exposes the resolved path via
     // `/props`; use it so layer counts and tensor layout remain available.

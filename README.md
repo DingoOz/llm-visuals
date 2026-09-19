@@ -408,10 +408,11 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | request log | one record per `id_task`; averages from accumulated deltas |
 | util, VRAM, power, °C, clocks, fan, PCIe | `nvidia-smi --query-gpu=…` every poll |
 | VRAM weights vs KV | llama.cpp: **estimate** from GGUF file size × `--tensor-split`. SGLang: `memory.weight_gb` and `memory.kv_cache_gb` from `/v1/loads` |
-| layers, heads, experts, MTP depth, engram, quant | GGUF header, or HuggingFace `config.json` (`num_hidden_layers`, `num_attention_heads`, `num_experts` / `num_local_experts`, `num_experts_per_tok`) for safetensors dirs |
+| layers, heads, experts, MTP layers, engram, quant | GGUF header, or HuggingFace `config.json` (`num_hidden_layers`, `num_attention_heads`, `num_experts` / `num_local_experts`, `num_experts_per_tok`) for safetensors dirs |
 | layer → GPU | `--tensor-split` proportions |
 | layer activity | utilisation of the GPU the layer lives on, smoothed |
 | expert blocks | real top-k routing from `GET /experts` (patched server), else a deterministic stand-in keyed by layer and token step |
+| MTP / speculative depth (tokens drafted per step) | llama.cpp: `--spec-draft-n-max` (or `--draft-max`) on the command line, else the model's MTP layer count. vLLM: number of per-position acceptance counters. SGLang: `speculative_num_draft_tokens` |
 | MTP acceptance, tok/step, steps/s | deltas of `spec_decode_num_draft_tokens_total`, `…accepted_tokens_total`, `…drafts_total` from `GET /metrics`, 1.5 s window |
 | disk MB/s, faults/s | deltas of sectors read in `/proc/diskstats` (whole disks), `read_bytes` in `/proc/<pid>/io`, `majflt` in `/proc/<pid>/stat` |
 | resident weights | `RssFile` in `/proc/<pid>/status` |
@@ -450,6 +451,17 @@ For a systemd unit, a drop-in with two `Environment=` lines is enough; see
 [`patches/README.md`](patches/README.md). The dashboard probes both endpoints
 at start and after `r`, and stops asking after three failures, so unpatched
 servers cost nothing.
+
+### API keys and LM Studio
+
+A llama-server started with `--api-key` or `--api-key-file` answers `/slots`,
+`/metrics` and `/props` with 401. The dashboard reads the key from that
+server's command line and sends it as a bearer token, so no setup is needed.
+
+LM Studio starts every model it loads as such a llama-server, with its own
+port and key, so press `r` after it loads a different model. It has no switch
+for `--metrics`, but the llama-server it starts inherits its environment:
+launch LM Studio with `LLAMA_ARG_ENDPOINT_METRICS=1` set to get the MTP panel.
 
 ### SGLang
 
