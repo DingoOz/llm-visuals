@@ -36,18 +36,40 @@ impl std::fmt::Display for DetectedModel {
                 .collect::<Vec<_>>()
                 .join(",")
         };
-        write!(
-            f,
-            "{} (PID {} · {} · GPU {} · {} MB)",
-            self.name, self.pid, self.engine, gpus, self.mem_used_mb
-        )
+        if self.pid == 0 {
+            if let Some(port) = self.port {
+                write!(
+                    f,
+                    "{} (:{port} · {} · GPU {gpus} · {} MB)",
+                    self.name, self.engine, self.mem_used_mb
+                )
+            } else {
+                write!(
+                    f,
+                    "{} ({} · GPU {gpus} · {} MB)",
+                    self.name, self.engine, self.mem_used_mb
+                )
+            }
+        } else {
+            write!(
+                f,
+                "{} (PID {} · {} · GPU {gpus} · {} MB)",
+                self.name, self.pid, self.engine, self.mem_used_mb
+            )
+        }
     }
 }
 
 impl DetectedModel {
     /// Stable identity for routing poller samples back to a slot.
     pub fn key(&self) -> u32 {
-        self.pid
+        if self.pid != 0 {
+            self.pid
+        } else if let Some(port) = self.port {
+            (port as u32) | 0x8000_0000
+        } else {
+            0
+        }
     }
 
     /// Short label for compact multi-model panels: the alias or file stem,
@@ -266,6 +288,7 @@ fn is_sglang_worker(process_name: &str) -> bool {
     base.starts_with("sglang::")
 }
 
+#[allow(dead_code)]
 fn ppid_from_stat(txt: &str) -> Option<u32> {
     let rest = txt.rsplit_once(')')?.1;
     rest.split_whitespace().nth(1)?.parse().ok()
@@ -556,7 +579,9 @@ pub fn detect_models() -> Vec<DetectedModel> {
             // /proc/<pid>/mountinfo so the size (and the GGUF metadata
             // below) reads the host-side file.
             let path = if !path.exists() {
-                resolve_container_path(m.pid, &path).unwrap_or(path)
+                resolve_container_path(m.pid, &path)
+                    .or_else(|| resolve_local_model_dir(&path, &m.name))
+                    .unwrap_or(path)
             } else {
                 path
             };
@@ -743,8 +768,6 @@ fn engine_from(process_name: &str, cmdline: &str) -> String {
         "sglang".into()
     } else if blob.contains("exllama") {
         "exllamav2".into()
-    } else if blob.contains("ollama") {
-        "ollama".into()
     } else {
         "llm".into()
     }
@@ -1094,6 +1117,300 @@ fn nvidia_compute_apps() -> Vec<ComputeApp> {
     apps
 }
 
+/// Parse an endpoint string into (host, port, path_prefix).
+/// Handles "http://localhost:7000/v1", "localhost:7000", "7000", IPv6 "[::1]:8000", etc.
+/// Rejects HTTPS since plain HTTP is required (no TLS support).
+pub fn parse_endpoint(url: &str) -> Result<(String, u16, String), String> {
+    let raw = url.trim();
+    if raw.is_empty() {
+        return Err("empty endpoint".to_string());
+    }
+    if raw.starts_with("https://") {
+        return Err("HTTPS is not supported (plain HTTP only)".to_string());
+    }
+    let without_scheme = raw.strip_prefix("http://").unwrap_or(raw);
+    let (host_port, path) = match without_scheme.split_once('/') {
+        Some((hp, p)) => (hp, format!("/{}", p.trim_matches('/'))),
+        None => (without_scheme, String::new()),
+    };
+
+    let (host, port) = if let Some(rest) = host_port.strip_prefix('[') {
+        let (ip, rest) = rest
+            .split_once(']')
+            .ok_or_else(|| "unclosed IPv6 bracket in endpoint".to_string())?;
+        let port = if let Some(p) = rest.strip_prefix(':') {
+            p.parse::<u16>()
+                .map_err(|_| format!("invalid port '{p}'"))?
+        } else {
+            8000
+        };
+        (ip.to_string(), port)
+    } else {
+        match host_port.split_once(':') {
+            Some((h, p)) => {
+                let port = p
+                    .parse::<u16>()
+                    .map_err(|_| format!("invalid port '{p}'"))?;
+                let host = if h.is_empty() { "127.0.0.1" } else { h };
+                (host.to_string(), port)
+            }
+            None => {
+                if let Ok(port) = host_port.parse::<u16>() {
+                    ("127.0.0.1".to_string(), port)
+                } else if host_port.is_empty() {
+                    ("127.0.0.1".to_string(), 8000)
+                } else if host_port.chars().all(|c| c.is_ascii_digit()) {
+                    return Err(format!("port out of range '{host_port}'"));
+                } else {
+                    (host_port.to_string(), 8000)
+                }
+            }
+        }
+    };
+    let host = if host == "localhost" {
+        "127.0.0.1".to_string()
+    } else {
+        host
+    };
+    Ok((host, port, path))
+}
+
+/// Parse the first model from an OpenAI-compatible /v1/models response.
+pub fn parse_v1_models_json(body: &str) -> Option<(String, Option<String>, Option<usize>, String)> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let data = v.get("data")?.as_array()?;
+    let first = data.first()?;
+    let id = first.get("id")?.as_str()?.to_string();
+    let root = first.get("root").and_then(|r| r.as_str()).map(String::from);
+    let max_len = first
+        .get("max_model_len")
+        .and_then(|m| m.as_u64())
+        .map(|n| n as usize);
+    let owned_by = first
+        .get("owned_by")
+        .and_then(|o| o.as_str())
+        .unwrap_or("vllm")
+        .to_string();
+    Some((id, root, max_len, owned_by))
+}
+
+/// Look for local weights matching target_path or model_name on the host filesystem.
+pub fn resolve_local_model_dir(target_path: &Path, model_name: &str) -> Option<PathBuf> {
+    if target_path.is_dir() && target_path.join("config.json").exists() {
+        return Some(target_path.to_path_buf());
+    }
+    let stem = target_path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let mut candidates = Vec::new();
+    if let Some(home) = crate::settings::home() {
+        candidates.push(home.join("Downloads").join("models"));
+        candidates.push(home.join("downloads").join("models"));
+        candidates.push(home.join("Downloads"));
+        candidates.push(home.join("downloads"));
+        candidates.push(home.join("models"));
+        candidates.push(home.join(".cache").join("huggingface").join("hub"));
+    }
+    candidates.push(PathBuf::from("./models"));
+    candidates.push(PathBuf::from("."));
+
+    let names_to_try: Vec<&str> = [stem.as_str(), model_name]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    for base in &candidates {
+        for name in &names_to_try {
+            let candidate = base.join(name);
+            if candidate.is_dir()
+                && (candidate.join("config.json").exists()
+                    || candidate.join("tokenizer.json").exists())
+            {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Probe an HTTP inference server endpoint (OpenAI /v1, vLLM /metrics, llama.cpp /props, etc.).
+pub async fn probe_endpoint(host: &str, port: u16, path_prefix: &str) -> Option<DetectedModel> {
+    use crate::observe::http_get;
+
+    let models_path = if path_prefix.ends_with("/v1") {
+        format!("{path_prefix}/models")
+    } else if path_prefix.is_empty() || path_prefix == "/" {
+        "/v1/models".to_string()
+    } else {
+        format!("{path_prefix}/v1/models")
+    };
+
+    let mut model_name: Option<String> = None;
+    let mut model_path: Option<PathBuf> = None;
+    let mut ctx_max: Option<usize> = None;
+    let mut engine = String::from("vllm");
+
+    let first_res = http_get(host, port, &models_path).await;
+    if matches!(
+        first_res,
+        Err(crate::observe::HttpError::ConnectTimeout | crate::observe::HttpError::Connect(_))
+    ) {
+        return None;
+    }
+    if let Ok(body) = first_res {
+        if let Some((id, root, max_len, owned_by)) = parse_v1_models_json(&body) {
+            model_name = Some(id);
+            if let Some(r) = root {
+                model_path = Some(PathBuf::from(r));
+            }
+            ctx_max = max_len;
+            if !owned_by.is_empty() {
+                engine = if owned_by == "library" || port == 11434 {
+                    "ollama".to_string()
+                } else {
+                    owned_by
+                };
+            }
+        }
+    }
+
+    if engine == "ollama" || port == 11434 {
+        engine = "ollama".to_string();
+        if model_name.is_none() {
+            if let Ok(body) = http_get(host, port, "/api/tags").await {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                    if let Some(first) = v
+                        .get("models")
+                        .and_then(|m| m.as_array())
+                        .and_then(|a| a.first())
+                    {
+                        if let Some(n) = first.get("name").and_then(|s| s.as_str()) {
+                            model_name = Some(n.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut saw_vllm_metrics = false;
+    if let Ok(body) = http_get(host, port, "/metrics").await {
+        if body.contains("vllm:") {
+            saw_vllm_metrics = true;
+            engine = "vllm".to_string();
+            if let Some(c) = crate::vllm::parse_vllm_metrics(&body) {
+                if model_name.is_none() {
+                    model_name = c.model_name;
+                }
+            }
+        } else if body.contains("llamacpp:") {
+            engine = "llama.cpp".to_string();
+        } else if body.contains("sglang:") {
+            engine = "sglang".to_string();
+        }
+    }
+
+    if model_name.is_none() && !saw_vllm_metrics {
+        let mut got_props = false;
+        if let Ok(props) = http_get(host, port, "/props").await {
+            if let Some(p) = crate::observe::parse_llama_props(&props) {
+                engine = "llama.cpp".to_string();
+                model_name = p.model_alias.or(Some(p.model_path.clone()));
+                model_path = Some(PathBuf::from(p.model_path));
+                got_props = true;
+            }
+        }
+        if !got_props {
+            for path in ["/server_info", "/get_server_info"] {
+                if let Ok(info) = http_get(host, port, path).await {
+                    if let Some(i) = crate::sglang::parse_server_info(&info) {
+                        engine = "sglang".to_string();
+                        ctx_max = i.context_length;
+                        if let Some(mp) = i.model_path {
+                            model_name = Some(mp.clone());
+                            model_path = Some(PathBuf::from(mp));
+                        } else if model_name.is_none() {
+                            model_name = Some(format!("sglang-{port}"));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let final_name = match model_name {
+        Some(n) => n,
+        None if saw_vllm_metrics => format!("vllm-{port}"),
+        None => return None,
+    };
+
+    let mut resolved_path = model_path.clone();
+    let mut gguf_info = None;
+    if let Some(p) = &model_path {
+        if let Some(local_dir) = resolve_local_model_dir(p, &final_name) {
+            if let Some(info) = hf_config_info(&local_dir) {
+                if ctx_max.is_none() && info.ctx_train > 0 {
+                    ctx_max = Some(info.ctx_train);
+                }
+                gguf_info = Some(info);
+            }
+            resolved_path = Some(local_dir);
+        }
+    }
+
+    let gpu_indices = Vec::new();
+
+    Some(DetectedModel {
+        name: final_name.clone(),
+        path: resolved_path,
+        pid: 0,
+        process_name: format!("{engine} (:{port})"),
+        engine,
+        gpu_indices,
+        mem_used_mb: 0,
+        port: Some(port),
+        ctx_max,
+        spec_type: None,
+        n_gpu_layers: None,
+        tensor_split: Vec::new(),
+        cmdline: format!("{final_name} --port {port}"),
+        gguf: gguf_info,
+        tensors: None,
+    })
+}
+
+/// Probe candidate local ports for running inference servers.
+pub async fn probe_local_endpoints() -> Vec<DetectedModel> {
+    const CANDIDATES: &[u16] = &[7000, 8000, 8080, 11434, 30000, 5000, 8001, 8081, 7001];
+    let mut tasks = tokio::task::JoinSet::new();
+    for &port in CANDIDATES {
+        tasks.spawn(async move {
+            let connect = tokio::net::TcpStream::connect(("127.0.0.1", port));
+            if tokio::time::timeout(std::time::Duration::from_millis(60), connect)
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .is_some()
+            {
+                probe_endpoint("127.0.0.1", port, "").await
+            } else {
+                None
+            }
+        });
+    }
+
+    let mut models = Vec::new();
+    while let Some(res) = tasks.join_next().await {
+        if let Ok(Some(model)) = res {
+            models.push(model);
+        }
+    }
+    models
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1343,5 +1660,71 @@ mod tests {
         // must not leak in.
         assert!(!ips.iter().any(|i| i.contains('/')));
         assert!(!ips.iter().any(|i| i == "255.255.255.255"));
+    }
+
+    #[test]
+    fn parse_endpoint_urls() {
+        assert_eq!(
+            parse_endpoint("http://localhost:7000/v1"),
+            Ok(("127.0.0.1".into(), 7000, "/v1".into()))
+        );
+        assert_eq!(
+            parse_endpoint("http://localhost:7000"),
+            Ok(("127.0.0.1".into(), 7000, "".into()))
+        );
+        assert_eq!(
+            parse_endpoint("localhost:7000/v1/"),
+            Ok(("127.0.0.1".into(), 7000, "/v1".into()))
+        );
+        assert_eq!(
+            parse_endpoint("7000"),
+            Ok(("127.0.0.1".into(), 7000, "".into()))
+        );
+        assert_eq!(
+            parse_endpoint("http://192.168.1.100:8000"),
+            Ok(("192.168.1.100".into(), 8000, "".into()))
+        );
+        // IPv6 literal
+        assert_eq!(
+            parse_endpoint("http://[::1]:8000/v1"),
+            Ok(("::1".into(), 8000, "/v1".into()))
+        );
+        // HTTPS rejection
+        assert!(parse_endpoint("https://localhost:7000").is_err());
+        // Invalid port
+        assert!(parse_endpoint("localhost:99999").is_err());
+    }
+
+    #[test]
+    fn parse_v1_models_response() {
+        let json = r#"{"object":"list","data":[{"id":"LFM-2.6B-Longevity","object":"model","created":1789774371,"owned_by":"vllm","root":"/models/LFM-2.6B-Longevity-NVFP4","max_model_len":32768}]}"#;
+        let (id, root, max_len, owned_by) = parse_v1_models_json(json).expect("models json");
+        assert_eq!(id, "LFM-2.6B-Longevity");
+        assert_eq!(root.as_deref(), Some("/models/LFM-2.6B-Longevity-NVFP4"));
+        assert_eq!(max_len, Some(32768));
+        assert_eq!(owned_by, "vllm");
+    }
+
+    #[test]
+    fn detected_model_pid_zero_sentinel_and_key() {
+        let m = DetectedModel {
+            name: "test-model".into(),
+            path: None,
+            pid: 0,
+            process_name: "vllm (:7000)".into(),
+            engine: "vllm".into(),
+            gpu_indices: vec![],
+            mem_used_mb: 0,
+            port: Some(7000),
+            ctx_max: Some(4096),
+            spec_type: None,
+            n_gpu_layers: None,
+            tensor_split: vec![],
+            cmdline: "test --port 7000".into(),
+            gguf: None,
+            tensors: None,
+        };
+        assert_eq!(m.key(), (7000_u32) | 0x8000_0000);
+        assert_eq!(format!("{m}"), "test-model (:7000 · vllm · GPU ? · 0 MB)");
     }
 }
