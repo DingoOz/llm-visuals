@@ -1080,8 +1080,9 @@ impl Renderer {
                         Style::default().fg(pal::c(pal::TEAL)),
                     ));
                 }
-                if let Some(n) =
-                    cmd_arg(&m.cmdline, "--draft-max").or_else(|| cmd_arg(&m.cmdline, "--draft"))
+                if let Some(n) = cmd_arg(&m.cmdline, "--spec-draft-n-max")
+                    .or_else(|| cmd_arg(&m.cmdline, "--draft-max"))
+                    .or_else(|| cmd_arg(&m.cmdline, "--draft"))
                 {
                     facts.push(Span::styled(
                         format!("  ·  draft max {n}"),
