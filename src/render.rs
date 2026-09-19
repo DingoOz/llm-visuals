@@ -48,7 +48,7 @@ pub struct Dashboard<'a> {
     pub focus: usize,
     pub detected: Option<&'a DetectedModel>,
     pub gpus: &'a [GpuStats],
-    /// Why the last nvidia-smi poll produced nothing, if it failed.
+    /// Why the last GPU telemetry poll produced nothing, if it failed.
     pub gpu_error: Option<&'a str>,
     pub fade: &'a FadeState,
     pub perf: &'a PerfTracker,
@@ -603,7 +603,7 @@ impl Renderer {
                                 "— {}",
                                 truncate(e, inner.width.saturating_sub(20) as usize)
                             ),
-                            None => "— nvidia-smi returned nothing. --demo simulates two cards."
+                            None => "— no supported GPU telemetry. --demo simulates two cards."
                                 .to_string(),
                         },
                         Style::default().fg(pal::c(pal::TEXT_DIM)),
@@ -2516,7 +2516,7 @@ impl Renderer {
             } else if d.gpus.is_empty() {
                 Some("no GPU".into())
             } else if !host.pcie_ok {
-                Some("nvidia-smi dmon\nunavailable".into())
+                Some("PCIe throughput\nunavailable".into())
             } else {
                 None
             },

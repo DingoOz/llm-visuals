@@ -350,7 +350,7 @@ fn status_for(slots: &[ModelSlot], rescanned: bool) -> String {
     let prefix = if rescanned { "re-scanned: " } else { "" };
     match slots.len() {
         0 => format!(
-            "{prefix}no running LLM found (nvidia-smi / llama-server / ollama) — press r to rescan"
+            "{prefix}no running LLM found (llama-server / ollama / vLLM / SGLang) — press r to rescan"
         ),
         1 => format!("{prefix}attached to {}", slots[0].model),
         n => format!(
@@ -488,7 +488,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             GpuMonitor::new().run(gpu_tx, gpu_filter).await;
         });
         tokio::spawn(async move {
-            // Two nvidia-smi calls per poll would be heavy; host counters at half rate is plenty.
+            // Host counters at half the GPU polling rate are plenty.
             HostMonitor::new(poll.max(Duration::from_millis(400)))
                 .run(host_tx, pids_rx)
                 .await;

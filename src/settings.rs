@@ -247,7 +247,7 @@ impl SettingsForm {
                 "gpu",
                 Kind::Text,
                 args.gpu.clone(),
-                "all, or comma-separated nvidia-smi indices, e.g. 0,1".into(),
+                "all, or comma-separated GPU indices, e.g. 0,1".into(),
             ),
             field(
                 "SQLite logging",
