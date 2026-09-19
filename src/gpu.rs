@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time;
 
@@ -78,13 +79,18 @@ pub type GpuSample = Result<Vec<GpuStats>, String>;
 /// Collects GPU stats from nvidia-smi or Linux amdgpu sysfs every 200ms.
 pub struct GpuMonitor {
     interval: Duration,
-    backend: GpuBackend,
+    backend: Arc<GpuBackend>,
 }
 
-#[derive(Clone, Copy)]
 enum GpuBackend {
     Nvidia,
-    Amd,
+    Amd(Vec<AmdDevice>),
+}
+
+struct AmdDevice {
+    path: PathBuf,
+    hwmon: Option<PathBuf>,
+    name: String,
 }
 
 const QUERY: &str = "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu,utilization.memory,power.draw,power.limit,temperature.gpu,clocks.sm,clocks.max.sm,clocks.mem,fan.speed,pcie.link.gen.current,pcie.link.width.current";
@@ -93,7 +99,7 @@ impl GpuMonitor {
     pub fn new() -> Self {
         Self {
             interval: Duration::from_millis(200),
-            backend: GpuBackend::detect(),
+            backend: Arc::new(GpuBackend::detect()),
         }
     }
 
@@ -103,7 +109,7 @@ impl GpuMonitor {
         let mut interval = time::interval(self.interval);
         loop {
             interval.tick().await;
-            let backend = self.backend;
+            let backend = Arc::clone(&self.backend);
             let sample = match tokio::task::spawn_blocking(move || backend.collect()).await {
                 Ok(Ok(stats)) => Ok(filter_gpus(stats, &filter)),
                 Ok(Err(e)) => Err(e),
@@ -151,20 +157,41 @@ impl GpuBackend {
     fn detect() -> Self {
         if GpuMonitor::collect_nvidia().is_ok_and(|gpus| !gpus.is_empty()) {
             Self::Nvidia
-        } else if !amd_device_paths().is_empty() {
-            Self::Amd
         } else {
-            // Preserve nvidia-smi's useful error when neither backend exists.
-            Self::Nvidia
+            let devices = amd_devices();
+            if devices.is_empty() {
+                // Preserve nvidia-smi's useful error when neither backend exists.
+                Self::Nvidia
+            } else {
+                Self::Amd(devices)
+            }
         }
     }
 
-    fn collect(self) -> Result<Vec<GpuStats>, String> {
+    fn collect(&self) -> Result<Vec<GpuStats>, String> {
         match self {
             Self::Nvidia => GpuMonitor::collect_nvidia(),
-            Self::Amd => collect_amd(),
+            Self::Amd(devices) => collect_amd(devices),
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn amd_devices() -> Vec<AmdDevice> {
+    amd_device_paths()
+        .into_iter()
+        .enumerate()
+        .map(|(index, path)| AmdDevice {
+            hwmon: find_amd_hwmon(&path),
+            name: amd_name(&path, index as u32),
+            path,
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn amd_devices() -> Vec<AmdDevice> {
+    Vec::new()
 }
 
 #[cfg(target_os = "linux")]
@@ -194,8 +221,7 @@ fn amd_device_paths() -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn collect_amd() -> Result<Vec<GpuStats>, String> {
-    let devices = amd_device_paths();
+fn collect_amd(devices: &[AmdDevice]) -> Result<Vec<GpuStats>, String> {
     if devices.is_empty() {
         return Err("no AMD GPUs found in /sys/class/drm".into());
     }
@@ -211,28 +237,29 @@ fn collect_amd() -> Result<Vec<GpuStats>, String> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn collect_amd() -> Result<Vec<GpuStats>, String> {
+fn collect_amd(_devices: &[AmdDevice]) -> Result<Vec<GpuStats>, String> {
     Err("AMD GPU telemetry is available on Linux only".into())
 }
 
-fn amd_stats(index: u32, device: &Path) -> GpuStats {
-    let mem_total_mb = read_u64(device.join("mem_info_vram_total")) / 1024 / 1024;
-    let mem_used_mb = read_u64(device.join("mem_info_vram_used")) / 1024 / 1024;
-    let (clock_sm_mhz, clock_sm_max_mhz) = read_dpm_clocks(device.join("pp_dpm_sclk"));
-    let (clock_mem_mhz, _) = read_dpm_clocks(device.join("pp_dpm_mclk"));
-    let (temperature, power_watts, power_max_watts, fan_pct) = amd_hwmon(device);
-    let pcie_gen = read_trimmed(device.join("current_link_speed"))
+fn amd_stats(index: u32, device: &AmdDevice) -> GpuStats {
+    let path = &device.path;
+    let mem_total_mb = read_u64(path.join("mem_info_vram_total")) / 1024 / 1024;
+    let mem_used_mb = read_u64(path.join("mem_info_vram_used")) / 1024 / 1024;
+    let (clock_sm_mhz, clock_sm_max_mhz) = read_dpm_clocks(path.join("pp_dpm_sclk"));
+    let (clock_mem_mhz, _) = read_dpm_clocks(path.join("pp_dpm_mclk"));
+    let (temperature, power_watts, power_max_watts, fan_pct) = amd_hwmon(device.hwmon.as_deref());
+    let pcie_gen = read_trimmed(path.join("current_link_speed"))
         .as_deref()
         .and_then(parse_pcie_gen)
         .unwrap_or(0);
-    let pcie_width = read_trimmed(device.join("current_link_width"))
+    let pcie_width = read_trimmed(path.join("current_link_width"))
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
     GpuStats {
         index,
-        name: amd_name(device, index),
-        utilization_gpu: read_f32(device.join("gpu_busy_percent")),
-        utilization_mem: read_f32(device.join("mem_busy_percent")),
+        name: device.name.clone(),
+        utilization_gpu: read_f32(path.join("gpu_busy_percent")),
+        utilization_mem: read_f32(path.join("mem_busy_percent")),
         mem_total_mb,
         mem_used_mb,
         mem_free_mb: mem_total_mb.saturating_sub(mem_used_mb),
@@ -248,15 +275,18 @@ fn amd_stats(index: u32, device: &Path) -> GpuStats {
     }
 }
 
-fn amd_hwmon(device: &Path) -> (Option<f32>, f32, f32, Option<f32>) {
-    let hwmon = std::fs::read_dir(device.join("hwmon"))
+fn find_amd_hwmon(device: &Path) -> Option<PathBuf> {
+    std::fs::read_dir(device.join("hwmon"))
         .ok()
         .and_then(|entries| {
             entries
                 .flatten()
                 .map(|e| e.path())
                 .find(|path| read_trimmed(path.join("name")).as_deref() == Some("amdgpu"))
-        });
+        })
+}
+
+fn amd_hwmon(hwmon: Option<&Path>) -> (Option<f32>, f32, f32, Option<f32>) {
     let Some(hwmon) = hwmon else {
         return (None, 0.0, 0.0, None);
     };
@@ -566,7 +596,12 @@ mod tests {
         std::fs::write(hwmon.join("pwm1"), "128\n").unwrap();
         std::fs::write(hwmon.join("pwm1_max"), "255\n").unwrap();
 
-        let stats = amd_stats(0, &dir);
+        let device = AmdDevice {
+            hwmon: find_amd_hwmon(&dir),
+            name: amd_name(&dir, 0),
+            path: dir.clone(),
+        };
+        let stats = amd_stats(0, &device);
         assert_eq!(stats.name, "AMD GPU 0x744c");
         assert_eq!(stats.utilization_gpu, 72.0);
         assert_eq!(stats.utilization_mem, 41.0);
