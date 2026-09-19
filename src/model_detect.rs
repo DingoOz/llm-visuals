@@ -924,6 +924,11 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| process_name.to_string());
     }
+    // llama.cpp treats an all-zero split (LM Studio passes `--tensor-split 0`)
+    // as no split at all; taken literally it puts every weight on the CPU.
+    if parsed.tensor_split.iter().all(|&s| s == 0.0) {
+        parsed.tensor_split.clear();
+    }
     if parsed.port.is_none() && parsed.engine == "llama.cpp" {
         parsed.port = Some(8080);
     }
@@ -1112,6 +1117,19 @@ mod tests {
             .path
             .unwrap()
             .ends_with("Qwen3.6-35B-A3B-MTP-UD-Q3_K_XL.gguf"));
+    }
+
+    // LM Studio's spawned llama-server: an ephemeral port, a fresh API key
+    // per model load, and `--tensor-split 0`.
+    const LM_STUDIO_CMD: &str = "/home/u/.lmstudio/extensions/backends/llama.cpp-linux-x86_64-nvidia-cuda12-avx2-2.40.0/llama-server --model /home/u/.lmstudio/models/org/repo/model-Q5_K_S.gguf --host 127.0.0.1 --port 38387 --api-key K2Zzsecret --no-webui --ctx-size 229376 --n-gpu-layers 999999 --main-gpu 0 --tensor-split 0 --spec-type draft-mtp";
+
+    #[test]
+    fn all_zero_tensor_split_is_no_split() {
+        let p = parse_cmdline("llama-server", LM_STUDIO_CMD);
+        assert_eq!(p.port, Some(38387));
+        assert!(p.tensor_split.is_empty());
+        let p = parse_cmdline("llama-server", "llama-server -m m.gguf --tensor-split 0,0");
+        assert!(p.tensor_split.is_empty());
     }
 
     #[test]
