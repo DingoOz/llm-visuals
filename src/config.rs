@@ -136,6 +136,16 @@ pub struct Args {
     /// Size cap for --log-db in MB; the oldest rows are dropped past it (0 = no cap)
     #[arg(long, default_value_t = 1024)]
     pub log_db_max_mb: u64,
+
+    /// Install a newer GitHub release without asking (`on` or `off`).
+    /// Off, the default, asks first. The dashboard keeps running either way.
+    #[arg(
+        long,
+        default_value = "off",
+        value_name = "on|off",
+        value_parser = ["on", "off"]
+    )]
+    pub auto_upgrade: String,
 }
 
 impl Args {

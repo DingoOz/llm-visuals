@@ -222,6 +222,20 @@ impl SettingsForm {
                 "auto detects truecolor from the terminal; force it if colours look flat".into(),
             ),
             field(
+                "Auto upgrade",
+                "auto-upgrade",
+                Kind::Choice(&["off", "on"]),
+                if args.auto_upgrade == "on" {
+                    "on"
+                } else {
+                    "off"
+                }
+                .into(),
+                "On installs a newer GitHub release in the background without asking. \
+                 Off asks first. The dashboard keeps running; relaunch to use the new binary."
+                    .into(),
+            ),
+            field(
                 "Poll interval (ms)",
                 "poll-ms",
                 Kind::Number,
@@ -544,5 +558,44 @@ mod tests {
         form.fields[ep_idx].value = "".into();
         merge(&mut saved, form.flags(), defaults.flags());
         assert!(!saved.contains_key("endpoint"));
+    }
+
+    #[test]
+    fn auto_upgrade_defaults_off_and_round_trips() {
+        let defaults = SettingsForm::new(&Args::parse_from([APP]));
+        let off = defaults
+            .fields
+            .iter()
+            .find(|f| f.flag == "auto-upgrade")
+            .unwrap();
+        assert_eq!(off.value, "off");
+        let mut saved = Saved::new();
+        merge(&mut saved, defaults.flags(), defaults.flags());
+        assert!(
+            !saved.contains_key("auto-upgrade"),
+            "the default is not pinned"
+        );
+
+        assert!(Args::try_parse_from([APP, "--auto-upgrade", "maybe"]).is_err());
+        let mut form = SettingsForm::new(&Args::parse_from([APP, "--auto-upgrade", "on"]));
+        assert_eq!(
+            form.fields
+                .iter()
+                .find(|f| f.flag == "auto-upgrade")
+                .unwrap()
+                .value,
+            "on"
+        );
+        merge(&mut saved, form.flags(), defaults.flags());
+        assert_eq!(saved.get("auto-upgrade").map(String::as_str), Some("on"));
+
+        form.selected = form
+            .fields
+            .iter()
+            .position(|f| f.flag == "auto-upgrade")
+            .unwrap();
+        form.cycle(1);
+        let resolved = form.resolve(&argv(&[APP])).unwrap();
+        assert_eq!(resolved.auto_upgrade, "off");
     }
 }

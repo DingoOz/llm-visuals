@@ -57,6 +57,7 @@ GPUs and the disk are shared.
 | `main.rs` | CLI parsing, terminal setup, the `ModelSlot` list, spawning one poller per model, routing samples by PID, the frame loop, key handling |
 | `config.rs` | clap arguments and `ViewMode` |
 | `settings.rs` | per-user config/data paths; loads `settings.json` and places its flags ahead of the command line; the settings screen's fields, keys, validation (re-parsing through clap) and saving |
+| `update.rs` | background check of the GitHub release; asks before replacing this binary unless Auto upgrade is on. Source builds are skipped. The download is HTTPS from GitHub only, checked against the published sha256, and swapped in without restarting the session |
 | `dblog.rs` | `--log-db` SQLite writer (on by default at the per-user data path) with a size cap |
 | `model_detect.rs` | finds inference processes via `nvidia-smi --query-compute-apps` and `/proc`, parses their command lines (model path, port, ctx size, tensor split, spec mode); returns every server found, best first, minus this process and idle daemons |
 | `gguf.rs` | reads the GGUF header without loading tensors; maps layers to GPUs from `--tensor-split`; `read_tensor_summary` walks the tensor table and sizes each tensor from the gap to the next offset (no quant type table needed) |

@@ -158,6 +158,8 @@ console, pass `--color truecolor` if colours look flat.
       (e.g. on a missing drive) fails with a readable error.
 - [ ] `s`, change a value, `w`: `%APPDATA%\llm-visuals\settings.json` is
       written and the value is used at the next launch.
+- [ ] Auto upgrade in that screen defaults to off. A newer release asks
+      `y` / `n` without freezing the dashboard.
 - [ ] `--model <hf-id>` starts the Python bridge.
 - [ ] Resizing the window and very small window sizes.
 
@@ -390,6 +392,7 @@ watched and `--pid A,B` restricts it to named processes.
 | `t` | cycle theme: defrag, neon, fire, ocean, monochrome |
 | `r` | rescan for running servers |
 | `s` | settings screen: change launch options, apply them now or save them as the default |
+| `y` / `n` | when a newer release is offered: upgrade, or dismiss that version |
 | `q` / `Esc` | quit |
 
 Layouts adapt: the model strip is the first thing shed on a short terminal,
@@ -515,6 +518,7 @@ MTP.
 --log-db auto|off|FILE  SQLite log of samples and requests (default: auto)
 --log-every 1.0      seconds between --log-db sample rows
 --log-db-max-mb 1024 size cap for --log-db; oldest rows are dropped (0 = none)
+--auto-upgrade on|off  install a newer GitHub release without asking (default off)
 ```
 
 `llm-visuals --help` lists everything.
@@ -527,9 +531,9 @@ the account running the dashboard.
 
 ### Settings screen and saved defaults
 
-Press `s` to change the theme, colour depth, poll interval, model limits,
-GPUs and logging while the dashboard runs. `a` applies the values to this
-session; `w` also saves them as the launch default, in
+Press `s` to change the theme, colour depth, auto upgrade, poll interval,
+model limits, GPUs and logging while the dashboard runs. `a` applies the
+values to this session; `w` also saves them as the launch default, in
 `~/.config/llm-visuals/settings.json` (`%APPDATA%\llm-visuals` on Windows,
 `~/Library/Application Support/llm-visuals` on macOS). The file maps flag
 names to values, e.g. `{"theme": "neon", "poll-ms": "500"}`. Saved values are
@@ -538,6 +542,17 @@ wins. Only values that differ from the built-in default are kept. The GPU
 selection takes effect at the next launch; everything else applies at once.
 If the file holds a bad value, the dashboard starts without it and says why
 in the status line.
+
+Each launch of an installed binary looks for a newer
+[release](https://github.com/DingoOz/llm-visuals/releases). When one exists
+and Auto upgrade is off (the default), a line above the keys asks `y` to
+upgrade or `n` to dismiss that version. The dashboard keeps running either
+way. `y`, or Auto upgrade set to on, downloads the archive for this
+operating system, checks it against the published sha256, and swaps it into
+the install path. Relaunch to run the new binary. A copy started from a
+source tree (`target/debug` or `target/release`) is not replaced. A release
+that cannot be written, or that has no build for this platform, is reported
+on that same line and left in place.
 
 ### SQLite log
 

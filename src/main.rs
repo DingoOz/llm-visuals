@@ -15,6 +15,7 @@ mod pipeline;
 mod render;
 mod settings;
 mod sglang;
+mod update;
 mod vllm;
 
 use config::{Args, ViewMode};
@@ -417,6 +418,51 @@ fn open_db(args: &Args) -> Result<Option<dblog::DbLog>, String> {
     .map_err(|e| format!("{}: {e}", path.display()))
 }
 
+enum UpdateMsg {
+    Checked(update::Outcome),
+    Finished(Result<String, String>),
+}
+
+enum UpdatePhase {
+    Idle,
+    Ask(update::Plan),
+    Busy(String),
+    Settled(String),
+}
+
+impl UpdatePhase {
+    fn banner(&self) -> Option<String> {
+        let text = match self {
+            UpdatePhase::Idle => return None,
+            UpdatePhase::Ask(plan) => {
+                format!(
+                    "release {} is available — y upgrade, n dismiss",
+                    plan.version
+                )
+            }
+            UpdatePhase::Busy(version) => {
+                format!("upgrading to {version} in the background — this session keeps running")
+            }
+            UpdatePhase::Settled(text) => text.clone(),
+        };
+        Some(update::clip_note(text))
+    }
+}
+
+fn spawn_install(plan: update::Plan, tx: &mpsc::UnboundedSender<UpdateMsg>) -> UpdatePhase {
+    let version = plan.version.to_string();
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || update::install(&plan)).await;
+        let result = match result {
+            Ok(inner) => inner,
+            Err(_) => Err("update stopped before it finished".into()),
+        };
+        let _ = tx.send(UpdateMsg::Finished(result));
+    });
+    UpdatePhase::Busy(version)
+}
+
 /// How the status line describes what is being watched.
 fn status_for(slots: &[ModelSlot], rescanned: bool) -> String {
     let prefix = if rescanned { "re-scanned: " } else { "" };
@@ -440,6 +486,19 @@ fn status_for(slots: &[ModelSlot], rescanned: bool) -> String {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let launch = settings::launch();
     let mut args = launch.args.clone();
+    // The check runs beside discovery. A source build never phones home, and
+    // nothing here waits on the network, so the first frame is not delayed.
+    let (update_tx, mut update_rx) = mpsc::unbounded_channel::<UpdateMsg>();
+    let mut update_phase = UpdatePhase::Idle;
+    if !update::running_from_cargo() {
+        update::cleanup_previous();
+        let tx = update_tx.clone();
+        tokio::spawn(async move {
+            let outcome = tokio::task::spawn_blocking(update::check).await;
+            let outcome = outcome.unwrap_or(update::Outcome::Quiet);
+            let _ = tx.send(UpdateMsg::Checked(outcome));
+        });
+    }
     let auth = HttpAuth::from_key_file(args.api_key_file.as_deref())?;
     colors::init_color_mode(&args.color);
     let mut theme_name = args.theme.clone();
@@ -616,6 +675,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::task::yield_now().await;
         let mut rescan = false;
         let mut ui_changed = false;
+        while let Ok(msg) = update_rx.try_recv() {
+            ui_changed = true;
+            match msg {
+                UpdateMsg::Checked(update::Outcome::Quiet) => {}
+                UpdateMsg::Checked(update::Outcome::Notice(text)) => {
+                    if matches!(update_phase, UpdatePhase::Idle) {
+                        update_phase = UpdatePhase::Settled(update::clip_note(text));
+                    }
+                }
+                UpdateMsg::Checked(update::Outcome::Offer(plan)) => {
+                    if !matches!(update_phase, UpdatePhase::Idle) {
+                        continue;
+                    }
+                    if args.auto_upgrade == "on" {
+                        update_phase = spawn_install(plan, &update_tx);
+                    } else if !update::dismissed(&plan.version) {
+                        update_phase = UpdatePhase::Ask(plan);
+                    }
+                }
+                UpdateMsg::Finished(result) => {
+                    update_phase = UpdatePhase::Settled(match result {
+                        Ok(text) => update::clip_note(text),
+                        Err(err) => update::clip_note(format!("update failed: {err}")),
+                    });
+                }
+            }
+        }
         if event::poll(Duration::from_millis(0))? {
             ui_changed = true;
             if let Event::Key(key) = event::read()? {
@@ -663,6 +749,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if gpu_changed {
                                         status.push_str("; GPU selection applies at next launch");
                                     }
+                                    if matches!(update_phase, UpdatePhase::Settled(_)) {
+                                        update_phase = UpdatePhase::Idle;
+                                    }
+                                    if args.auto_upgrade == "on"
+                                        && matches!(update_phase, UpdatePhase::Ask(_))
+                                    {
+                                        if let UpdatePhase::Ask(plan) =
+                                            std::mem::replace(&mut update_phase, UpdatePhase::Idle)
+                                        {
+                                            update_phase = spawn_install(plan, &update_tx);
+                                        }
+                                    }
                                     if relog {
                                         db = None; // close the old file before reopening
                                         match open_db(&args) {
@@ -697,6 +795,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 focus = i;
                             }
                         }
+                        KeyCode::Char('y') | KeyCode::Char('Y')
+                            if matches!(update_phase, UpdatePhase::Ask(_)) =>
+                        {
+                            if let UpdatePhase::Ask(plan) =
+                                std::mem::replace(&mut update_phase, UpdatePhase::Idle)
+                            {
+                                update_phase = spawn_install(plan, &update_tx);
+                            }
+                        }
+                        KeyCode::Char('n') | KeyCode::Char('N') => {
+                            match std::mem::replace(&mut update_phase, UpdatePhase::Idle) {
+                                UpdatePhase::Ask(plan) => {
+                                    if let Err(err) = update::dismiss(&plan.version) {
+                                        update_phase = UpdatePhase::Settled(update::clip_note(
+                                            format!("not dismissed: {err}"),
+                                        ));
+                                    }
+                                }
+                                UpdatePhase::Settled(_) => {}
+                                other => update_phase = other,
+                            }
+                        }
                         KeyCode::Char('r') if !args.demo => rescan = true,
                         KeyCode::Char('s') => {
                             settings_form = Some(settings::SettingsForm::new(&args))
@@ -713,6 +833,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         if rescan {
             ui_changed = true;
+            if matches!(update_phase, UpdatePhase::Settled(_)) {
+                update_phase = UpdatePhase::Idle;
+            }
             for h in pollers.drain(..) {
                 h.abort();
             }
@@ -923,6 +1046,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         focus = focus.min(slots.len().saturating_sub(1));
+        let update_note = update_phase.banner();
         let views: Vec<ModelView> = slots.iter().map(ModelSlot::view).collect();
         let cur = views.get(focus);
         if let Some(v) = cur {
@@ -947,6 +1071,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             demo: args.demo,
             experts: cur.and_then(|v| v.experts),
             settings: settings_form.as_ref(),
+            update_note: update_note.as_deref(),
         };
         renderer.render_frame(&mut terminal, &dash);
 

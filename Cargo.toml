@@ -18,6 +18,12 @@ serde_json = "1.0"
 tokio = { version = "1.40", features = ["full"] }
 chrono = "0.4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+sha2 = "0.10"
+flate2 = "1"
+tar = "0.4"
+url = "2"
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # No /proc outside Linux: process list, argv and per-process I/O come from here.
 [target.'cfg(not(target_os = "linux"))'.dependencies]

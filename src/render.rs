@@ -66,6 +66,9 @@ pub struct Dashboard<'a> {
     pub experts: Option<&'a ExpertStats>,
     /// The settings screen, drawn over the view while it is open.
     pub settings: Option<&'a SettingsForm>,
+    /// Release check: a question, a background upgrade, or its result.
+    /// Empty when there is nothing to say. It never replaces the dashboard.
+    pub update_note: Option<&'a str>,
 }
 
 pub struct Renderer {
@@ -127,7 +130,12 @@ impl Renderer {
         } else {
             0
         };
-        let bar_h = if bar_rows > 0 && area.height >= bar_rows + 14 {
+        // The release line sits above the keys. On a short terminal it is
+        // folded into the status text instead of taking a row.
+        let show_note =
+            d.update_note.map(|note| !note.is_empty()).unwrap_or(false) && area.height >= 12;
+        let note_h = if show_note { 1 } else { 0 };
+        let bar_h = if bar_rows > 0 && area.height >= bar_rows + 14 + note_h {
             bar_rows
         } else {
             0
@@ -138,6 +146,7 @@ impl Renderer {
                 Constraint::Length(3),
                 Constraint::Length(bar_h),
                 Constraint::Min(4),
+                Constraint::Length(note_h),
                 Constraint::Length(1),
             ])
             .split(area);
@@ -151,7 +160,11 @@ impl Renderer {
             ViewMode::Bandwidth => self.render_bandwidth(frame, rows[2], d),
             _ => self.render_panels(frame, rows[2], d),
         }
-        self.render_footer(frame, rows[3], d);
+        if show_note {
+            self.render_update_note(frame, rows[3], d.update_note.unwrap_or(""));
+        }
+        let folded = if show_note { None } else { d.update_note };
+        self.render_footer(frame, rows[4], d, folded);
     }
 
     fn render_bandwidth(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
@@ -1740,7 +1753,26 @@ impl Renderer {
     // Footer
     // -----------------------------------------------------------------------
 
-    fn render_footer(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
+    fn render_update_note(&self, frame: &mut Frame, area: Rect, note: &str) {
+        let width = area.width as usize;
+        let text = format!(" ▲ {}", truncate(note, width.saturating_sub(3)));
+        let line = Line::styled(
+            text,
+            Style::default()
+                .fg(pal::c(pal::AMBER))
+                .bg(pal::c(pal::PANEL)),
+        );
+        frame.render_widget(Paragraph::new(line), area);
+    }
+
+    fn render_footer(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        d: &Dashboard,
+        status_override: Option<&str>,
+    ) {
+        let status_text = status_override.unwrap_or(d.status);
         let w = area.width as usize;
         let multi = d.models.len() > 1;
         // Full labels first; the model keys made the row long enough that a
@@ -1804,7 +1836,7 @@ impl Renderer {
             let color_tag = if pal::truecolor() { "24-bit" } else { "256c" };
             let status = format!(
                 "{}  {} ",
-                truncate(d.status, free.saturating_sub(color_tag.len() + 4)),
+                truncate(status_text, free.saturating_sub(color_tag.len() + 4)),
                 color_tag
             );
             let pad = free.saturating_sub(status.chars().count());
