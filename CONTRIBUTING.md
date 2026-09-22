@@ -22,6 +22,9 @@ cargo run -- --demo              # exercise every panel without hardware
 cargo run                        # against a real server
 ```
 
+The oldest toolchain that still builds is the `rust-version` in `Cargo.toml`
+(currently 1.88). CI runs the tests on that compiler as well as on stable.
+
 Before a PR:
 
 - `cargo build` with no warnings.

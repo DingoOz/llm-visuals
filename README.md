@@ -40,7 +40,7 @@ a Tesla P100 under llama.cpp, mid-request.</sub>
 
 ## Quick start
 
-Requirements: a Rust toolchain (1.75+), `nvidia-smi` for NVIDIA GPU panels or
+Requirements: a Rust toolchain (1.88+), `nvidia-smi` for NVIDIA GPU panels or
 the Linux amdgpu driver for AMD GPU panels, and a locally listening
 `llama-server` for throughput panels. Nothing at all is needed for demo mode.
 

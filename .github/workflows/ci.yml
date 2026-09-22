@@ -36,6 +36,20 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --check
 
+  # Cargo.toml rust-version. The floor is 1.88 because the lockfile pulls
+  # clap's darling 0.24 and, off Linux, sysinfo 0.37, both of which declare
+  # that. A newer stable on the other jobs will not notice if this slips.
+  msrv:
+    name: test (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-1.88
+      - run: cargo +1.88.0 test --locked
+
   # Compiles for the architectures no runner above covers, so an ARM-only
   # build break shows up on the pull request rather than at release time.
   cross:

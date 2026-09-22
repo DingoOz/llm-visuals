@@ -1,0 +1,58 @@
+name: Bug
+description: Something on screen is wrong, a server is missed, or the dashboard misbehaves
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Redact API keys, bearer tokens, and home-directory names before you paste anything.
+  - type: input
+    id: version
+    attributes:
+      label: llm-visuals version
+      description: The release tag, or the first line of `llm-visuals --version`.
+      placeholder: "0.8.2"
+    validations:
+      required: true
+  - type: input
+    id: server
+    attributes:
+      label: Server and version
+      description: Engine and the version it prints at startup.
+      placeholder: "llama-server v0.4.0-dev (build 10849)"
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: "--host value"
+      description: The address the server was started with. Loopback, a LAN address, and 0.0.0.0 behave differently.
+      placeholder: "0.0.0.0"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Ubuntu 24.04, x86-64"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what the dashboard showed instead.
+    validations:
+      required: true
+  - type: textarea
+    id: sample
+    attributes:
+      label: One /slots or /metrics body
+      description: A single response from the server, with tokens removed. This is what the parsers are tested against.
+      render: text
+  - type: textarea
+    id: cmdline
+    attributes:
+      label: Server command line
+      description: Drop `--api-key` values. Flags such as `--host`, `--port`, and `--metrics` are the useful part.
+      render: text
