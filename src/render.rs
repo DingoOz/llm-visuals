@@ -829,17 +829,7 @@ impl Renderer {
                             .get(g.index as usize)
                             .copied()
                             .unwrap_or(0.0);
-                        let name = d.models[t].detected.name.clone();
-                        let short: String = if name.chars().count() > 10 {
-                            let head: String = name.chars().take(9).collect();
-                            format!("{head}…")
-                        } else {
-                            name
-                        };
-                        spans.push(Span::styled(
-                            format!("{short} ■"),
-                            Style::default().fg(pal::c(pal::TEXT_MUTED)),
-                        ));
+                        spans.push(Span::styled("■", Style::default().fg(pal::c(pal::BLUE))));
                         spans.push(Span::styled(
                             format!(" w {:.1}G ", tw * g.vram_total_gb()),
                             Style::default().fg(pal::c(pal::TEXT_DIM)),
