@@ -1097,10 +1097,22 @@ fn fade_sample_from_live(
         if i >= n_gpus {
             continue;
         }
-        let share = if split.is_empty() {
-            1.0 / gpu.len().max(1) as f32
-        } else {
+        let share = if !split.is_empty() {
             split.get(i).copied().unwrap_or(0.0) / split_sum
+        } else if let Some(idxs) =
+            detected.and_then(|d| (!d.gpu_indices.is_empty()).then_some(d.gpu_indices.as_slice()))
+        {
+            // Engine told us which GPUs it actually uses (e.g. one-GPU
+            // vLLM serve): spread evenly over those, zero elsewhere.
+            let own = idxs.iter().filter(|&&g| g as usize == i).count();
+            if own > 0 {
+                1.0 / idxs.len().max(1) as f32
+            } else {
+                0.0
+            }
+        } else {
+            // Unknown layout: assume it spans every visible GPU.
+            1.0 / gpu.len().max(1) as f32
         };
         let used_f = if g.mem_total_mb == 0 {
             0.0
@@ -1125,6 +1137,7 @@ fn fade_sample_from_live(
             kv_alloc_frac[i] = (used_f - weight_frac[i]).max(0.0);
         }
     }
+    let model_owned: Vec<bool> = weight_frac.iter().map(|w| *w > 0.0).collect();
     FadeSample {
         layer_target,
         layer_gpu,
@@ -1137,6 +1150,7 @@ fn fade_sample_from_live(
         gpu_vram: vram.into_iter().take(n_gpus.max(1)).collect(),
         weight_frac,
         kv_alloc_frac,
+        model_owned,
         ctx_used: used,
         ctx_max,
         n_experts: n_exp_total,

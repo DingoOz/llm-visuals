@@ -790,16 +790,29 @@ impl Renderer {
                 ));
             }
             if legend_w > 0 {
-                spans.push(Span::styled("■", Style::default().fg(pal::c(pal::BLUE))));
-                spans.push(Span::styled(
-                    format!(" w {:.1}G ", weights * g.vram_total_gb()),
-                    Style::default().fg(pal::c(pal::TEXT_DIM)),
-                ));
-                spans.push(Span::styled("■", Style::default().fg(pal::c(pal::TEAL))));
-                spans.push(Span::styled(
-                    format!(" kv {:.1}G", kv * g.vram_total_gb()),
-                    Style::default().fg(pal::c(pal::TEXT_DIM)),
-                ));
+                let owned = d
+                    .fade
+                    .model_owned
+                    .get(g.index as usize)
+                    .copied()
+                    .unwrap_or(true);
+                if owned {
+                    spans.push(Span::styled("■", Style::default().fg(pal::c(pal::BLUE))));
+                    spans.push(Span::styled(
+                        format!(" w {:.1}G ", weights * g.vram_total_gb()),
+                        Style::default().fg(pal::c(pal::TEXT_DIM)),
+                    ));
+                    spans.push(Span::styled("■", Style::default().fg(pal::c(pal::TEAL))));
+                    spans.push(Span::styled(
+                        format!(" kv {:.1}G", kv * g.vram_total_gb()),
+                        Style::default().fg(pal::c(pal::TEXT_DIM)),
+                    ));
+                } else {
+                    spans.push(Span::styled(
+                        " other server".to_string(),
+                        Style::default().fg(pal::c(pal::TEXT_DIM)),
+                    ));
+                }
             }
             lines.push(Line::from(spans));
         }

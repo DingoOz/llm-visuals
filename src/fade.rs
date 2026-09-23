@@ -26,6 +26,9 @@ pub struct FadeState {
     pub vram: Vec<f32>,
     pub weight_frac: Vec<f32>,
     pub kv_alloc_frac: Vec<f32>,
+    /// GPU hosts part of this model (share > 0). Unowned GPUs hold other
+    /// servers' memory; their kv/weights legend must not claim it.
+    pub model_owned: Vec<bool>,
     pub prefill: f32,
     pub decode: f32,
     pub idle: f32,
@@ -52,6 +55,9 @@ pub struct FadeSample {
     pub gpu_vram: Vec<f32>,
     pub weight_frac: Vec<f32>,
     pub kv_alloc_frac: Vec<f32>,
+    /// GPU hosts part of this model (share > 0). Unowned GPUs hold other
+    /// servers' memory; their kv/weights legend must not claim it.
+    pub model_owned: Vec<bool>,
     pub ctx_used: usize,
     pub ctx_max: usize,
     pub n_experts: usize,
@@ -79,6 +85,7 @@ impl FadeState {
             vram: Vec::new(),
             weight_frac: Vec::new(),
             kv_alloc_frac: Vec::new(),
+            model_owned: Vec::new(),
             prefill: 0.0,
             decode: 0.0,
             idle: 1.0,
@@ -106,6 +113,7 @@ impl FadeState {
             self.vram.resize(n_gpus, 0.0);
             self.weight_frac.resize(n_gpus, 0.0);
             self.kv_alloc_frac.resize(n_gpus, 0.0);
+            self.model_owned.resize(n_gpus, false);
         }
     }
 
@@ -239,6 +247,12 @@ impl FadeState {
             }
             self.kv_alloc_frac[i] = smooth(self.kv_alloc_frac[i], k.clamp(0.0, 1.0), dt, 0.5, 1.2);
         }
+        for (i, o) in sample.model_owned.iter().enumerate() {
+            if i >= self.model_owned.len() {
+                break;
+            }
+            self.model_owned[i] = *o;
+        }
 
         let (pt, dtgt, it) = if !sample.processing {
             (0.0, 0.0, 1.0)
@@ -316,6 +330,7 @@ mod tests {
             gpu_vram: vec![50.0],
             weight_frac: vec![0.4],
             kv_alloc_frac: vec![0.1],
+            model_owned: vec![true],
             ctx_used: 100,
             ctx_max: 1000,
             n_experts: 16,
@@ -346,6 +361,7 @@ mod tests {
             gpu_vram: vec![50.0],
             weight_frac: vec![0.4],
             kv_alloc_frac: vec![0.1],
+            model_owned: vec![true],
             ctx_used: 100,
             ctx_max: 1000,
             n_experts: 16,
@@ -398,6 +414,7 @@ mod tests {
             gpu_vram: vec![50.0],
             weight_frac: vec![0.4],
             kv_alloc_frac: vec![0.1],
+            model_owned: vec![true],
             ctx_used: 100,
             ctx_max: 1000,
             n_experts: 4,

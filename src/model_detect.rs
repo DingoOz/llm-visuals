@@ -555,6 +555,10 @@ pub fn detect_models() -> Vec<DetectedModel> {
         if parsed.engine == "sglang" {
             parsed.port = resolve_container_host_port(pid, parsed.port, 30000);
         }
+        // Engines pinned by environment (docker --gpu / ZE_AFFINITY_MASK)
+        // never show up in the driver's compute-app tables; recover their
+        // GPU placement from /proc/<pid>/environ.
+        let gpu_indices = env_gpu_affinity(pid);
         by_pid.insert(
             pid,
             DetectedModel {
@@ -563,7 +567,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
                 pid,
                 process_name: name,
                 engine: parsed.engine,
-                gpu_indices: Vec::new(),
+                gpu_indices,
                 mem_used_mb: 0,
                 host: parsed.host,
                 port: parsed.port,
@@ -1119,6 +1123,39 @@ fn walk_proc_llms() -> Vec<(u32, String, String)> {
                 .then_some((pid, name, cmdline))
         })
         .collect()
+}
+
+/// GPUs a process is pinned to via its affinity environment
+/// (`CUDA_VISIBLE_DEVICES` for NVIDIA/vLLM-style serving, `ZE_AFFINITY_MASK`
+/// for Intel Level Zero). Returns indices for the first form
+/// (`"0,1"`, optional leading zeros per entry); a single-value mask is one
+/// GPU index. Empty when neither variable is set (process reads /proc/.../environ
+/// as root, which the dashboard container is).
+fn env_gpu_affinity(pid: u32) -> Vec<u32> {
+    let env = match std::fs::read_to_string(format!("/proc/{pid}/environ")) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for kv in env.split('\0') {
+        let (key, val) = match kv.split_once('=') {
+            Some(kv) => kv,
+            None => continue,
+        };
+        let indices: Vec<u32> = match key {
+            "CUDA_VISIBLE_DEVICES" => val
+                .split(',')
+                .filter_map(|s| s.trim().parse::<u32>().ok())
+                .collect(),
+            "ZE_AFFINITY_MASK" => match val.trim().parse::<u32>() {
+                Ok(v) => vec![v],
+                Err(_) => Vec::new(),
+            },
+            _ => continue,
+        };
+        out.extend(indices);
+    }
+    out
 }
 
 #[cfg(not(target_os = "linux"))]
