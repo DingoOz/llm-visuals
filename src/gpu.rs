@@ -182,6 +182,22 @@ fn run_smi(bin: &str, query: &str) -> Result<String, String> {
 /// orders its device indices by ascending PCI BDF; the xe hwmon class
 /// exposes one entry per card with `fan1_input` (RPM). Returns an empty
 /// map when the enumeration disagrees with the reported device count.
+/// Fan-hold cache: xe's tachometer is intermittent — at 79 °C and 240 W
+/// sustained it reports 0 on most samples, flickering nonzero for a poll
+/// or two. Hold the last nonzero reading for a decay window so the panel
+/// doesn't flash 0 RPM between real updates; expire to 0 if the sensor
+/// stays silent (fans genuinely stopped).
+fn xe_fan_hold(
+) -> &'static std::sync::Mutex<std::collections::HashMap<u32, (u32, std::time::Instant)>> {
+    use std::sync::OnceLock;
+    static HOLD: OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u32, (u32, std::time::Instant)>>,
+    > = OnceLock::new();
+    HOLD.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+const FAN_HOLD_SECS: f32 = 20.0;
+
 fn xe_fan_rpm_by_index() -> Vec<u32> {
     let mut cards: Vec<(String, u32)> = Vec::new(); // (BDF, rpm)
     let Ok(hwmons) = std::fs::read_dir("/sys/class/hwmon") else {
@@ -192,9 +208,20 @@ fn xe_fan_rpm_by_index() -> Vec<u32> {
         if read_trimmed(path.join("name")).as_deref() != Some("xe") {
             continue;
         }
-        let rpm = read_trimmed(path.join("fan1_input"))
-            .and_then(|t| t.parse::<u32>().ok())
-            .unwrap_or(0);
+        // The tachometer only reports on its own update cadence: a single
+        // read usually lands between updates and returns 0 even while the
+        // fan spins. Take a couple of reads and keep the max.
+        let mut rpm = 0u32;
+        for _ in 0..3 {
+            let v = read_trimmed(path.join("fan1_input"))
+                .and_then(|t| t.parse::<u32>().ok())
+                .unwrap_or(0);
+            rpm = rpm.max(v);
+            if rpm > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
         let bdf = entry
             .path()
             .join("device")
@@ -205,10 +232,22 @@ fn xe_fan_rpm_by_index() -> Vec<u32> {
         }
     }
     cards.sort();
-    if cards.is_empty() {
-        return Vec::new();
+    let mut held: Vec<u32> = cards.into_iter().map(|(_, rpm)| rpm).collect();
+    let mut cache = xe_fan_hold().lock().unwrap_or_else(|e| e.into_inner());
+    for (i, rpm) in held.iter_mut().enumerate() {
+        let entry = cache
+            .entry(i as u32)
+            .or_insert((0, std::time::Instant::now()));
+        if *rpm > 0 {
+            *entry = (*rpm, std::time::Instant::now());
+        } else if entry.1.elapsed().as_secs_f32() < FAN_HOLD_SECS {
+            // Sensor went quiet right after a real reading: hold it.
+            *rpm = entry.0;
+        } else {
+            *entry = (0, std::time::Instant::now());
+        }
     }
-    cards.into_iter().map(|(_, rpm)| rpm).collect()
+    held
 }
 
 /// xpu-smi CSV in XPU_QUERY order. Current Intel drivers report an
