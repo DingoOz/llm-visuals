@@ -683,6 +683,13 @@ impl Renderer {
                 format!("  fan {f:>2.0}%"),
                 Style::default().fg(pal::c(pal::TEXT_DIM)),
             ));
+        } else if let Some(rpm) = g.fan_rpm {
+            // Intel xe exposes a tachometer, not a PWM percent. 0 RPM at
+            // idle means the fans are stopped — say "0" like a BIOS would.
+            extras.push(Span::styled(
+                format!("  fan {rpm:>4.0}RPM"),
+                Style::default().fg(pal::c(pal::TEXT_DIM)),
+            ));
         }
         if g.pcie_gen > 0 {
             extras.push(Span::styled(

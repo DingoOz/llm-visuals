@@ -23,6 +23,8 @@ pub struct GpuStats {
     pub clock_sm_max_mhz: u32,
     pub clock_mem_mhz: u32,
     pub fan_pct: Option<f32>,
+    /// Raw tachometer reading (RPM) for backends that expose it (Intel xe).
+    pub fan_rpm: Option<u32>,
     pub pcie_gen: u32,
     pub pcie_width: u32,
 }
@@ -176,6 +178,39 @@ fn run_smi(bin: &str, query: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Fan RPM per GPU index from the `xe` driver's hwmon entries. xpu-smi
+/// orders its device indices by ascending PCI BDF; the xe hwmon class
+/// exposes one entry per card with `fan1_input` (RPM). Returns an empty
+/// map when the enumeration disagrees with the reported device count.
+fn xe_fan_rpm_by_index() -> Vec<u32> {
+    let mut cards: Vec<(String, u32)> = Vec::new(); // (BDF, rpm)
+    let Ok(hwmons) = std::fs::read_dir("/sys/class/hwmon") else {
+        return Vec::new();
+    };
+    for entry in hwmons.flatten() {
+        let path = entry.path();
+        if read_trimmed(path.join("name")).as_deref() != Some("xe") {
+            continue;
+        }
+        let rpm = read_trimmed(path.join("fan1_input"))
+            .and_then(|t| t.parse::<u32>().ok())
+            .unwrap_or(0);
+        let bdf = entry
+            .path()
+            .join("device")
+            .file_name()
+            .map(|b| b.to_string_lossy().into_owned());
+        if let Some(bdf) = bdf {
+            cards.push((bdf, rpm));
+        }
+    }
+    cards.sort();
+    if cards.is_empty() {
+        return Vec::new();
+    }
+    cards.into_iter().map(|(_, rpm)| rpm).collect()
+}
+
 /// xpu-smi CSV in XPU_QUERY order. Current Intel drivers report an
 /// unsupported GPU temperature as 0.00 rather than N/A; show no reading
 /// instead of a fake 0°.
@@ -189,7 +224,11 @@ fn run_smi(bin: &str, query: &str) -> Result<String, String> {
 /// clock ratio — an SM only boosts above the idle P-state with work queued.
 fn parse_xpu_csv(text: &str) -> Vec<GpuStats> {
     let mut gpus = parse_csv(text);
+    let fan_map = xe_fan_rpm_by_index();
     for g in &mut gpus {
+        if let Some(rpm) = fan_map.get(g.index as usize) {
+            g.fan_rpm = Some(*rpm);
+        }
         if g.temperature == Some(0.0) {
             g.temperature = None;
         }
@@ -342,6 +381,7 @@ fn amd_stats(index: u32, device: &AmdDevice) -> GpuStats {
         clock_sm_max_mhz,
         clock_mem_mhz,
         fan_pct,
+        fan_rpm: None,
         pcie_gen,
         pcie_width,
     }
@@ -485,6 +525,7 @@ pub fn parse_csv(stdout: &str) -> Vec<GpuStats> {
             clock_sm_max_mhz: int(11) as u32,
             clock_mem_mhz: int(12) as u32,
             fan_pct: opt(13),
+            fan_rpm: None,
             pcie_gen: int(14) as u32,
             pcie_width: int(15) as u32,
         });
@@ -577,6 +618,7 @@ impl DemoGpu {
             clock_sm_mhz: (self.clock * cmax as f32) as u32,
             clock_sm_max_mhz: cmax,
             clock_mem_mhz: if self.index == 1 { 715 } else { 3802 },
+            fan_rpm: None,
             fan_pct: if self.index == 1 {
                 None
             } else {
