@@ -179,11 +179,28 @@ fn run_smi(bin: &str, query: &str) -> Result<String, String> {
 /// xpu-smi CSV in XPU_QUERY order. Current Intel drivers report an
 /// unsupported GPU temperature as 0.00 rather than N/A; show no reading
 /// instead of a fake 0°.
+///
+/// Utilization: EXL3/SYCL decode kernels are short bursts, and xpu-smi's
+/// instantaneous tile utilization samples ~0 between them even while the
+/// card is executing (230 W, 2.5 GHz). nvidia-smi smooths utilization over
+/// a window, so the gauge + white peak-hold marker behave there; on XPU
+/// they would sit at zero forever. When the sampled utilization is ~0 but
+/// the SM has left its idle DVFS floor, reconstruct utilization from the
+/// clock ratio — an SM only boosts above the idle P-state with work queued.
 fn parse_xpu_csv(text: &str) -> Vec<GpuStats> {
     let mut gpus = parse_csv(text);
     for g in &mut gpus {
         if g.temperature == Some(0.0) {
             g.temperature = None;
+        }
+        if g.utilization_gpu < 1.0 && g.clock_sm_max_mhz > 0 {
+            // Idle DVFS floor is ~half of max on Arc Pro (1200/2700 MHz);
+            // anything above it means queued compute work.
+            let floor = 0.5 * g.clock_sm_max_mhz as f32;
+            if g.clock_sm_mhz as f32 > floor {
+                let boost = (g.clock_sm_mhz as f32 - floor) / (g.clock_sm_max_mhz as f32 - floor);
+                g.utilization_gpu = g.utilization_gpu.max(boost * 100.0);
+            }
         }
     }
     gpus
@@ -621,6 +638,27 @@ mod tests {
         assert_eq!(s[0].pcie_gen, 0); // -1 → 0 so the panel hides the tag
         assert_eq!(s[0].pcie_width, 0);
         assert_eq!(s[0].vram_percent() as u32, 94);
+    }
+
+    #[test]
+    fn xpu_utilization_reconstructed_from_boost_clock() {
+        // During EXL3 decode the instantaneous tile utilization samples ~0
+        // while the SM is boosted (230 W, ~2.5 GHz). The clock ratio above
+        // the idle DVFS floor stands in for the smoothed utilization that
+        // nvidia-smi provides on CUDA.
+        let busy = "2,Intel(R) Arc(TM) Pro B70 Graphics,32656,32000,656,0.00,99.60,238.00,230.00,64.00,2508,2700,400,N/A,0,-1\n";
+        let s = parse_xpu_csv(busy);
+        // floor = 0.5*2700 = 1350; boost = (2508-1350)/1350 ≈ 0.858
+        assert!(s[0].utilization_gpu > 80.0, "util={}", s[0].utilization_gpu);
+        assert!(s[0].utilization_gpu <= 100.0);
+
+        // Idle: clock at the floor, utilization stays 0.
+        let idle = "2,Intel(R) Arc(TM) Pro B70 Graphics,32656,32000,656,0.00,99.60,57.00,230.00,51.00,1200,2700,400,N/A,0,-1\n";
+        assert_eq!(parse_xpu_csv(idle)[0].utilization_gpu, 0.0);
+
+        // A real nonzero sample is never lowered by the reconstruction.
+        let real = "2,Intel(R) Arc(TM) Pro B70 Graphics,32656,32000,656,22.22,99.60,238.00,230.00,64.00,2508,2700,400,N/A,0,-1\n";
+        assert_eq!(parse_xpu_csv(real)[0].utilization_gpu, 22.22);
     }
 
     #[test]
