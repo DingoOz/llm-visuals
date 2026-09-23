@@ -431,10 +431,21 @@ fn read_array(f: &mut File) -> Result<Val, String> {
     Ok(if keep { Val::Arr(out) } else { Val::Other })
 }
 
-/// Which GPU a layer lives on given llama.cpp `--tensor-split` percentages.
-pub fn layer_device(layer: usize, n_layers: usize, split: &[f32]) -> usize {
-    if split.is_empty() || n_layers == 0 {
+/// Which GPU a layer lives on given llama.cpp `--tensor-split` percentages,
+/// or — when no split is given — spread over the model's own GPUs
+/// (`gpu_indices` from detection; empty means "unknown, assume GPU 0").
+pub fn layer_device(layer: usize, n_layers: usize, split: &[f32], gpu_indices: &[u32]) -> usize {
+    if n_layers == 0 {
         return 0;
+    }
+    if split.is_empty() {
+        if gpu_indices.is_empty() {
+            return 0;
+        }
+        // Even layer distribution over the serving GPUs (vLLM pipeline
+        // parallelism style). A single-GPU server maps every layer to it.
+        let idx = layer * gpu_indices.len() / n_layers;
+        return gpu_indices[idx.min(gpu_indices.len() - 1)] as usize;
     }
     let total: f32 = split.iter().copied().sum::<f32>().max(1.0);
     let t = (layer as f32 + 0.5) / n_layers as f32 * total;
@@ -461,9 +472,30 @@ mod tests {
     #[test]
     fn tensor_split_63_37() {
         let split = [63.0, 37.0];
-        assert_eq!(layer_device(0, 41, &split), 0);
-        assert_eq!(layer_device(25, 41, &split), 0);
-        assert_eq!(layer_device(40, 41, &split), 1);
+        assert_eq!(layer_device(0, 41, &split, &[]), 0);
+        assert_eq!(layer_device(25, 41, &split, &[]), 0);
+        assert_eq!(layer_device(40, 41, &split, &[]), 1);
+    }
+
+    #[test]
+    fn single_gpu_server_pins_all_layers() {
+        // exl3xpu-style: no tensor-split, one card (ZE_AFFINITY_MASK=2).
+        assert_eq!(layer_device(0, 64, &[], &[2]), 2);
+        assert_eq!(layer_device(63, 64, &[], &[2]), 2);
+    }
+
+    #[test]
+    fn no_split_no_placement_falls_back_to_gpu0() {
+        assert_eq!(layer_device(10, 64, &[], &[]), 0);
+    }
+
+    #[test]
+    fn pipeline_even_distribution_over_own_gpus() {
+        // 64 layers over GPUs 1,2 → 32 each, in gpu_indices order.
+        assert_eq!(layer_device(0, 64, &[], &[1, 2]), 1);
+        assert_eq!(layer_device(31, 64, &[], &[1, 2]), 1);
+        assert_eq!(layer_device(32, 64, &[], &[1, 2]), 2);
+        assert_eq!(layer_device(63, 64, &[], &[1, 2]), 2);
     }
 
     #[test]

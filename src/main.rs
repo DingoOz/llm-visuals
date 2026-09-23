@@ -1051,8 +1051,9 @@ fn fade_sample_from_live(
         }
     }
     let n_layers = n_layers.max(1);
+    let model_gpus: Vec<u32> = detected.map(|d| d.gpu_indices.clone()).unwrap_or_default();
     let layer_gpu: Vec<usize> = (0..n_layers)
-        .map(|l| layer_device(l, n_layers, &split))
+        .map(|l| layer_device(l, n_layers, &split, &model_gpus))
         .collect();
     let processing = live.processing;
     let layer_target: Vec<f32> = (0..n_layers)

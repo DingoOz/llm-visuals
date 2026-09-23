@@ -1265,7 +1265,19 @@ impl Renderer {
         }
         let f = d.fade;
         let n = f.n_layers;
-        let n_gpus = d.gpus.len().max(1);
+        // Count the GPUs the focused model actually uses, not every visible
+        // card — a single-GPU server on a 4-GPU host serves on 1 GPU.
+        let model_gpu_count = d
+            .detected
+            .map(|m| {
+                if m.gpu_indices.is_empty() {
+                    d.gpus.len().max(1)
+                } else {
+                    m.gpu_indices.len()
+                }
+            })
+            .unwrap_or_else(|| d.gpus.len().max(1));
+        let n_gpus = model_gpu_count;
         let title = format!(
             " ◆ LAYERS  {n} across {n_gpus} GPU{} ",
             if n_gpus > 1 { "s" } else { "" }
