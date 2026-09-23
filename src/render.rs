@@ -790,28 +790,72 @@ impl Renderer {
                 ));
             }
             if legend_w > 0 {
-                let owned = d
+                // The legend must describe what actually occupies the card:
+                // the focused model if it lives here, otherwise the tenant
+                // that does (labeled), never another engine's memory passed
+                // off as this model's KV cache.
+                let focused_owns = d
                     .fade
                     .model_owned
                     .get(g.index as usize)
                     .copied()
                     .unwrap_or(true);
-                if owned {
-                    spans.push(Span::styled("■", Style::default().fg(pal::c(pal::BLUE))));
-                    spans.push(Span::styled(
-                        format!(" w {:.1}G ", weights * g.vram_total_gb()),
-                        Style::default().fg(pal::c(pal::TEXT_DIM)),
-                    ));
-                    spans.push(Span::styled("■", Style::default().fg(pal::c(pal::TEAL))));
-                    spans.push(Span::styled(
-                        format!(" kv {:.1}G", kv * g.vram_total_gb()),
-                        Style::default().fg(pal::c(pal::TEXT_DIM)),
-                    ));
-                } else {
-                    spans.push(Span::styled(
-                        " other server".to_string(),
-                        Style::default().fg(pal::c(pal::TEXT_DIM)),
-                    ));
+                let tenant = tenants.iter().copied().find(|&i| {
+                    d.models[i]
+                        .fade
+                        .model_owned
+                        .get(g.index as usize)
+                        .copied()
+                        .unwrap_or(false)
+                });
+                match if focused_owns { None } else { tenant } {
+                    None if focused_owns => {
+                        spans.push(Span::styled("■", Style::default().fg(pal::c(pal::BLUE))));
+                        spans.push(Span::styled(
+                            format!(" w {:.1}G ", weights * g.vram_total_gb()),
+                            Style::default().fg(pal::c(pal::TEXT_DIM)),
+                        ));
+                        spans.push(Span::styled("■", Style::default().fg(pal::c(pal::TEAL))));
+                        spans.push(Span::styled(
+                            format!(" kv {:.1}G", kv * g.vram_total_gb()),
+                            Style::default().fg(pal::c(pal::TEXT_DIM)),
+                        ));
+                    }
+                    Some(t) => {
+                        let tf = &d.models[t].fade;
+                        let tw = tf.weight_frac.get(g.index as usize).copied().unwrap_or(0.0);
+                        let tk = tf
+                            .kv_alloc_frac
+                            .get(g.index as usize)
+                            .copied()
+                            .unwrap_or(0.0);
+                        let name = d.models[t].detected.name.clone();
+                        let short: String = if name.chars().count() > 10 {
+                            let head: String = name.chars().take(9).collect();
+                            format!("{head}…")
+                        } else {
+                            name
+                        };
+                        spans.push(Span::styled(
+                            format!("{short} ■"),
+                            Style::default().fg(pal::c(pal::TEXT_MUTED)),
+                        ));
+                        spans.push(Span::styled(
+                            format!(" w {:.1}G ", tw * g.vram_total_gb()),
+                            Style::default().fg(pal::c(pal::TEXT_DIM)),
+                        ));
+                        spans.push(Span::styled("■", Style::default().fg(pal::c(pal::TEAL))));
+                        spans.push(Span::styled(
+                            format!(" kv {:.1}G", tk * g.vram_total_gb()),
+                            Style::default().fg(pal::c(pal::TEXT_DIM)),
+                        ));
+                    }
+                    None => {
+                        spans.push(Span::styled(
+                            " other server",
+                            Style::default().fg(pal::c(pal::TEXT_DIM)),
+                        ));
+                    }
                 }
             }
             lines.push(Line::from(spans));
