@@ -698,12 +698,20 @@ impl Renderer {
         }
         tail.extend(extras);
         let bar_w = w.saturating_sub(fixed).clamp(4, 30);
-        let mut spans = vec![Span::styled(
-            name.clone(),
+        // Highlight cards the focused model is pinned to (affinity /
+        // gpu_indices): white for its cards, grey for everyone else's.
+        let affinity = d
+            .detected
+            .map(|m| m.gpu_indices.is_empty() || m.gpu_indices.contains(&g.index))
+            .unwrap_or(true);
+        let name_style = if affinity {
             Style::default()
                 .fg(pal::c(pal::WHITE))
-                .add_modifier(Modifier::BOLD),
-        )];
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(pal::c(pal::TEXT_DIM))
+        };
+        let mut spans = vec![Span::styled(name.clone(), name_style)];
         spans.extend(gauge(util, util_peak, bar_w, GaugeStyle::Vu));
         spans.extend(tail);
         lines.push(Line::from(spans));
@@ -732,14 +740,9 @@ impl Renderer {
             } else {
                 Vec::new()
             };
-            let tenant_w = if tenants.is_empty() {
-                0
-            } else {
-                2 + 2 * tenants.len()
-            };
-            let legend_w = if w > 78 + tenant_w { 22 } else { 0 };
+            let legend_w = if w > 78 { 22 } else { 0 };
             let bar_w = w
-                .saturating_sub(label.len() + txt.len() + legend_w + tenant_w)
+                .saturating_sub(label.len() + txt.len() + legend_w)
                 .clamp(4, 40);
             let mut spans = vec![Span::styled(
                 label,
@@ -760,35 +763,6 @@ impl Renderer {
                     .fg(pal::vu(used))
                     .add_modifier(Modifier::BOLD),
             ));
-            if !tenants.is_empty() {
-                spans.push(Span::styled(
-                    "⟨",
-                    Style::default().fg(pal::c(pal::TEXT_MUTED)),
-                ));
-                for (k, i) in tenants.iter().enumerate() {
-                    if k > 0 {
-                        spans.push(Span::styled(
-                            ",",
-                            Style::default().fg(pal::c(pal::TEXT_MUTED)),
-                        ));
-                    }
-                    let focused = *i == d.focus;
-                    spans.push(Span::styled(
-                        format!("{}", i + 1),
-                        Style::default()
-                            .fg(pal::c(if focused { pal::CYAN } else { pal::TEXT_DIM }))
-                            .add_modifier(if focused {
-                                Modifier::BOLD
-                            } else {
-                                Modifier::empty()
-                            }),
-                    ));
-                }
-                spans.push(Span::styled(
-                    "⟩ ",
-                    Style::default().fg(pal::c(pal::TEXT_MUTED)),
-                ));
-            }
             if legend_w > 0 {
                 // The legend must describe what actually occupies the card:
                 // the focused model if it lives here, otherwise the tenant
