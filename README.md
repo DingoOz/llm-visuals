@@ -3,8 +3,8 @@
 **A live terminal dashboard for the LLM running on your machine.**
 
 It finds the inference servers you already have up (llama.cpp `llama-server`,
-ollama, vLLM, SGLang, …), reads their counters and NVIDIA or AMD GPU
-telemetry, and turns them into a truecolor picture of what the model is doing
+ollama, vLLM, SGLang, …), reads their counters and NVIDIA, AMD or Intel
+GPU telemetry, and turns them into a truecolor picture of what the model is doing
 right now: tokens per second, time to first token, GPU load and memory, context fill, speculative-decoding
 acceptance, which layers are busy on which GPU, and, with a small server patch,
 exactly which experts a mixture-of-experts model routed the last token through.
@@ -411,7 +411,7 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | tok/J | decode tok/s ÷ summed GPU power draw |
 | cache hit | llama.cpp: `n_prompt_tokens_cache / n_prompt_tokens`. SGLang without `--enable-metrics` is unknown (shown as "—") |
 | request log | one record per `id_task`; averages from accumulated deltas |
-| util, VRAM, power, °C, clocks, fan, PCIe link | NVIDIA in-process NVML (`nvidia-smi --query-gpu=…` fallback), Intel `xpu-smi --query-gpu=…`, or Linux amdgpu sysfs and hwmon, every poll. Intel drivers currently report GPU util, fan and PCIe link as N/A and temperature as 0, so those read as 0% or blank |
+| util, VRAM, power, °C, clocks, fan, PCIe link | NVIDIA in-process NVML (`nvidia-smi --query-gpu=…` fallback), Intel `xpu-smi --query-gpu=…`, or Linux amdgpu sysfs and hwmon, every poll. On Intel, fan speed is the `xe` driver's hwmon tachometer (RPM); utilization that samples ~0 while clocks are boosted is reconstructed from the clock ratio and marked `~`; PCIe link and an unsupported temperature read blank |
 | VRAM weights vs KV | llama.cpp: **estimate** from GGUF file size × `--tensor-split`. SGLang: `memory.weight_gb` and `memory.kv_cache_gb` from `/v1/loads`. vLLM and other safetensors servers: **estimate** from the summed size of the served directory's weight shards |
 | layers, heads, experts, MTP layers, engram, quant | GGUF header, or HuggingFace `config.json` (`num_hidden_layers`, `num_attention_heads`, `num_experts` / `num_local_experts`, `num_experts_per_tok`) for safetensors dirs |
 | layer → GPU | `--tensor-split` proportions |
@@ -641,7 +641,7 @@ this is what you are hitting. Running the server with `-np 1` avoids it.
 
 `docs/ARCHITECTURE.md` has the module map and data contracts. In short:
 one poller per model reads its `/slots`, `/metrics` and `/experts` while
-shared collectors read NVIDIA or AMD GPU telemetry and the host's `/proc`
+shared collectors read NVIDIA, AMD or Intel GPU telemetry and the host's `/proc`
 counters every 200 ms into channels; samples are tagged with the model's PID, and the frame
 loop routes each into that model's `PerfTracker` (sliding-window rates,
 request lifecycle, peak hold) and `FadeState` (attack/release smoothing,
@@ -657,7 +657,7 @@ src/
 ├── host.rs          /proc disk, faults, RSS; in-process NVML PCIe (dmon fallback)
 ├── fade.rs          smoothing and expert heat
 ├── observe.rs       /slots, /metrics, /experts parsers
-├── gpu.rs           NVIDIA/AMD collectors, demo GPUs
+├── gpu.rs           NVIDIA/AMD/Intel collectors, demo GPUs
 ├── nvml.rs          in-process NVML driver bindings & PCIe throughput
 ├── model_detect.rs  finds the servers, parses their command lines
 ├── gguf.rs          GGUF header reader, layer → GPU mapping
