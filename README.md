@@ -388,9 +388,10 @@ watched and `--pid A,B` restricts it to named processes.
 | `v` | compare every model side by side |
 | `Tab` / `Shift-Tab` | focus the next / previous model |
 | `1`–`9` | focus that model directly |
-| `t` | cycle theme: defrag, neon, fire, ocean, monochrome |
+| `t` | cycle theme (panel frames, backgrounds and heat maps): defrag, neon, fire, ocean, monochrome |
 | `r` | rescan for running servers |
-| `s` | settings screen: change launch options, apply them now or save them as the default |
+| `s` | settings screen (shows the version): change launch options, apply them now or save them as the default |
+| `l` | log viewer: per-model totals and the latest requests from the SQLite log (`r` refreshes) |
 | `q` / `Esc` | quit |
 
 Layouts adapt: the model strip is the first thing shed on a short terminal,
@@ -558,6 +559,11 @@ Three tables are written (timestamps are Unix seconds):
 uses WAL, so it can be queried while the dashboard runs. Once the data passes
 `--log-db-max-mb` (1 GB by default) the oldest tenth of each table is deleted;
 SQLite reuses the freed pages, so the file stops growing at about that size.
+
+Press `l` for a read-only view of the file: row counts, the time span
+covered, per-model request totals with average decode rate and TTFT, and the
+newest requests. With logging off it shows the default file from earlier
+sessions. For anything else, query it directly:
 
 ```sh
 sqlite3 ~/.local/share/llm-visuals/llm.db "SELECT model, AVG(avg_decode_tps) FROM requests GROUP BY model"
