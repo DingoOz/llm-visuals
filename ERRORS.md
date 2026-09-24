@@ -1,5 +1,14 @@
 # Error Log
 
+## Summary
+
+22 entries (as of 2026-09-24). Recurring themes:
+
+- **Optional or missing telemetry treated as a real value** (Logic, most common): a missing counter read as 0, record close gated on optional TTFT, unknown ctx rendered as full, model ownership derived from an unknown weight estimate. Rule of thumb: keep "unknown" distinct from zero and never gate state or ownership on an optional measurement.
+- **Under-discriminating matches when resolving processes/devices**: docker-proxy matched by IP only, comm-name gating, xe fans keyed by a constant path component, env GPU masks merged with host indices. Match on every discriminating field and prefer authoritative (driver/host) sources over inferred ones.
+- **NVML/driver API semantics differing from the CLI** (API Misuse): power limit, reserved VRAM, NOT_SUPPORTED handling, session lifetime.
+- **Hot-path cost**: per-device queries for filtered GPUs, blocking sleeps inside the 200 ms GPU poll.
+
 ### vLLM positional arg parser consumed argv[0] — 2026-09-16
 
 - **Severity:** High
@@ -179,3 +188,44 @@
 - **Root cause:** `nvmlDeviceGetMemoryInfo` (v1) folds the driver's reserved memory into `used`; `nvidia-smi`'s `memory.used` comes from the v2 struct, which reports `reserved` separately. On an idle RTX 5060 Ti NVML said 494 MB used against `nvidia-smi`'s 33 MB (RTX 3070: 364 vs 15), which leaks into the VRAM gauge and the weights/KV split. `bytes_to_mb` also truncated where `nvidia-smi` rounds, reading 1 MB low.
 - **Fix applied:** Prefer `nvmlDeviceGetMemoryInfo_v2` (R510+) with `version = NVML_STRUCT_VERSION(Memory, 2)`, falling back to v1. Round to the nearest MiB. Verified on hardware: both backends now agree to within 1 MB on every field.
 - **Prevention rule:** Verify a new backend against the old one on real hardware, field by field, before relying on "matching" names.
+
+### xe hwmon BDF read from a constant path component — 2026-09-24
+
+- **Severity:** High
+- **Category:** Logic
+- **File(s):** `src/gpu.rs`
+- **Pattern:** Taking `file_name()` of a sysfs symlink path (`hwmonX/device`) expecting the link target's name; it always returns the link's own name, so every entry shares one sort key and the order silently falls back to the next tuple field.
+- **Root cause:** `path.join("device").file_name()` never follows the symlink, so all cards keyed as `"device"` and fans were mapped to GPUs in RPM order.
+- **Fix applied:** `fs::canonicalize(path.join("device"))` before taking the BDF; sysfs read split into `xe_fan_rpm_raw(root)` with a symlink-based test where hwmon, BDF and RPM orders all disagree.
+- **Prevention rule:** For sysfs device identity, canonicalize the `device` link; test ordering with fixtures whose alternative sort keys disagree.
+
+### Blocking retry sleeps inside the GPU poll — 2026-09-24
+
+- **Severity:** Medium
+- **Category:** Other
+- **File(s):** `src/gpu.rs`
+- **Pattern:** A read-retry loop that sleeps whenever a sensor reads 0, where 0 is also a legitimate steady state, so the steady state pays the maximum delay on every poll.
+- **Root cause:** The xe tachometer burst-read slept 3×120 ms per card when fans were stopped (normal at idle), stretching the 200 ms poll to ~1.4 s on 4 cards.
+- **Fix applied:** Single read per poll; the existing 20 s hold bridges the sensor's update cadence.
+- **Prevention rule:** No sleeps in `GpuBackend::collect` paths; smooth intermittent sensors across polls with state, not within one poll.
+
+### Model ownership derived from the weight-size estimate — 2026-09-24
+
+- **Severity:** Medium
+- **Category:** Logic
+- **File(s):** `src/main.rs`, `src/render.rs`
+- **Pattern:** Deriving a placement fact (which GPUs a model occupies) from an optional size estimate, so an unknown size reads as "not here".
+- **Root cause:** `model_owned` was `weight_frac > 0`; with no weight size (common on Intel: no per-process memory) the focused model's own cards were labelled "other server".
+- **Fix applied:** `model_owned` is set from the placement `share > 0` in `fade_sample_from_live`.
+- **Prevention rule:** Placement comes from `gpu_indices`/tensor split only; never infer it from byte estimates.
+
+### Environment GPU mask merged with driver-reported host indices — 2026-09-24
+
+- **Severity:** Medium
+- **Category:** Logic
+- **File(s):** `src/model_detect.rs`
+- **Pattern:** Merging GPU indices from a process's env (`CUDA_VISIBLE_DEVICES`, `ZE_AFFINITY_MASK`), which may be relative to a container's device set, with driver-reported host indices.
+- **Root cause:** Env affinity seeded `gpu_indices` before the compute-app worker merge, so a container mask `0` plus host GPU `2` produced `[0, 2]`. Mask forms `0,1` and tile syntax `2.0` also parsed to nothing.
+- **Fix applied:** Env affinity applies only when no driver placement exists; both variables parse as comma lists with the tile suffix stripped (`parse_gpu_affinity`, tested).
+- **Prevention rule:** Driver-reported indices are authoritative; inferred placement is a fallback only, never merged with them.
+

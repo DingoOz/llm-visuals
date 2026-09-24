@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time;
 
 use crate::nvml::NvmlSession;
@@ -25,6 +25,8 @@ pub struct GpuStats {
     pub fan_pct: Option<f32>,
     /// Raw tachometer reading (RPM) for backends that expose it (Intel xe).
     pub fan_rpm: Option<u32>,
+    /// utilization_gpu was reconstructed from clocks (xpu-smi), not sampled.
+    pub util_estimated: bool,
     pub pcie_gen: u32,
     pub pcie_width: u32,
 }
@@ -178,76 +180,64 @@ fn run_smi(bin: &str, query: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-/// Fan RPM per GPU index from the `xe` driver's hwmon entries. xpu-smi
-/// orders its device indices by ascending PCI BDF; the xe hwmon class
-/// exposes one entry per card with `fan1_input` (RPM). Returns an empty
-/// map when the enumeration disagrees with the reported device count.
-/// Fan-hold cache: xe's tachometer is intermittent — at 79 °C and 240 W
-/// sustained it reports 0 on most samples, flickering nonzero for a poll
-/// or two. Hold the last nonzero reading for a decay window so the panel
-/// doesn't flash 0 RPM between real updates; expire to 0 if the sensor
-/// stays silent (fans genuinely stopped).
-fn xe_fan_hold(
-) -> &'static std::sync::Mutex<std::collections::HashMap<u32, (u32, std::time::Instant)>> {
-    use std::sync::OnceLock;
-    static HOLD: OnceLock<
-        std::sync::Mutex<std::collections::HashMap<u32, (u32, std::time::Instant)>>,
-    > = OnceLock::new();
-    HOLD.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+/// Fan RPM per card from the `xe` driver's hwmon entries, in ascending
+/// PCI BDF order (xpu-smi's device index order).
+///
+/// xe's tachometer is intermittent: at 79 °C and 240 W sustained it reports
+/// 0 on most reads, flickering nonzero for a poll or two. Hold the last
+/// nonzero reading for FAN_HOLD so the panel doesn't flash 0 RPM between
+/// real updates; after that, 0 means the fans genuinely stopped.
+fn xe_fan_rpm_by_index() -> Vec<u32> {
+    static HOLD: std::sync::Mutex<Vec<(u32, Instant)>> = std::sync::Mutex::new(Vec::new());
+    let cards = xe_fan_rpm_raw(Path::new("/sys/class/hwmon"));
+    let now = Instant::now();
+    let mut hold = HOLD.lock().unwrap_or_else(|e| e.into_inner());
+    hold.resize(cards.len(), (0, now));
+    cards
+        .iter()
+        .zip(hold.iter_mut())
+        .map(|(&rpm, h)| {
+            if rpm > 0 {
+                *h = (rpm, now);
+                rpm
+            } else if now.duration_since(h.1) < FAN_HOLD {
+                h.0
+            } else {
+                0
+            }
+        })
+        .collect()
 }
 
-const FAN_HOLD_SECS: f32 = 20.0;
+const FAN_HOLD: Duration = Duration::from_secs(20);
 
-fn xe_fan_rpm_by_index() -> Vec<u32> {
-    let mut cards: Vec<(String, u32)> = Vec::new(); // (BDF, rpm)
-    let Ok(hwmons) = std::fs::read_dir("/sys/class/hwmon") else {
+/// One instantaneous `fan1_input` read per xe card under `hwmon_root`,
+/// sorted by PCI BDF.
+fn xe_fan_rpm_raw(hwmon_root: &Path) -> Vec<u32> {
+    let Ok(hwmons) = std::fs::read_dir(hwmon_root) else {
         return Vec::new();
     };
+    let mut cards: Vec<(String, u32)> = Vec::new(); // (BDF, rpm)
     for entry in hwmons.flatten() {
         let path = entry.path();
         if read_trimmed(path.join("name")).as_deref() != Some("xe") {
             continue;
         }
-        // The tachometer only reports on its own update cadence: a single
-        // read usually lands between updates and returns 0 even while the
-        // fan spins. Take a couple of reads and keep the max.
-        let mut rpm = 0u32;
-        for _ in 0..3 {
-            let v = read_trimmed(path.join("fan1_input"))
-                .and_then(|t| t.parse::<u32>().ok())
-                .unwrap_or(0);
-            rpm = rpm.max(v);
-            if rpm > 0 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(120));
-        }
-        let bdf = entry
-            .path()
-            .join("device")
-            .file_name()
-            .map(|b| b.to_string_lossy().into_owned());
-        if let Some(bdf) = bdf {
-            cards.push((bdf, rpm));
-        }
+        // `device` is a symlink to the PCI device; its target's last
+        // component is the BDF (e.g. 0000:03:00.0).
+        let Some(bdf) = std::fs::canonicalize(path.join("device"))
+            .ok()
+            .and_then(|p| p.file_name().map(|b| b.to_string_lossy().into_owned()))
+        else {
+            continue;
+        };
+        let rpm = read_trimmed(path.join("fan1_input"))
+            .and_then(|t| t.parse::<u32>().ok())
+            .unwrap_or(0);
+        cards.push((bdf, rpm));
     }
     cards.sort();
-    let mut held: Vec<u32> = cards.into_iter().map(|(_, rpm)| rpm).collect();
-    let mut cache = xe_fan_hold().lock().unwrap_or_else(|e| e.into_inner());
-    for (i, rpm) in held.iter_mut().enumerate() {
-        let entry = cache
-            .entry(i as u32)
-            .or_insert((0, std::time::Instant::now()));
-        if *rpm > 0 {
-            *entry = (*rpm, std::time::Instant::now());
-        } else if entry.1.elapsed().as_secs_f32() < FAN_HOLD_SECS {
-            // Sensor went quiet right after a real reading: hold it.
-            *rpm = entry.0;
-        } else {
-            *entry = (0, std::time::Instant::now());
-        }
-    }
-    held
+    cards.into_iter().map(|(_, rpm)| rpm).collect()
 }
 
 /// xpu-smi CSV in XPU_QUERY order. Current Intel drivers report an
@@ -264,9 +254,12 @@ fn xe_fan_rpm_by_index() -> Vec<u32> {
 fn parse_xpu_csv(text: &str) -> Vec<GpuStats> {
     let mut gpus = parse_csv(text);
     let fan_map = xe_fan_rpm_by_index();
+    // An xe card without hwmon (or one xpu-smi skips) would shift every
+    // index; show no fan rather than another card's.
+    let fans_match = fan_map.len() == gpus.len();
     for g in &mut gpus {
-        if let Some(rpm) = fan_map.get(g.index as usize) {
-            g.fan_rpm = Some(*rpm);
+        if fans_match {
+            g.fan_rpm = fan_map.get(g.index as usize).copied();
         }
         if g.temperature == Some(0.0) {
             g.temperature = None;
@@ -278,6 +271,7 @@ fn parse_xpu_csv(text: &str) -> Vec<GpuStats> {
             if g.clock_sm_mhz as f32 > floor {
                 let boost = (g.clock_sm_mhz as f32 - floor) / (g.clock_sm_max_mhz as f32 - floor);
                 g.utilization_gpu = g.utilization_gpu.max(boost * 100.0);
+                g.util_estimated = true;
             }
         }
     }
@@ -421,6 +415,7 @@ fn amd_stats(index: u32, device: &AmdDevice) -> GpuStats {
         clock_mem_mhz,
         fan_pct,
         fan_rpm: None,
+        util_estimated: false,
         pcie_gen,
         pcie_width,
     }
@@ -565,6 +560,7 @@ pub fn parse_csv(stdout: &str) -> Vec<GpuStats> {
             clock_mem_mhz: int(12) as u32,
             fan_pct: opt(13),
             fan_rpm: None,
+            util_estimated: false,
             pcie_gen: int(14) as u32,
             pcie_width: int(15) as u32,
         });
@@ -658,6 +654,7 @@ impl DemoGpu {
             clock_sm_max_mhz: cmax,
             clock_mem_mhz: if self.index == 1 { 715 } else { 3802 },
             fan_rpm: None,
+            util_estimated: false,
             fan_pct: if self.index == 1 {
                 None
             } else {
@@ -722,6 +719,30 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn xe_fans_ordered_by_pci_bdf() {
+        let dir =
+            std::env::temp_dir().join(format!("llm-visuals-xe-fan-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // hwmon numbering deliberately disagrees with BDF order and RPM order.
+        for (hwmon, name, bdf, rpm) in [
+            ("hwmon0", "xe", "0000:83:00.0", "900"),
+            ("hwmon1", "xe", "0000:03:00.0", "1500"),
+            ("hwmon2", "coretemp", "0000:00:00.0", "42"),
+        ] {
+            let h = dir.join("class").join(hwmon);
+            let pci = dir.join("pci").join(bdf);
+            std::fs::create_dir_all(&h).unwrap();
+            std::fs::create_dir_all(&pci).unwrap();
+            std::os::unix::fs::symlink(&pci, h.join("device")).unwrap();
+            std::fs::write(h.join("name"), format!("{name}\n")).unwrap();
+            std::fs::write(h.join("fan1_input"), format!("{rpm}\n")).unwrap();
+        }
+        assert_eq!(xe_fan_rpm_raw(&dir.join("class")), vec![1500, 900]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn xpu_utilization_reconstructed_from_boost_clock() {
         // During EXL3 decode the instantaneous tile utilization samples ~0
         // while the SM is boosted (230 W, ~2.5 GHz). The clock ratio above
@@ -732,6 +753,7 @@ mod tests {
         // floor = 0.5*2700 = 1350; boost = (2508-1350)/1350 ≈ 0.858
         assert!(s[0].utilization_gpu > 80.0, "util={}", s[0].utilization_gpu);
         assert!(s[0].utilization_gpu <= 100.0);
+        assert!(s[0].util_estimated);
 
         // Idle: clock at the floor, utilization stays 0.
         let idle = "2,Intel(R) Arc(TM) Pro B70 Graphics,32656,32000,656,0.00,99.60,57.00,230.00,51.00,1200,2700,400,N/A,0,-1\n";
@@ -740,6 +762,7 @@ mod tests {
         // A real nonzero sample is never lowered by the reconstruction.
         let real = "2,Intel(R) Arc(TM) Pro B70 Graphics,32656,32000,656,22.22,99.60,238.00,230.00,64.00,2508,2700,400,N/A,0,-1\n";
         assert_eq!(parse_xpu_csv(real)[0].utilization_gpu, 22.22);
+        assert!(!parse_xpu_csv(real)[0].util_estimated);
     }
 
     #[test]

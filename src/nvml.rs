@@ -522,6 +522,7 @@ impl NvmlSession {
                 clock_mem_mhz: mem_clock,
                 fan_pct,
                 fan_rpm: None,
+                util_estimated: false,
                 pcie_gen,
                 pcie_width,
             });

@@ -1118,6 +1118,9 @@ fn fade_sample_from_live(
     let split_sum: f32 = split.iter().copied().sum::<f32>().max(1.0);
     let mut weight_frac = vec![0.0f32; n_gpus];
     let mut kv_alloc_frac = vec![0.0f32; n_gpus];
+    // Placement, not the weight estimate: a model whose size is unknown
+    // still owns the cards it runs on.
+    let mut model_owned = vec![false; n_gpus];
     for g in gpu {
         let i = g.index as usize;
         if i >= n_gpus {
@@ -1140,6 +1143,7 @@ fn fade_sample_from_live(
             // Unknown layout: assume it spans every visible GPU.
             1.0 / gpu.len().max(1) as f32
         };
+        model_owned[i] = share > 0.0;
         let used_f = if g.mem_total_mb == 0 {
             0.0
         } else {
@@ -1163,7 +1167,6 @@ fn fade_sample_from_live(
             kv_alloc_frac[i] = (used_f - weight_frac[i]).max(0.0);
         }
     }
-    let model_owned: Vec<bool> = weight_frac.iter().map(|w| *w > 0.0).collect();
     FadeSample {
         layer_target,
         layer_gpu,
