@@ -56,7 +56,7 @@ pub struct Args {
     #[arg(long, default_value_t = 64)]
     pub max_tokens: usize,
 
-    /// Color theme: defrag, neon, fire, ocean, monochrome
+    /// Color theme: defrag, neon, fire, ocean, monochrome, braille
     #[arg(long, default_value = "defrag")]
     pub theme: String,
 

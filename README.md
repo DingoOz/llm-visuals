@@ -388,7 +388,7 @@ watched and `--pid A,B` restricts it to named processes.
 | `v` | compare every model side by side |
 | `Tab` / `Shift-Tab` | focus the next / previous model |
 | `1`–`9` | focus that model directly |
-| `t` | cycle theme (panel frames, backgrounds and heat maps): defrag, neon, fire, ocean, monochrome |
+| `t` | cycle theme (panel frames, backgrounds and heat maps): defrag, neon, fire, ocean, monochrome, braille (btop-style braille graphs) |
 | `r` | rescan for running servers |
 | `s` | settings screen (shows the version): change launch options, apply them now or save them as the default |
 | `l` | log viewer: per-model totals and the latest requests from the SQLite log (`r` refreshes) |
@@ -513,7 +513,7 @@ MTP.
 --poll-ms 200        sampling interval for the server and GPU telemetry
 --api-key-file PATH  bearer token file for inference-server HTTP requests
 --color auto|truecolor|256
---theme defrag|neon|fire|ocean|monochrome
+--theme defrag|neon|fire|ocean|monochrome|braille
 --max-layers N, --max-heads N     caps for the attention view
 --log-db auto|off|FILE  SQLite log of samples and requests (default: auto)
 --log-every 1.0      seconds between --log-db sample rows

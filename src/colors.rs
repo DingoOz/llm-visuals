@@ -209,6 +209,8 @@ pub struct Chrome {
     pub track: (u8, u8, u8),
     /// Title and highlight colour; `None` keeps each panel's own accent.
     pub accent: Option<(u8, u8, u8)>,
+    /// Draw history graphs with braille dots (2×4 per cell), as btop does.
+    pub braille: bool,
 }
 
 const DEFRAG_CHROME: Chrome = Chrome {
@@ -217,6 +219,7 @@ const DEFRAG_CHROME: Chrome = Chrome {
     border: BORDER,
     track: TRACK,
     accent: None,
+    braille: false,
 };
 
 thread_local! {
@@ -278,6 +281,7 @@ pub fn neon_theme() -> ColorTheme {
             border: (90, 40, 130),
             track: (44, 24, 64),
             accent: Some((255, 60, 225)),
+            braille: false,
         },
     }
 }
@@ -298,6 +302,7 @@ pub fn fire_theme() -> ColorTheme {
             border: (110, 45, 20),
             track: (54, 28, 20),
             accent: Some((255, 140, 30)),
+            braille: false,
         },
     }
 }
@@ -318,6 +323,7 @@ pub fn ocean_theme() -> ColorTheme {
             border: (30, 80, 120),
             track: (20, 42, 64),
             accent: Some((0, 190, 230)),
+            braille: false,
         },
     }
 }
@@ -338,11 +344,34 @@ pub fn monochrome_theme() -> ColorTheme {
             border: (80, 80, 90),
             track: (40, 40, 46),
             accent: Some((225, 225, 232)),
+            braille: false,
         },
     }
 }
 
-pub const THEME_NAMES: &[&str] = &["defrag", "neon", "fire", "ocean", "monochrome"];
+/// btop's look: braille graphs, green → yellow → red heat, grey frames.
+pub fn braille_theme() -> ColorTheme {
+    ColorTheme {
+        name: "braille",
+        stops: vec![
+            (0.0, (16, 20, 18)),
+            (0.3, (40, 120, 80)),
+            (0.6, (80, 240, 149)),
+            (0.85, (242, 226, 102)),
+            (1.0, (250, 30, 30)),
+        ],
+        chrome: Chrome {
+            bg: (10, 10, 10),
+            panel: (20, 20, 20),
+            border: (64, 64, 64),
+            track: (34, 34, 34),
+            accent: Some((80, 240, 149)),
+            braille: true,
+        },
+    }
+}
+
+pub const THEME_NAMES: &[&str] = &["defrag", "neon", "fire", "ocean", "monochrome", "braille"];
 
 pub fn get_theme(name: &str) -> ColorTheme {
     match name.to_lowercase().as_str() {
@@ -350,6 +379,7 @@ pub fn get_theme(name: &str) -> ColorTheme {
         "fire" => fire_theme(),
         "ocean" => ocean_theme(),
         "mono" | "monochrome" => monochrome_theme(),
+        "braille" | "btop" => braille_theme(),
         _ => defrag_theme(),
     }
 }
@@ -397,7 +427,7 @@ mod tests {
 
     #[test]
     fn theme_cycle_wraps() {
-        assert_eq!(next_theme_name("monochrome"), "defrag");
+        assert_eq!(next_theme_name("braille"), "defrag");
         assert_eq!(next_theme_name("defrag"), "neon");
     }
 }

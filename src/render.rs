@@ -3419,6 +3419,9 @@ fn sparkline(
     max: f32,
     grad: &[(f32, (u8, u8, u8))],
 ) -> Vec<Vec<Span<'static>>> {
+    if pal::chrome().braille {
+        return braille_sparkline(values, width, rows, max, grad);
+    }
     let rows = rows.max(1);
     let max = max.max(1e-3);
     let n = values.len();
@@ -3454,6 +3457,59 @@ fn sparkline(
                 Span::styled(ch, Style::default().fg(col))
             };
             out[r].push(span);
+        }
+    }
+    out
+}
+
+/// `sparkline` in braille: each cell carries two samples side by side and
+/// four dots of height per row, filled from the foot like btop's graphs.
+fn braille_sparkline(
+    values: &[f32],
+    width: usize,
+    rows: usize,
+    max: f32,
+    grad: &[(f32, (u8, u8, u8))],
+) -> Vec<Vec<Span<'static>>> {
+    // Dot bits of the left and right columns, bottom dot first.
+    const LEFT: [u32; 4] = [0x40, 0x04, 0x02, 0x01];
+    const RIGHT: [u32; 4] = [0x80, 0x20, 0x10, 0x08];
+    let rows = rows.max(1);
+    let max = max.max(1e-3);
+    let n = values.len();
+    let start = n.saturating_sub(width * 2);
+    let pad = (width * 2).saturating_sub(n);
+    let sample = |i: usize| {
+        (i >= pad)
+            .then(|| values[start + i - pad])
+            .filter(|v| !v.is_nan())
+    };
+    let dots = |v: f32| ((v / max).clamp(0.0, 1.0) * rows as f32 * 4.0).round() as usize;
+    let track = Style::default().fg(pal::c(pal::chrome().track));
+    let mut out: Vec<Vec<Span<'static>>> = vec![Vec::with_capacity(width); rows];
+    for x in 0..width {
+        let (l, r) = (sample(2 * x), sample(2 * x + 1));
+        if l.is_none() && r.is_none() {
+            for row in out.iter_mut() {
+                row.push(Span::raw(" "));
+            }
+            continue;
+        }
+        let (hl, hr) = (l.map_or(0, dots), r.map_or(0, dots));
+        let top = l.unwrap_or(0.0).max(r.unwrap_or(0.0));
+        let col = pal::gradient_color(grad, (top / max).clamp(0.0, 1.0));
+        for (ri, row) in out.iter_mut().enumerate() {
+            let from_bottom = rows - 1 - ri;
+            let fill = |h: usize| h.saturating_sub(from_bottom * 4).min(4);
+            let bits: u32 = LEFT[..fill(hl)].iter().chain(&RIGHT[..fill(hr)]).sum();
+            row.push(if bits == 0 && from_bottom == 0 {
+                Span::styled("⣀", track)
+            } else if bits == 0 {
+                Span::raw(" ")
+            } else {
+                let ch = char::from_u32(0x2800 + bits).unwrap_or(' ');
+                Span::styled(ch.to_string(), Style::default().fg(col))
+            });
         }
     }
     out
@@ -3661,6 +3717,23 @@ mod tests {
         // Half-height sample fills only the bottom row.
         assert_eq!(rows[0][3].content, " ");
         assert_eq!(rows[1][3].content, "█");
+    }
+
+    #[test]
+    fn braille_sparkline_packs_two_samples_per_cell() {
+        pal::set_chrome(pal::get_theme("braille").chrome);
+        // Cells: [pad, pad], [0, 50], [100, 25].
+        let rows = sparkline(&[0.0, 50.0, 100.0, 25.0], 3, 2, 100.0, pal::FLOW);
+        pal::set_chrome(pal::get_theme("defrag").chrome);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].len(), 3);
+        assert_eq!(rows[1][0].content, " ");
+        // 0 and 50 of 8 dots: left empty, right full in the bottom row only.
+        assert_eq!(rows[0][1].content, " ");
+        assert_eq!(rows[1][1].content, "⢸");
+        // 100 fills the left column in both rows; 25 is two dots on the right.
+        assert_eq!(rows[0][2].content, "⡇");
+        assert_eq!(rows[1][2].content, "⣧");
     }
 
     #[test]
