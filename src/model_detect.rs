@@ -565,10 +565,6 @@ pub fn detect_models() -> Vec<DetectedModel> {
         if parsed.engine == "sglang" {
             parsed.port = resolve_container_host_port(pid, parsed.port, 30000);
         }
-        // Engines pinned by environment (docker --gpu / ZE_AFFINITY_MASK)
-        // never show up in the driver's compute-app tables; recover their
-        // GPU placement from /proc/<pid>/environ.
-        let gpu_indices = env_gpu_affinity(pid);
         by_pid.insert(
             pid,
             DetectedModel {
@@ -577,7 +573,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
                 pid,
                 process_name: name,
                 engine: parsed.engine,
-                gpu_indices,
+                gpu_indices: Vec::new(),
                 mem_used_mb: 0,
                 host: parsed.host,
                 port: parsed.port,
@@ -600,6 +596,17 @@ pub fn detect_models() -> Vec<DetectedModel> {
                     m.gpu_indices.push(g);
                 }
             }
+        }
+    }
+
+    // Engines pinned by environment (ZE_AFFINITY_MASK on Intel, which has
+    // no compute-app table) have no driver-reported placement; recover it
+    // from /proc/<pid>/environ. Only as a fallback: driver indices are
+    // host indices, while an env mask inside a container can be relative
+    // to the devices passed through.
+    for m in by_pid.values_mut() {
+        if m.gpu_indices.is_empty() {
+            m.gpu_indices = env_gpu_affinity(m.pid);
         }
     }
 
@@ -1120,35 +1127,28 @@ fn walk_proc_llms() -> Vec<(u32, String, String)> {
 }
 
 /// GPUs a process is pinned to via its affinity environment
-/// (`CUDA_VISIBLE_DEVICES` for NVIDIA/vLLM-style serving, `ZE_AFFINITY_MASK`
-/// for Intel Level Zero). Returns indices for the first form
-/// (`"0,1"`, optional leading zeros per entry); a single-value mask is one
-/// GPU index. Empty when neither variable is set (process reads /proc/.../environ
-/// as root, which the dashboard container is).
+/// (`CUDA_VISIBLE_DEVICES`, or `ZE_AFFINITY_MASK` for Intel Level Zero).
+/// Empty when neither is set or /proc/<pid>/environ is unreadable (needs
+/// the same uid or root).
 fn env_gpu_affinity(pid: u32) -> Vec<u32> {
-    let env = match std::fs::read_to_string(format!("/proc/{pid}/environ")) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-    let mut out = Vec::new();
-    for kv in env.split('\0') {
-        let (key, val) = match kv.split_once('=') {
-            Some(kv) => kv,
-            None => continue,
-        };
-        let indices: Vec<u32> = match key {
-            "CUDA_VISIBLE_DEVICES" => val
-                .split(',')
-                .filter_map(|s| s.trim().parse::<u32>().ok())
-                .collect(),
-            "ZE_AFFINITY_MASK" => match val.trim().parse::<u32>() {
-                Ok(v) => vec![v],
-                Err(_) => Vec::new(),
-            },
-            _ => continue,
-        };
-        out.extend(indices);
-    }
+    std::fs::read_to_string(format!("/proc/{pid}/environ"))
+        .map(|env| parse_gpu_affinity(&env))
+        .unwrap_or_default()
+}
+
+/// Device indices from a NUL-separated environ block. Both variables are
+/// comma lists; ZE_AFFINITY_MASK entries may name a tile (`2.0`), which
+/// still lives on card 2. UUID entries are skipped.
+fn parse_gpu_affinity(environ: &str) -> Vec<u32> {
+    let mut out: Vec<u32> = environ
+        .split('\0')
+        .filter_map(|kv| kv.split_once('='))
+        .filter(|(k, _)| matches!(*k, "CUDA_VISIBLE_DEVICES" | "ZE_AFFINITY_MASK"))
+        .flat_map(|(_, v)| v.split(','))
+        .filter_map(|d| d.split('.').next()?.trim().parse().ok())
+        .collect();
+    out.sort_unstable();
+    out.dedup();
     out
 }
 
@@ -1800,6 +1800,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gpu_affinity_from_environ() {
+        let env = "PATH=/bin\0ZE_AFFINITY_MASK=2.0,3\0CUDA_VISIBLE_DEVICES=GPU-ab12,3\0";
+        assert_eq!(parse_gpu_affinity(env), vec![2, 3]);
+        assert!(parse_gpu_affinity("CUDA_VISIBLE_DEVICES=\0").is_empty());
+    }
+
+    #[test]
     fn parse_llama_server_cmdline() {
         let cmd = "/home/dingo/models/llama.cpp/build/bin/llama-server --model /home/dingo/models/Qwen3.6-35B-A3B-MTP-UD-Q3_K_XL.gguf --alias qwen3.6-35b-a3b --host 0.0.0.0 --port 8080 --n-gpu-layers 99 --tensor-split 63,37 --spec-type draft-mtp --ctx-size 98304";
         let p = parse_cmdline("llama-server", cmd);
@@ -2233,6 +2240,8 @@ mod tests {
         assert_eq!(resolved.as_deref(), Some(test_file.as_path()));
 
         let _ = std::fs::remove_file(&test_file);
+        // Only removes ./models if the test created it (it is then empty).
+        let _ = std::fs::remove_dir(&models_dir);
     }
 
     #[test]

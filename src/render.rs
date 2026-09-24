@@ -652,7 +652,12 @@ impl Renderer {
         let temp_col = pal::gradient_color(pal::TEMP, (temp - 30.0) / 65.0);
         let mut tail: Vec<Span> = vec![
             Span::styled(
-                format!(" {:>3.0}%", util * 100.0),
+                // "~": reconstructed from clocks, not a driver sample.
+                format!(
+                    "{}{:>3.0}%",
+                    if g.util_estimated { "~" } else { " " },
+                    util * 100.0
+                ),
                 Style::default()
                     .fg(pal::vu(util))
                     .add_modifier(Modifier::BOLD),
@@ -747,9 +752,14 @@ impl Renderer {
             } else {
                 Vec::new()
             };
-            let legend_w = if w > 78 { 22 } else { 0 };
+            let tenant_w = if tenants.is_empty() {
+                0
+            } else {
+                2 + 2 * tenants.len()
+            };
+            let legend_w = if w > 78 + tenant_w { 22 } else { 0 };
             let bar_w = w
-                .saturating_sub(label.len() + txt.len() + legend_w)
+                .saturating_sub(label.len() + txt.len() + legend_w + tenant_w)
                 .clamp(4, 40);
             let mut spans = vec![Span::styled(
                 label,
@@ -770,63 +780,70 @@ impl Renderer {
                     .fg(pal::vu(used))
                     .add_modifier(Modifier::BOLD),
             ));
+            if !tenants.is_empty() {
+                spans.push(Span::styled(
+                    "⟨",
+                    Style::default().fg(pal::c(pal::TEXT_MUTED)),
+                ));
+                for (k, i) in tenants.iter().enumerate() {
+                    if k > 0 {
+                        spans.push(Span::styled(
+                            ",",
+                            Style::default().fg(pal::c(pal::TEXT_MUTED)),
+                        ));
+                    }
+                    let focused = *i == d.focus;
+                    spans.push(Span::styled(
+                        format!("{}", i + 1),
+                        Style::default()
+                            .fg(pal::c(if focused { pal::CYAN } else { pal::TEXT_DIM }))
+                            .add_modifier(if focused {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    ));
+                }
+                spans.push(Span::styled(
+                    "⟩ ",
+                    Style::default().fg(pal::c(pal::TEXT_MUTED)),
+                ));
+            }
             if legend_w > 0 {
-                // The legend must describe what actually occupies the card:
-                // the focused model if it lives here, otherwise the tenant
-                // that does (labeled), never another engine's memory passed
-                // off as this model's KV cache.
-                let focused_owns = d
-                    .fade
-                    .model_owned
-                    .get(g.index as usize)
-                    .copied()
-                    .unwrap_or(true);
-                let tenant = tenants.iter().copied().find(|&i| {
-                    d.models[i]
-                        .fade
-                        .model_owned
-                        .get(g.index as usize)
-                        .copied()
-                        .unwrap_or(false)
-                });
-                match if focused_owns { None } else { tenant } {
-                    None if focused_owns => {
-                        spans.push(Span::styled("■", Style::default().fg(pal::c(pal::BLUE))));
-                        spans.push(Span::styled(
-                            format!(" w {:.1}G ", weights * g.vram_total_gb()),
-                            Style::default().fg(pal::c(pal::TEXT_DIM)),
-                        ));
-                        spans.push(Span::styled("■", Style::default().fg(pal::c(pal::TEAL))));
-                        spans.push(Span::styled(
-                            format!(" kv {:.1}G", kv * g.vram_total_gb()),
-                            Style::default().fg(pal::c(pal::TEXT_DIM)),
-                        ));
-                    }
-                    Some(t) => {
-                        let tf = &d.models[t].fade;
-                        let tw = tf.weight_frac.get(g.index as usize).copied().unwrap_or(0.0);
-                        let tk = tf
-                            .kv_alloc_frac
-                            .get(g.index as usize)
-                            .copied()
-                            .unwrap_or(0.0);
-                        spans.push(Span::styled("■", Style::default().fg(pal::c(pal::BLUE))));
-                        spans.push(Span::styled(
-                            format!(" w {:.1}G ", tw * g.vram_total_gb()),
-                            Style::default().fg(pal::c(pal::TEXT_DIM)),
-                        ));
-                        spans.push(Span::styled("■", Style::default().fg(pal::c(pal::TEAL))));
-                        spans.push(Span::styled(
-                            format!(" kv {:.1}G", tk * g.vram_total_gb()),
-                            Style::default().fg(pal::c(pal::TEXT_DIM)),
-                        ));
-                    }
-                    None => {
-                        spans.push(Span::styled(
-                            " other server",
-                            Style::default().fg(pal::c(pal::TEXT_DIM)),
-                        ));
-                    }
+                // Describe what actually occupies the card: the focused
+                // model if it lives here, else the tenant that does, never
+                // another engine's memory passed off as this model's KV.
+                let owns = |f: &FadeState| f.model_owned.get(gi).copied();
+                let wk = if owns(d.fade).unwrap_or(true) {
+                    Some((weights, kv))
+                } else {
+                    tenants
+                        .iter()
+                        .map(|&i| d.models[i].fade)
+                        .find(|f| owns(f).unwrap_or(false))
+                        .map(|f| {
+                            (
+                                f.weight_frac.get(gi).copied().unwrap_or(0.0),
+                                f.kv_alloc_frac.get(gi).copied().unwrap_or(0.0),
+                            )
+                        })
+                };
+                if let Some((wt, kt)) = wk {
+                    spans.push(Span::styled("■", Style::default().fg(pal::c(pal::BLUE))));
+                    spans.push(Span::styled(
+                        format!(" w {:.1}G ", wt * g.vram_total_gb()),
+                        Style::default().fg(pal::c(pal::TEXT_DIM)),
+                    ));
+                    spans.push(Span::styled("■", Style::default().fg(pal::c(pal::TEAL))));
+                    spans.push(Span::styled(
+                        format!(" kv {:.1}G", kt * g.vram_total_gb()),
+                        Style::default().fg(pal::c(pal::TEXT_DIM)),
+                    ));
+                } else {
+                    spans.push(Span::styled(
+                        " other server",
+                        Style::default().fg(pal::c(pal::TEXT_DIM)),
+                    ));
                 }
             }
             lines.push(Line::from(spans));
