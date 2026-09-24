@@ -683,6 +683,13 @@ impl Renderer {
                 format!("  fan {f:>2.0}%"),
                 Style::default().fg(pal::c(pal::TEXT_DIM)),
             ));
+        } else if let Some(rpm) = g.fan_rpm {
+            // Intel xe exposes a tachometer, not a PWM percent. 0 RPM at
+            // idle means the fans are stopped — say "0" like a BIOS would.
+            extras.push(Span::styled(
+                format!("  fan {rpm:>4.0}RPM"),
+                Style::default().fg(pal::c(pal::TEXT_DIM)),
+            ));
         }
         if g.pcie_gen > 0 {
             extras.push(Span::styled(
@@ -698,12 +705,20 @@ impl Renderer {
         }
         tail.extend(extras);
         let bar_w = w.saturating_sub(fixed).clamp(4, 30);
-        let mut spans = vec![Span::styled(
-            name.clone(),
+        // Highlight cards the focused model is pinned to (affinity /
+        // gpu_indices): white for its cards, grey for everyone else's.
+        let affinity = d
+            .detected
+            .map(|m| m.gpu_indices.is_empty() || m.gpu_indices.contains(&g.index))
+            .unwrap_or(true);
+        let name_style = if affinity {
             Style::default()
                 .fg(pal::c(pal::WHITE))
-                .add_modifier(Modifier::BOLD),
-        )];
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(pal::c(pal::TEXT_DIM))
+        };
+        let mut spans = vec![Span::styled(name.clone(), name_style)];
         spans.extend(gauge(util, util_peak, bar_w, GaugeStyle::Vu));
         spans.extend(tail);
         lines.push(Line::from(spans));
@@ -732,14 +747,9 @@ impl Renderer {
             } else {
                 Vec::new()
             };
-            let tenant_w = if tenants.is_empty() {
-                0
-            } else {
-                2 + 2 * tenants.len()
-            };
-            let legend_w = if w > 78 + tenant_w { 22 } else { 0 };
+            let legend_w = if w > 78 { 22 } else { 0 };
             let bar_w = w
-                .saturating_sub(label.len() + txt.len() + legend_w + tenant_w)
+                .saturating_sub(label.len() + txt.len() + legend_w)
                 .clamp(4, 40);
             let mut spans = vec![Span::styled(
                 label,
@@ -760,46 +770,64 @@ impl Renderer {
                     .fg(pal::vu(used))
                     .add_modifier(Modifier::BOLD),
             ));
-            if !tenants.is_empty() {
-                spans.push(Span::styled(
-                    "⟨",
-                    Style::default().fg(pal::c(pal::TEXT_MUTED)),
-                ));
-                for (k, i) in tenants.iter().enumerate() {
-                    if k > 0 {
+            if legend_w > 0 {
+                // The legend must describe what actually occupies the card:
+                // the focused model if it lives here, otherwise the tenant
+                // that does (labeled), never another engine's memory passed
+                // off as this model's KV cache.
+                let focused_owns = d
+                    .fade
+                    .model_owned
+                    .get(g.index as usize)
+                    .copied()
+                    .unwrap_or(true);
+                let tenant = tenants.iter().copied().find(|&i| {
+                    d.models[i]
+                        .fade
+                        .model_owned
+                        .get(g.index as usize)
+                        .copied()
+                        .unwrap_or(false)
+                });
+                match if focused_owns { None } else { tenant } {
+                    None if focused_owns => {
+                        spans.push(Span::styled("■", Style::default().fg(pal::c(pal::BLUE))));
                         spans.push(Span::styled(
-                            ",",
-                            Style::default().fg(pal::c(pal::TEXT_MUTED)),
+                            format!(" w {:.1}G ", weights * g.vram_total_gb()),
+                            Style::default().fg(pal::c(pal::TEXT_DIM)),
+                        ));
+                        spans.push(Span::styled("■", Style::default().fg(pal::c(pal::TEAL))));
+                        spans.push(Span::styled(
+                            format!(" kv {:.1}G", kv * g.vram_total_gb()),
+                            Style::default().fg(pal::c(pal::TEXT_DIM)),
                         ));
                     }
-                    let focused = *i == d.focus;
-                    spans.push(Span::styled(
-                        format!("{}", i + 1),
-                        Style::default()
-                            .fg(pal::c(if focused { pal::CYAN } else { pal::TEXT_DIM }))
-                            .add_modifier(if focused {
-                                Modifier::BOLD
-                            } else {
-                                Modifier::empty()
-                            }),
-                    ));
+                    Some(t) => {
+                        let tf = &d.models[t].fade;
+                        let tw = tf.weight_frac.get(g.index as usize).copied().unwrap_or(0.0);
+                        let tk = tf
+                            .kv_alloc_frac
+                            .get(g.index as usize)
+                            .copied()
+                            .unwrap_or(0.0);
+                        spans.push(Span::styled("■", Style::default().fg(pal::c(pal::BLUE))));
+                        spans.push(Span::styled(
+                            format!(" w {:.1}G ", tw * g.vram_total_gb()),
+                            Style::default().fg(pal::c(pal::TEXT_DIM)),
+                        ));
+                        spans.push(Span::styled("■", Style::default().fg(pal::c(pal::TEAL))));
+                        spans.push(Span::styled(
+                            format!(" kv {:.1}G", tk * g.vram_total_gb()),
+                            Style::default().fg(pal::c(pal::TEXT_DIM)),
+                        ));
+                    }
+                    None => {
+                        spans.push(Span::styled(
+                            " other server",
+                            Style::default().fg(pal::c(pal::TEXT_DIM)),
+                        ));
+                    }
                 }
-                spans.push(Span::styled(
-                    "⟩ ",
-                    Style::default().fg(pal::c(pal::TEXT_MUTED)),
-                ));
-            }
-            if legend_w > 0 {
-                spans.push(Span::styled("■", Style::default().fg(pal::c(pal::BLUE))));
-                spans.push(Span::styled(
-                    format!(" w {:.1}G ", weights * g.vram_total_gb()),
-                    Style::default().fg(pal::c(pal::TEXT_DIM)),
-                ));
-                spans.push(Span::styled("■", Style::default().fg(pal::c(pal::TEAL))));
-                spans.push(Span::styled(
-                    format!(" kv {:.1}G", kv * g.vram_total_gb()),
-                    Style::default().fg(pal::c(pal::TEXT_DIM)),
-                ));
             }
             lines.push(Line::from(spans));
         }
@@ -1218,7 +1246,19 @@ impl Renderer {
         }
         let f = d.fade;
         let n = f.n_layers;
-        let n_gpus = d.gpus.len().max(1);
+        // Count the GPUs the focused model actually uses, not every visible
+        // card — a single-GPU server on a 4-GPU host serves on 1 GPU.
+        let model_gpu_count = d
+            .detected
+            .map(|m| {
+                if m.gpu_indices.is_empty() {
+                    d.gpus.len().max(1)
+                } else {
+                    m.gpu_indices.len()
+                }
+            })
+            .unwrap_or_else(|| d.gpus.len().max(1));
+        let n_gpus = model_gpu_count;
         let title = format!(
             " ◆ LAYERS  {n} across {n_gpus} GPU{} ",
             if n_gpus > 1 { "s" } else { "" }

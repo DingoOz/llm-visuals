@@ -23,6 +23,8 @@ pub struct GpuStats {
     pub clock_sm_max_mhz: u32,
     pub clock_mem_mhz: u32,
     pub fan_pct: Option<f32>,
+    /// Raw tachometer reading (RPM) for backends that expose it (Intel xe).
+    pub fan_rpm: Option<u32>,
     pub pcie_gen: u32,
     pub pcie_width: u32,
 }
@@ -176,14 +178,107 @@ fn run_smi(bin: &str, query: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Fan RPM per GPU index from the `xe` driver's hwmon entries. xpu-smi
+/// orders its device indices by ascending PCI BDF; the xe hwmon class
+/// exposes one entry per card with `fan1_input` (RPM). Returns an empty
+/// map when the enumeration disagrees with the reported device count.
+/// Fan-hold cache: xe's tachometer is intermittent — at 79 °C and 240 W
+/// sustained it reports 0 on most samples, flickering nonzero for a poll
+/// or two. Hold the last nonzero reading for a decay window so the panel
+/// doesn't flash 0 RPM between real updates; expire to 0 if the sensor
+/// stays silent (fans genuinely stopped).
+fn xe_fan_hold(
+) -> &'static std::sync::Mutex<std::collections::HashMap<u32, (u32, std::time::Instant)>> {
+    use std::sync::OnceLock;
+    static HOLD: OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u32, (u32, std::time::Instant)>>,
+    > = OnceLock::new();
+    HOLD.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+const FAN_HOLD_SECS: f32 = 20.0;
+
+fn xe_fan_rpm_by_index() -> Vec<u32> {
+    let mut cards: Vec<(String, u32)> = Vec::new(); // (BDF, rpm)
+    let Ok(hwmons) = std::fs::read_dir("/sys/class/hwmon") else {
+        return Vec::new();
+    };
+    for entry in hwmons.flatten() {
+        let path = entry.path();
+        if read_trimmed(path.join("name")).as_deref() != Some("xe") {
+            continue;
+        }
+        // The tachometer only reports on its own update cadence: a single
+        // read usually lands between updates and returns 0 even while the
+        // fan spins. Take a couple of reads and keep the max.
+        let mut rpm = 0u32;
+        for _ in 0..3 {
+            let v = read_trimmed(path.join("fan1_input"))
+                .and_then(|t| t.parse::<u32>().ok())
+                .unwrap_or(0);
+            rpm = rpm.max(v);
+            if rpm > 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(120));
+        }
+        let bdf = entry
+            .path()
+            .join("device")
+            .file_name()
+            .map(|b| b.to_string_lossy().into_owned());
+        if let Some(bdf) = bdf {
+            cards.push((bdf, rpm));
+        }
+    }
+    cards.sort();
+    let mut held: Vec<u32> = cards.into_iter().map(|(_, rpm)| rpm).collect();
+    let mut cache = xe_fan_hold().lock().unwrap_or_else(|e| e.into_inner());
+    for (i, rpm) in held.iter_mut().enumerate() {
+        let entry = cache
+            .entry(i as u32)
+            .or_insert((0, std::time::Instant::now()));
+        if *rpm > 0 {
+            *entry = (*rpm, std::time::Instant::now());
+        } else if entry.1.elapsed().as_secs_f32() < FAN_HOLD_SECS {
+            // Sensor went quiet right after a real reading: hold it.
+            *rpm = entry.0;
+        } else {
+            *entry = (0, std::time::Instant::now());
+        }
+    }
+    held
+}
+
 /// xpu-smi CSV in XPU_QUERY order. Current Intel drivers report an
 /// unsupported GPU temperature as 0.00 rather than N/A; show no reading
 /// instead of a fake 0°.
+///
+/// Utilization: EXL3/SYCL decode kernels are short bursts, and xpu-smi's
+/// instantaneous tile utilization samples ~0 between them even while the
+/// card is executing (230 W, 2.5 GHz). nvidia-smi smooths utilization over
+/// a window, so the gauge + white peak-hold marker behave there; on XPU
+/// they would sit at zero forever. When the sampled utilization is ~0 but
+/// the SM has left its idle DVFS floor, reconstruct utilization from the
+/// clock ratio — an SM only boosts above the idle P-state with work queued.
 fn parse_xpu_csv(text: &str) -> Vec<GpuStats> {
     let mut gpus = parse_csv(text);
+    let fan_map = xe_fan_rpm_by_index();
     for g in &mut gpus {
+        if let Some(rpm) = fan_map.get(g.index as usize) {
+            g.fan_rpm = Some(*rpm);
+        }
         if g.temperature == Some(0.0) {
             g.temperature = None;
+        }
+        if g.utilization_gpu < 1.0 && g.clock_sm_max_mhz > 0 {
+            // Idle DVFS floor is ~half of max on Arc Pro (1200/2700 MHz);
+            // anything above it means queued compute work.
+            let floor = 0.5 * g.clock_sm_max_mhz as f32;
+            if g.clock_sm_mhz as f32 > floor {
+                let boost = (g.clock_sm_mhz as f32 - floor) / (g.clock_sm_max_mhz as f32 - floor);
+                g.utilization_gpu = g.utilization_gpu.max(boost * 100.0);
+            }
         }
     }
     gpus
@@ -325,6 +420,7 @@ fn amd_stats(index: u32, device: &AmdDevice) -> GpuStats {
         clock_sm_max_mhz,
         clock_mem_mhz,
         fan_pct,
+        fan_rpm: None,
         pcie_gen,
         pcie_width,
     }
@@ -468,6 +564,7 @@ pub fn parse_csv(stdout: &str) -> Vec<GpuStats> {
             clock_sm_max_mhz: int(11) as u32,
             clock_mem_mhz: int(12) as u32,
             fan_pct: opt(13),
+            fan_rpm: None,
             pcie_gen: int(14) as u32,
             pcie_width: int(15) as u32,
         });
@@ -560,6 +657,7 @@ impl DemoGpu {
             clock_sm_mhz: (self.clock * cmax as f32) as u32,
             clock_sm_max_mhz: cmax,
             clock_mem_mhz: if self.index == 1 { 715 } else { 3802 },
+            fan_rpm: None,
             fan_pct: if self.index == 1 {
                 None
             } else {
@@ -621,6 +719,27 @@ mod tests {
         assert_eq!(s[0].pcie_gen, 0); // -1 → 0 so the panel hides the tag
         assert_eq!(s[0].pcie_width, 0);
         assert_eq!(s[0].vram_percent() as u32, 94);
+    }
+
+    #[test]
+    fn xpu_utilization_reconstructed_from_boost_clock() {
+        // During EXL3 decode the instantaneous tile utilization samples ~0
+        // while the SM is boosted (230 W, ~2.5 GHz). The clock ratio above
+        // the idle DVFS floor stands in for the smoothed utilization that
+        // nvidia-smi provides on CUDA.
+        let busy = "2,Intel(R) Arc(TM) Pro B70 Graphics,32656,32000,656,0.00,99.60,238.00,230.00,64.00,2508,2700,400,N/A,0,-1\n";
+        let s = parse_xpu_csv(busy);
+        // floor = 0.5*2700 = 1350; boost = (2508-1350)/1350 ≈ 0.858
+        assert!(s[0].utilization_gpu > 80.0, "util={}", s[0].utilization_gpu);
+        assert!(s[0].utilization_gpu <= 100.0);
+
+        // Idle: clock at the floor, utilization stays 0.
+        let idle = "2,Intel(R) Arc(TM) Pro B70 Graphics,32656,32000,656,0.00,99.60,57.00,230.00,51.00,1200,2700,400,N/A,0,-1\n";
+        assert_eq!(parse_xpu_csv(idle)[0].utilization_gpu, 0.0);
+
+        // A real nonzero sample is never lowered by the reconstruction.
+        let real = "2,Intel(R) Arc(TM) Pro B70 Graphics,32656,32000,656,22.22,99.60,238.00,230.00,64.00,2508,2700,400,N/A,0,-1\n";
+        assert_eq!(parse_xpu_csv(real)[0].utilization_gpu, 22.22);
     }
 
     #[test]
