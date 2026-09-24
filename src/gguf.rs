@@ -69,12 +69,13 @@ pub fn read_info(path: &Path) -> Result<GgufInfo, String> {
     for _ in 0..n_kv {
         let key = read_string(&mut f)?;
         let ty = read_u32(&mut f)?;
-        // Tokenizer tables are huge; architecture keys come first.
-        if key.starts_with("tokenizer.") {
-            break;
-        }
+        // Tokenizer tables are huge, so don't keep them. They are not always
+        // last: a re-saved GGUF can put tokenizer.chat_template right after
+        // general.architecture, so read past them rather than stopping.
         let val = read_value(&mut f, ty)?;
-        map.push((key, val));
+        if !key.starts_with("tokenizer.") {
+            map.push((key, val));
+        }
     }
 
     let architecture = kv_str(&map, "general.architecture").unwrap_or_default();
@@ -537,6 +538,53 @@ mod tests {
             assert!(t.expert_bytes > t.total_bytes / 2);
         }
         assert!(t.active_bytes_per_token(info.n_experts, info.n_experts_used) < t.total_bytes);
+    }
+
+    /// Write a minimal GGUF header (no tensors) with the given KV pairs.
+    fn write_header(path: &Path, kvs: &[(&str, u32, Vec<u8>)]) {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"GGUF");
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b.extend_from_slice(&(kvs.len() as u64).to_le_bytes());
+        for (k, ty, v) in kvs {
+            b.extend_from_slice(&(k.len() as u64).to_le_bytes());
+            b.extend_from_slice(k.as_bytes());
+            b.extend_from_slice(&ty.to_le_bytes());
+            b.extend_from_slice(v);
+        }
+        std::fs::write(path, b).unwrap();
+    }
+
+    fn gguf_str(s: &str) -> Vec<u8> {
+        let mut v = (s.len() as u64).to_le_bytes().to_vec();
+        v.extend_from_slice(s.as_bytes());
+        v
+    }
+
+    #[test]
+    fn tokenizer_key_before_architecture_keys() {
+        // Re-saved GGUFs (chat-template fixes) can carry tokenizer.chat_template
+        // right after general.architecture, ahead of the shape keys.
+        let dir = std::env::temp_dir().join(format!("llmv-gguf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("m.gguf");
+        write_header(
+            &path,
+            &[
+                ("general.architecture", 8, gguf_str("deepseek4")),
+                ("tokenizer.chat_template", 8, gguf_str("{{ messages }}")),
+                ("deepseek4.block_count", 4, 43u32.to_le_bytes().to_vec()),
+                ("deepseek4.expert_count", 4, 256u32.to_le_bytes().to_vec()),
+                ("deepseek4.expert_used_count", 4, 6u32.to_le_bytes().to_vec()),
+            ],
+        );
+        let info = read_info(&path).expect("gguf header");
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(info.n_layers, 43);
+        assert_eq!(info.n_experts, 256);
+        assert_eq!(info.n_experts_used, 6);
+        assert!(info.is_moe());
     }
 
     #[test]
