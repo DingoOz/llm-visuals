@@ -1,6 +1,6 @@
 [package]
 name = "llm-visuals"
-version = "0.8.2"
+version = "0.9.0"
 edition = "2021"
 description = "Live terminal dashboard for a locally running LLM: throughput, GPUs, context, MTP acceptance, layer and expert activity"
 license = "MIT"

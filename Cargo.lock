@@ -489,7 +489,7 @@ checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
 
 [[package]]
 name = "llm-visuals"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "clap",
