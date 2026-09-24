@@ -145,10 +145,35 @@ async fn discover(args: &Args, auth: &HttpAuth) -> (Vec<DetectedModel>, Option<S
     // Merge discovered models, avoiding duplicate ports or names
     let mut found = explicit_models;
     for m in proc_models {
-        let duplicate = found.iter().any(|fm| {
+        let duplicate = found.iter_mut().find(|fm| {
             (fm.port.is_some() && fm.port == m.port) || (!fm.name.is_empty() && fm.name == m.name)
         });
-        if !duplicate {
+        if let Some(fm) = duplicate {
+            let is_loopback = matches!(
+                fm.host.as_str(),
+                "127.0.0.1" | "localhost" | "0.0.0.0" | "::1" | "[::1]"
+            );
+            if is_loopback {
+                if fm.pid == 0 {
+                    fm.pid = m.pid;
+                }
+                if fm.gpu_indices.is_empty() {
+                    fm.gpu_indices = m.gpu_indices;
+                }
+                if fm.mem_used_mb == 0 {
+                    fm.mem_used_mb = m.mem_used_mb;
+                }
+                if fm.gguf.is_none() {
+                    fm.gguf = m.gguf;
+                    fm.tensors = m.tensors;
+                }
+                if fm.path.is_none() || fm.path.as_ref().is_some_and(|p| !p.exists()) {
+                    if let Some(p) = m.path {
+                        fm.path = Some(p);
+                    }
+                }
+            }
+        } else {
             found.push(m);
         }
     }

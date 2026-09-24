@@ -127,11 +127,7 @@ impl DetectedModel {
 /// from somewhere other than the process command line (for example llama.cpp
 /// `/props` when the server was launched with `-hf`).
 pub fn load_gguf_metadata(model: &mut DetectedModel, path: PathBuf) {
-    let path = if !path.exists() {
-        resolve_container_path(model.pid, &path).unwrap_or(path)
-    } else {
-        path
-    };
+    let path = resolve_model_path(model.pid, &path, &model.name);
     model.path = Some(path.clone());
     if path.extension().and_then(|e| e.to_str()) != Some("gguf") {
         return;
@@ -316,6 +312,20 @@ fn parent_pid(pid: u32) -> Option<u32> {
 #[cfg(not(target_os = "linux"))]
 fn parent_pid(_pid: u32) -> Option<u32> {
     None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let pid = Pid::from_u32(pid);
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing().with_cwd(UpdateKind::Always),
+    );
+    sys.process(pid)
+        .and_then(|p| p.cwd().map(Path::to_path_buf))
 }
 
 /// A vLLM server in a Docker container reports its container-internal
@@ -600,36 +610,18 @@ pub fn detect_models() -> Vec<DetectedModel> {
             // its own mount namespace (e.g. /model); re-anchor it through
             // /proc/<pid>/mountinfo so the size (and the GGUF metadata
             // below) reads the host-side file.
-            let path = if !path.exists() {
-                resolve_container_path(m.pid, &path)
-                    .or_else(|| {
-                        // Device-based re-anchoring needs the model's
-                        // filesystem in OUR mountinfo; from a container
-                        // (overlay root) it never appears. Read through
-                        // the server's own root instead — /proc/<pid>/root
-                        // reaches the path exactly as the server sees it,
-                        // whichever side of the namespace boundary we are
-                        // on (needs the same uid or root).
-                        let rel = path.strip_prefix("/").unwrap_or(&path);
-                        let via_root = PathBuf::from(format!("/proc/{}/root", m.pid)).join(rel);
-                        via_root.exists().then_some(via_root)
-                    })
-                    .or_else(|| resolve_local_model_dir(&path, &m.name))
-                    .unwrap_or(path)
-            } else {
-                path
-            };
-            if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
-                load_gguf_metadata(m, path);
-            } else if path.is_dir() {
+            let resolved = resolve_model_path(m.pid, &path, &m.name);
+            if resolved.extension().and_then(|e| e.to_str()) == Some("gguf") {
+                load_gguf_metadata(m, resolved);
+            } else if resolved.is_dir() {
                 // Keep the resolved dir (load_gguf_metadata does the same for
                 // a file) so the weight-size sum in main.rs can read it.
-                m.path = Some(path.clone());
+                m.path = Some(resolved.clone());
                 // A safetensors dir has no GGUF header; read config.json
                 // so layers/heads/experts populate the same panels. vLLM
                 // and SGLang default context is max_position_embeddings
                 // when --max-model-len / --context-length is absent.
-                if let Some(info) = hf_config_info(&path) {
+                if let Some(info) = hf_config_info(&resolved) {
                     if m.ctx_max.is_none() && info.ctx_train > 0 {
                         m.ctx_max = Some(info.ctx_train);
                     }
@@ -637,6 +629,8 @@ pub fn detect_models() -> Vec<DetectedModel> {
                         m.gguf = Some(info);
                     }
                 }
+            } else if resolved.is_file() {
+                load_gguf_metadata(m, resolved);
             }
         }
         m.gpu_indices.sort_unstable();
@@ -1483,6 +1477,95 @@ pub fn resolve_local_model_dir(target_path: &Path, model_name: &str) -> Option<P
     None
 }
 
+/// Look for a local GGUF file matching target_path or model_name on the host filesystem.
+pub fn resolve_local_model_file(target_path: &Path, model_name: &str) -> Option<PathBuf> {
+    if target_path.is_file() {
+        return Some(target_path.to_path_buf());
+    }
+    let stem = target_path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    let mut candidates = Vec::new();
+    if let Some(home) = crate::settings::home() {
+        candidates.push(home.join("Downloads").join("models"));
+        candidates.push(home.join("downloads").join("models"));
+        candidates.push(home.join("Downloads"));
+        candidates.push(home.join("downloads"));
+        candidates.push(home.join("models"));
+    }
+    candidates.push(PathBuf::from("./models"));
+    candidates.push(PathBuf::from("."));
+
+    let names_to_try: Vec<String> = [stem.as_str(), model_name]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .flat_map(|s| {
+            let mut list = vec![s.to_string()];
+            if !s.ends_with(".gguf") {
+                list.push(format!("{s}.gguf"));
+            }
+            list
+        })
+        .collect();
+
+    for base in &candidates {
+        for name in &names_to_try {
+            let candidate = base.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Re-anchor a model path (which may be container-internal, relative to the server's
+/// working directory, or located in a standard user downloads/models folder) to a
+/// readable path (file or directory) on the host.
+pub fn resolve_model_path(pid: u32, path: &Path, model_name: &str) -> PathBuf {
+    if path.is_absolute() && path.exists() {
+        return path.to_path_buf();
+    }
+    if pid > 0 {
+        if let Some(container_path) = resolve_container_path(pid, path) {
+            if container_path.exists() {
+                return container_path;
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let rel = path.strip_prefix("/").unwrap_or(path);
+            let via_root = PathBuf::from(format!("/proc/{pid}/root")).join(rel);
+            if via_root.exists() {
+                return via_root;
+            }
+            let via_proc_cwd = PathBuf::from(format!("/proc/{pid}/cwd")).join(path);
+            if via_proc_cwd.exists() {
+                return via_proc_cwd;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        if let Some(cwd) = process_cwd(pid) {
+            let via_cwd = cwd.join(path);
+            if via_cwd.exists() {
+                return via_cwd;
+            }
+        }
+    }
+    if path.exists() {
+        return path.to_path_buf();
+    }
+    if let Some(local_file) = resolve_local_model_file(path, model_name) {
+        return local_file;
+    }
+    if let Some(local_dir) = resolve_local_model_dir(path, model_name) {
+        return local_dir;
+    }
+    path.to_path_buf()
+}
+
 /// Probe an HTTP inference server endpoint (OpenAI /v1, vLLM /metrics, llama.cpp /props, etc.).
 pub async fn probe_endpoint(
     host: &str,
@@ -1602,15 +1685,26 @@ pub async fn probe_endpoint(
 
     let mut resolved_path = model_path.clone();
     let mut gguf_info = None;
+    let mut tensor_summary = None;
     if let Some(p) = &model_path {
-        if let Some(local_dir) = resolve_local_model_dir(p, &final_name) {
-            if let Some(info) = hf_config_info(&local_dir) {
+        let resolved = resolve_model_path(0, p, &final_name);
+        if resolved.extension().and_then(|e| e.to_str()) == Some("gguf") && resolved.is_file() {
+            if let Ok(info) = gguf::read_info(&resolved) {
                 if ctx_max.is_none() && info.ctx_train > 0 {
                     ctx_max = Some(info.ctx_train);
                 }
                 gguf_info = Some(info);
             }
-            resolved_path = Some(local_dir);
+            tensor_summary = gguf::read_tensor_summary(&resolved).ok();
+            resolved_path = Some(resolved);
+        } else if resolved.is_dir() {
+            if let Some(info) = hf_config_info(&resolved) {
+                if ctx_max.is_none() && info.ctx_train > 0 {
+                    ctx_max = Some(info.ctx_train);
+                }
+                gguf_info = Some(info);
+            }
+            resolved_path = Some(resolved);
         }
     }
 
@@ -1632,7 +1726,7 @@ pub async fn probe_endpoint(
         tensor_split: Vec::new(),
         cmdline: format!("{final_name} --port {port}"),
         gguf: gguf_info,
-        tensors: None,
+        tensors: tensor_summary,
     })
 }
 
@@ -1676,6 +1770,7 @@ pub async fn probe_local_endpoints(auth: &crate::observe::HttpAuth) -> Vec<Detec
 }
 
 fn probe_hosts() -> Vec<String> {
+    #[allow(unused_mut)]
     let mut hosts = vec!["127.0.0.1".to_string()];
     #[cfg(target_os = "linux")]
     if let Some(ips) = netns_ipv4s(std::process::id()) {
@@ -2122,5 +2217,50 @@ mod tests {
         };
         assert_eq!(m.key(), (7000_u32) | 0x8000_0000);
         assert_eq!(format!("{m}"), "test-model (:7000 · vllm · GPU ? · 0 MB)");
+    }
+
+    #[test]
+    fn test_resolve_local_model_file_candidate() {
+        let models_dir = PathBuf::from("./models");
+        let _ = std::fs::create_dir_all(&models_dir);
+        let test_file = models_dir.join("test_candidate_model.gguf");
+        std::fs::write(&test_file, b"GGUF").unwrap();
+
+        // Pass a non-existent path so is_file() is false, exercising bare-name
+        // candidate resolution through the fallback directories (./models).
+        let non_existent = Path::new("non_existent_dir/test_candidate_model");
+        let resolved = resolve_local_model_file(non_existent, "test_candidate_model");
+        assert_eq!(resolved.as_deref(), Some(test_file.as_path()));
+
+        let _ = std::fs::remove_file(&test_file);
+    }
+
+    #[test]
+    fn test_resolve_model_path_preserves_directories() {
+        let dir = std::env::temp_dir().join("test_container_model_dir");
+        let _ = std::fs::create_dir_all(&dir);
+        let config = dir.join("config.json");
+        std::fs::write(&config, b"{}").unwrap();
+
+        let resolved = resolve_model_path(0, &dir, "test_container_model");
+        assert!(resolved.is_dir());
+        assert_eq!(resolved, dir);
+
+        let _ = std::fs::remove_file(config);
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn test_resolve_model_path_process_cwd() {
+        let pid = std::process::id();
+        let fname = "_test_cwd_resolution.gguf";
+        let local_file = PathBuf::from(fname);
+        std::fs::write(&local_file, b"GGUF").unwrap();
+
+        let resolved = resolve_model_path(pid, &local_file, "test_cwd_model");
+        assert!(resolved.is_file());
+        assert!(resolved.ends_with(fname));
+
+        let _ = std::fs::remove_file(local_file);
     }
 }
