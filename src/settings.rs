@@ -212,7 +212,7 @@ impl SettingsForm {
                 "theme",
                 Kind::Choice(THEME_NAMES),
                 args.theme.clone(),
-                "Colour theme for the heat maps and tiles (also cycled by t)".into(),
+                "Colour theme for panels, heat maps and tiles (also cycled by t)".into(),
             ),
             field(
                 "Colour depth",

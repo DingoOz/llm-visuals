@@ -672,6 +672,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         status = note;
     }
     let mut settings_form: Option<settings::SettingsForm> = None;
+    let mut log_view: Option<Result<dblog::LogSummary, String>> = None;
+    // The file being logged to, else the default one from earlier sessions.
+    let read_log = |args: &Args| {
+        args.log_db_path()
+            .or_else(settings::default_db_path)
+            .ok_or_else(|| "no home directory for the log database".to_string())
+            .and_then(|p| dblog::summarize(&p))
+    };
     let mut last_visual_activity = Instant::now();
 
     loop {
@@ -740,6 +748,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if close {
                         settings_form = None;
                     }
+                } else if key.kind == KeyEventKind::Press && log_view.is_some() {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('l') => log_view = None,
+                        KeyCode::Char('r') => log_view = Some(read_log(&args)),
+                        _ => {}
+                    }
                 } else if key.kind == KeyEventKind::Press {
                     let n = slots.len().max(1);
                     match key.code {
@@ -763,6 +777,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('s') => {
                             settings_form = Some(settings::SettingsForm::new(&args))
                         }
+                        KeyCode::Char('l') => log_view = Some(read_log(&args)),
                         KeyCode::Char('t') => {
                             theme_name = colors::next_theme_name(&theme_name).to_string();
                             renderer.theme = colors::get_theme(&theme_name);
@@ -1010,6 +1025,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             demo: args.demo,
             experts: cur.and_then(|v| v.experts),
             settings: settings_form.as_ref(),
+            log: log_view.as_ref(),
         };
         renderer.render_frame(&mut terminal, &dash);
 

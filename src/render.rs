@@ -13,6 +13,7 @@ use ratatui::{
 use crate::bandwidth::{self, StageId};
 use crate::colors::{self as pal, ColorTheme};
 use crate::config::ViewMode;
+use crate::dblog::LogSummary;
 use crate::fade::FadeState;
 use crate::gpu::GpuStats;
 use crate::model_detect::DetectedModel;
@@ -68,6 +69,8 @@ pub struct Dashboard<'a> {
     pub gpu_backend: Option<&'a str>,
     /// The settings screen, drawn over the view while it is open.
     pub settings: Option<&'a SettingsForm>,
+    /// The log viewer (`l`): what was read from the database, or why not.
+    pub log: Option<&'a Result<LogSummary, String>>,
 }
 
 pub struct Renderer {
@@ -107,13 +110,17 @@ impl Renderer {
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
         d: &Dashboard,
     ) {
+        pal::set_chrome(self.theme.chrome);
         let _ = terminal.try_draw(|frame: &mut Frame| -> Result<(), io::Error> {
             let area = frame.area();
             frame.render_widget(
-                Block::default().style(Style::default().bg(pal::c(pal::BG))),
+                Block::default().style(Style::default().bg(pal::c(pal::chrome().bg))),
                 area,
             );
             self.render_view(frame, area, d);
+            if let Some(log) = d.log {
+                self.render_log(frame, area, log);
+            }
             if let Some(form) = d.settings {
                 self.render_settings(frame, area, form);
             }
@@ -1020,9 +1027,14 @@ impl Renderer {
                     } else {
                         a
                     };
-                    Span::styled("▌", Style::default().fg(pal::c(c)).bg(pal::c(pal::TRACK)))
+                    Span::styled(
+                        "▌",
+                        Style::default()
+                            .fg(pal::c(c))
+                            .bg(pal::c(pal::chrome().track)),
+                    )
                 }
-                _ => Span::styled("█", Style::default().fg(pal::c(pal::TRACK))),
+                _ => Span::styled("█", Style::default().fg(pal::c(pal::chrome().track))),
             };
             spans.push(span);
         }
@@ -1047,7 +1059,10 @@ impl Renderer {
                 Style::default().fg(pal::c(pal::TEXT_DIM)),
             ));
             if two_lines {
-                spans.push(Span::styled("  ■", Style::default().fg(pal::c(pal::TRACK))));
+                spans.push(Span::styled(
+                    "  ■",
+                    Style::default().fg(pal::c(pal::chrome().track)),
+                ));
                 spans.push(Span::styled(
                     format!(" free {}", fmt_int(ctx_max.saturating_sub(used))),
                     Style::default().fg(pal::c(pal::TEXT_DIM)),
@@ -1586,7 +1601,7 @@ impl Renderer {
             }
             m
         };
-        let gap_style = Style::default().bg(pal::c(pal::BG));
+        let gap_style = Style::default().bg(pal::c(pal::chrome().bg));
         let mut lines: Vec<Line> = Vec::with_capacity(h);
         let text_rows = if half { (n_slots + 1) / 2 } else { n_slots };
         for r in 0..text_rows.min(h) {
@@ -1826,6 +1841,7 @@ impl Renderer {
         }
         items.push(("t", format!("theme:{}", d.theme_name), false));
         items.push(("s", "settings".into(), d.settings.is_some()));
+        items.push(("l", "log".into(), d.log.is_some()));
         items.push(("r", "rescan".into(), false));
 
         let cost = |it: &[(&str, String, bool)]| -> usize {
@@ -1850,14 +1866,22 @@ impl Renderer {
 
         let mut spans: Vec<Span> = Vec::new();
         for (k, label, active) in &items {
-            let kc = if *active { pal::CYAN } else { pal::TEXT };
+            let kc = if *active {
+                pal::accent(pal::CYAN)
+            } else {
+                pal::TEXT
+            };
             spans.push(Span::styled(
                 format!(" {k}"),
                 Style::default().fg(pal::c(kc)).add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
                 format!(" {label}"),
-                Style::default().fg(pal::c(if *active { pal::CYAN } else { pal::TEXT_DIM })),
+                Style::default().fg(pal::c(if *active {
+                    pal::accent(pal::CYAN)
+                } else {
+                    pal::TEXT_DIM
+                })),
             ));
         }
         let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
@@ -1878,7 +1902,8 @@ impl Renderer {
             ));
         }
         frame.render_widget(
-            Paragraph::new(Line::from(spans)).style(Style::default().bg(pal::c(pal::PANEL))),
+            Paragraph::new(Line::from(spans))
+                .style(Style::default().bg(pal::c(pal::chrome().panel))),
             area,
         );
     }
@@ -1899,7 +1924,8 @@ impl Renderer {
             height,
         };
         frame.render_widget(Clear, rect);
-        let block = panel(" settings ", pal::CYAN);
+        let title = concat!(" settings · v", env!("CARGO_PKG_VERSION"), " ");
+        let block = panel(title, pal::CYAN);
         let inner = block.inner(rect);
         frame.render_widget(block, rect);
 
@@ -1909,10 +1935,16 @@ impl Renderer {
         let mut lines: Vec<Line> = Vec::new();
         for (i, f) in form.fields.iter().enumerate() {
             let sel = i == form.selected;
-            let fg = if sel { pal::CYAN } else { pal::TEXT };
+            let fg = if sel {
+                pal::accent(pal::CYAN)
+            } else {
+                pal::TEXT
+            };
             let mut style = Style::default().fg(pal::c(fg));
             if sel {
-                style = style.bg(pal::c(pal::TRACK)).add_modifier(Modifier::BOLD);
+                style = style
+                    .bg(pal::c(pal::chrome().track))
+                    .add_modifier(Modifier::BOLD);
             }
             let value = match (&form.editing, f.kind) {
                 (Some(buf), _) if sel => format!("{buf}▏"),
@@ -1972,6 +2004,179 @@ impl Renderer {
             spans.push(Span::styled(format!(" {label} "), dim));
         }
         lines.push(Line::from(fit_spans(&spans, w)));
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Log viewer (l)
+// ---------------------------------------------------------------------------
+
+fn fmt_unix(ts: f64) -> String {
+    chrono::DateTime::from_timestamp(ts as i64, 0)
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%m-%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|| "?".into())
+}
+
+impl Renderer {
+    fn render_log(&self, frame: &mut Frame, area: Rect, log: &Result<LogSummary, String>) {
+        let width = area.width.saturating_sub(4).min(120);
+        // An error needs four lines, the tables the whole screen.
+        let height = match log {
+            Ok(_) => area.height.saturating_sub(2),
+            Err(_) => 6.min(area.height),
+        };
+        let rect = Rect {
+            x: area.x + (area.width - width) / 2,
+            y: area.y + (area.height - height) / 2,
+            width,
+            height,
+        };
+        frame.render_widget(Clear, rect);
+        let block = panel(" ◆ LOG DATABASE ", pal::GREEN);
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
+        let w = inner.width as usize;
+        let h = inner.height as usize;
+        let text = Style::default().fg(pal::c(pal::TEXT));
+        let dim = Style::default().fg(pal::c(pal::TEXT_DIM));
+        let head = Style::default()
+            .fg(pal::c(pal::accent(pal::GREEN)))
+            .add_modifier(Modifier::BOLD);
+        let keys = Line::from(fit_spans(
+            &[
+                Span::styled(" r", text.add_modifier(Modifier::BOLD)),
+                Span::styled(" refresh ", dim),
+                Span::styled(" esc", text.add_modifier(Modifier::BOLD)),
+                Span::styled(" close ", dim),
+            ],
+            w,
+        ));
+        let mut lines: Vec<Line> = Vec::new();
+        let sum = match log {
+            Ok(sum) => sum,
+            Err(e) => {
+                lines.push(Line::styled(
+                    truncate(&format!(" {e}"), w),
+                    Style::default().fg(pal::c(pal::MAGENTA)),
+                ));
+                lines.push(Line::styled(
+                    truncate(" Logging writes here with --log-db (on by default).", w),
+                    dim,
+                ));
+                lines.push(Line::raw(""));
+                lines.push(keys);
+                frame.render_widget(Paragraph::new(lines), inner);
+                return;
+            }
+        };
+        let row = |label: &str, value: String| {
+            Line::from(vec![
+                Span::styled(format!(" {label:<6}"), dim),
+                Span::styled(truncate(&value, w.saturating_sub(7)), text),
+            ])
+        };
+        lines.push(row(
+            "file",
+            format!(
+                "{:.1} MB  {}",
+                sum.bytes as f64 / (1024.0 * 1024.0),
+                sum.path.display()
+            ),
+        ));
+        lines.push(row(
+            "rows",
+            sum.counts
+                .iter()
+                .map(|(t, n)| format!("{t} {}", fmt_int(*n as usize)))
+                .collect::<Vec<_>>()
+                .join(" · "),
+        ));
+        lines.push(row(
+            "span",
+            sum.span
+                .map(|(a, b)| format!("{} → {}", fmt_unix(a), fmt_unix(b)))
+                .unwrap_or_else(|| "no samples yet".into()),
+        ));
+        lines.push(Line::raw(""));
+
+        let name_w = w.saturating_sub(48).clamp(8, 40);
+        lines.push(Line::styled(
+            truncate(
+                &format!(
+                    " {:<name_w$} {:>6} {:>10} {:>11} {:>8}",
+                    "MODEL", "REQS", "TOKENS", "DECODE t/s", "TTFT"
+                ),
+                w,
+            ),
+            head,
+        ));
+        if sum.models.is_empty() {
+            lines.push(Line::styled(" no finished requests logged yet", dim));
+        }
+        for m in &sum.models {
+            lines.push(Line::styled(
+                truncate(
+                    &format!(
+                        " {:<name_w$} {:>6} {:>10} {:>11} {:>8}",
+                        truncate(&m.model, name_w),
+                        fmt_int(m.requests as usize),
+                        fmt_int(m.decoded as usize),
+                        m.avg_decode_tps
+                            .map(|v| fmt_rate(v as f32))
+                            .unwrap_or_else(|| "–".into()),
+                        m.avg_ttft_s
+                            .map(|s| fmt_dur(Duration::from_secs_f64(s.max(0.0))))
+                            .unwrap_or_else(|| "–".into()),
+                    ),
+                    w,
+                ),
+                text,
+            ));
+        }
+        lines.push(Line::raw(""));
+
+        let name_w = w.saturating_sub(62).clamp(8, 40);
+        lines.push(Line::styled(
+            truncate(
+                &format!(
+                    " {:<14} {:<name_w$} {:>7} {:>7} {:>8} {:>8} {:>8}",
+                    "ENDED", "MODEL", "PROMPT", "OUT", "TTFT", "TIME", "t/s"
+                ),
+                w,
+            ),
+            head,
+        ));
+        // The newest requests that fit above the key row.
+        let room = h.saturating_sub(lines.len() + 2);
+        for r in sum.recent.iter().take(room) {
+            lines.push(Line::styled(
+                truncate(
+                    &format!(
+                        " {:<14} {:<name_w$} {:>7} {:>7} {:>8} {:>8} {:>8}",
+                        fmt_unix(r.ended_ts),
+                        truncate(&r.model, name_w),
+                        fmt_int(r.prompt_tokens as usize),
+                        fmt_int(r.decoded as usize),
+                        r.ttft_s
+                            .map(|s| fmt_dur(Duration::from_secs_f64(s.max(0.0))))
+                            .unwrap_or_else(|| "–".into()),
+                        fmt_dur(Duration::from_secs_f64(r.duration_s.max(0.0))),
+                        fmt_rate(r.avg_decode_tps as f32),
+                    ),
+                    w,
+                ),
+                text,
+            ));
+        }
+        while lines.len() + 1 < h {
+            lines.push(Line::raw(""));
+        }
+        lines.push(keys);
         frame.render_widget(Paragraph::new(lines), inner);
     }
 }
@@ -2201,7 +2406,11 @@ impl Renderer {
                 area.width.saturating_sub(8) as usize
             )
         );
-        let accent = if focused { pal::CYAN } else { pal::BORDER };
+        let accent = if focused {
+            pal::accent(pal::CYAN)
+        } else {
+            pal::chrome().border
+        };
         let mut block = panel(&title, if focused { pal::WHITE } else { pal::TEXT_DIM });
         if focused {
             block = block.border_style(Style::default().fg(pal::c(accent)));
@@ -3024,12 +3233,12 @@ fn panel(title: &str, accent: (u8, u8, u8)) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(pal::c(pal::BORDER)))
-        .style(Style::default().bg(pal::c(pal::BG)))
+        .border_style(Style::default().fg(pal::c(pal::chrome().border)))
+        .style(Style::default().bg(pal::c(pal::chrome().bg)))
         .title(Span::styled(
             title.to_string(),
             Style::default()
-                .fg(pal::c(accent))
+                .fg(pal::c(pal::accent(accent)))
                 .add_modifier(Modifier::BOLD),
         ))
         .title_alignment(Alignment::Left)
@@ -3062,13 +3271,16 @@ fn gauge(frac: f32, peak: Option<f32>, width: usize, style: GaugeStyle) -> Vec<S
                     "▌",
                     Style::default()
                         .fg(pal::c(pal::WHITE))
-                        .bg(pal::c(pal::TRACK)),
+                        .bg(pal::c(pal::chrome().track)),
                 );
             }
             match filled {
                 2 => Span::styled("█", Style::default().fg(col)),
-                1 => Span::styled("▌", Style::default().fg(col).bg(pal::c(pal::TRACK))),
-                _ => Span::styled("█", Style::default().fg(pal::c(pal::TRACK))),
+                1 => Span::styled(
+                    "▌",
+                    Style::default().fg(col).bg(pal::c(pal::chrome().track)),
+                ),
+                _ => Span::styled("█", Style::default().fg(pal::c(pal::chrome().track))),
             }
         })
         .collect()
@@ -3095,7 +3307,7 @@ fn vmeter(frac: f32, hold: f32, height: usize, width: usize) -> Vec<Vec<Span<'st
             let e = total.saturating_sub(from_bottom * 8).min(8);
             let pos = (from_bottom as f32 + 0.5) / height as f32;
             let col = pal::vu(pos);
-            let track = Style::default().bg(pal::c(pal::TRACK));
+            let track = Style::default().bg(pal::c(pal::chrome().track));
             let span = if hold_row == Some(r) && e < 8 {
                 Span::styled("▔".repeat(width), track.fg(pal::c(pal::WHITE)))
             } else if e == 8 {
@@ -3169,7 +3381,7 @@ fn vram_bar(
     (0..n)
         .map(|x| {
             let (ch, rgb) = if x >= used_n {
-                ("█", pal::TRACK)
+                ("█", pal::chrome().track)
             } else if x < w_n {
                 let t = x as f32 / w_n.max(1) as f32;
                 ("█", pal::lerp_rgb(pal::BLUE, pal::VIOLET, t))
@@ -3189,7 +3401,12 @@ fn vram_bar(
             } else {
                 ("█", pal::dim_rgb(pal::AMBER, 0.7))
             };
-            Span::styled(ch, Style::default().fg(pal::c(rgb)).bg(pal::c(pal::TRACK)))
+            Span::styled(
+                ch,
+                Style::default()
+                    .fg(pal::c(rgb))
+                    .bg(pal::c(pal::chrome().track)),
+            )
         })
         .collect()
 }
@@ -3228,7 +3445,7 @@ fn sparkline(
             let e = total.saturating_sub(from_bottom * 8).min(8);
             let span = if e == 0 {
                 if from_bottom == 0 {
-                    Span::styled("▁", Style::default().fg(pal::c(pal::TRACK)))
+                    Span::styled("▁", Style::default().fg(pal::c(pal::chrome().track)))
                 } else {
                     Span::raw(" ")
                 }
