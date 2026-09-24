@@ -2240,6 +2240,8 @@ mod tests {
         assert_eq!(resolved.as_deref(), Some(test_file.as_path()));
 
         let _ = std::fs::remove_file(&test_file);
+        // Only removes ./models if the test created it (it is then empty).
+        let _ = std::fs::remove_dir(&models_dir);
     }
 
     #[test]
