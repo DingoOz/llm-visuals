@@ -392,6 +392,7 @@ watched and `--pid A,B` restricts it to named processes.
 | `r` | rescan for running servers |
 | `s` | settings screen (shows the version): change launch options, apply them now or save them as the default |
 | `l` | log viewer: per-model totals and the latest requests from the SQLite log (`r` refreshes) |
+| `c` | decode speed vs context length from the SQLite log, one model at a time (`←` `→` switch model, `r` refreshes) |
 | `q` / `Esc` | quit |
 
 Layouts adapt: the model strip is the first thing shed on a short terminal,
@@ -563,7 +564,15 @@ SQLite reuses the freed pages, so the file stops growing at about that size.
 Press `l` for a read-only view of the file: row counts, the time span
 covered, per-model request totals with average decode rate and TTFT, and the
 newest requests. With logging off it shows the default file from earlier
-sessions. For anything else, query it directly:
+sessions. Press `c` to see how decode speed falls as the context fills: the mean
+decode tok/s of every logged sample, grouped into about a dozen context-length
+ranges per model, with the change from the shortest to the longest range. Only
+samples taken while the model was decoding count; ones that overlap a prefill
+are left out, since their one-second window is partly empty. Ranges with fewer
+than five samples are dimmed. It opens on the focused model; `←` / `→` switch
+to the others in the file.
+
+For anything else, query it directly:
 
 ```sh
 sqlite3 ~/.local/share/llm-visuals/llm.db "SELECT model, AVG(avg_decode_tps) FROM requests GROUP BY model"
