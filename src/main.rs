@@ -673,13 +673,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut settings_form: Option<settings::SettingsForm> = None;
     let mut log_view: Option<Result<dblog::LogSummary, String>> = None;
+    // The context-speed screen (`c`) and the model it shows.
+    let mut ctx_view: Option<(Result<Vec<dblog::ContextSpeed>, String>, usize)> = None;
     // The file being logged to, else the default one from earlier sessions.
-    let read_log = |args: &Args| {
+    let log_path = |args: &Args| {
         args.log_db_path()
             .or_else(settings::default_db_path)
             .ok_or_else(|| "no home directory for the log database".to_string())
-            .and_then(|p| dblog::summarize(&p))
     };
+    let read_log = |args: &Args| log_path(args).and_then(|p| dblog::summarize(&p));
+    let read_ctx = |args: &Args| log_path(args).and_then(|p| dblog::context_speed(&p));
     let mut last_visual_activity = Instant::now();
 
     loop {
@@ -754,6 +757,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('r') => log_view = Some(read_log(&args)),
                         _ => {}
                     }
+                } else if key.kind == KeyEventKind::Press && ctx_view.is_some() {
+                    let (speeds, sel) = ctx_view.as_mut().unwrap();
+                    let n = speeds.as_ref().map_or(0, |v| v.len()).max(1);
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => ctx_view = None,
+                        KeyCode::Char('r') => *speeds = read_ctx(&args),
+                        KeyCode::Right | KeyCode::Tab => *sel = (*sel + 1) % n,
+                        KeyCode::Left | KeyCode::BackTab => *sel = (*sel + n - 1) % n,
+                        _ => {}
+                    }
                 } else if key.kind == KeyEventKind::Press {
                     let n = slots.len().max(1);
                     match key.code {
@@ -778,6 +791,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             settings_form = Some(settings::SettingsForm::new(&args))
                         }
                         KeyCode::Char('l') => log_view = Some(read_log(&args)),
+                        KeyCode::Char('c') => {
+                            let speeds = read_ctx(&args);
+                            // Open on the focused model when it has samples.
+                            let name = slots.get(focus).map(|s| s.model.name.as_str());
+                            let sel = speeds
+                                .as_ref()
+                                .ok()
+                                .and_then(|v| v.iter().position(|m| Some(m.model.as_str()) == name))
+                                .unwrap_or(0);
+                            ctx_view = Some((speeds, sel));
+                        }
                         KeyCode::Char('t') => {
                             theme_name = colors::next_theme_name(&theme_name).to_string();
                             renderer.theme = colors::get_theme(&theme_name);
@@ -1026,6 +1050,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             experts: cur.and_then(|v| v.experts),
             settings: settings_form.as_ref(),
             log: log_view.as_ref(),
+            ctx_speed: ctx_view.as_ref().map(|(s, i)| (s, *i)),
         };
         renderer.render_frame(&mut terminal, &dash);
 

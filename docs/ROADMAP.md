@@ -18,6 +18,7 @@ is put together.
 - Native Windows: process detection and memory counters via `sysinfo`.
 - SGLang: `/v1/loads` poller, `/server_info`, worker folding, safetensors
   `config.json` architecture fields (also used by vLLM).
+- Decode speed vs context length (`c`), from the logged samples.
 
 ## Ideas not yet done
 

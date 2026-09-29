@@ -13,7 +13,7 @@ use ratatui::{
 use crate::bandwidth::{self, StageId};
 use crate::colors::{self as pal, ColorTheme};
 use crate::config::ViewMode;
-use crate::dblog::LogSummary;
+use crate::dblog::{ContextSpeed, LogSummary};
 use crate::fade::FadeState;
 use crate::gpu::GpuStats;
 use crate::model_detect::DetectedModel;
@@ -71,6 +71,9 @@ pub struct Dashboard<'a> {
     pub settings: Option<&'a SettingsForm>,
     /// The log viewer (`l`): what was read from the database, or why not.
     pub log: Option<&'a Result<LogSummary, String>>,
+    /// The context-speed screen (`c`): per-model buckets or why not, and
+    /// which model is shown.
+    pub ctx_speed: Option<(&'a Result<Vec<ContextSpeed>, String>, usize)>,
 }
 
 pub struct Renderer {
@@ -120,6 +123,9 @@ impl Renderer {
             self.render_view(frame, area, d);
             if let Some(log) = d.log {
                 self.render_log(frame, area, log);
+            }
+            if let Some((speeds, sel)) = d.ctx_speed {
+                self.render_ctx_speed(frame, area, speeds, sel);
             }
             if let Some(form) = d.settings {
                 self.render_settings(frame, area, form);
@@ -1842,6 +1848,7 @@ impl Renderer {
         items.push(("t", format!("theme:{}", d.theme_name), false));
         items.push(("s", "settings".into(), d.settings.is_some()));
         items.push(("l", "log".into(), d.log.is_some()));
+        items.push(("c", "ctx speed".into(), d.ctx_speed.is_some()));
         items.push(("r", "rescan".into(), false));
 
         let cost = |it: &[(&str, String, bool)]| -> usize {
@@ -1855,6 +1862,7 @@ impl Renderer {
                     "t" => *l = "theme".into(),
                     "b" => *l = "bw".into(),
                     "s" => *l = "set".into(),
+                    "c" => *l = "ctx".into(),
                     "↹" => *l = format!("{}/{}", d.focus + 1, d.models.len()),
                     _ => {}
                 }
@@ -2172,6 +2180,158 @@ impl Renderer {
                 ),
                 text,
             ));
+        }
+        while lines.len() + 1 < h {
+            lines.push(Line::raw(""));
+        }
+        lines.push(keys);
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+}
+
+/// "900", "1.5k", "12.3k" tokens.
+fn fmt_tokens(n: i64) -> String {
+    if n < 1000 {
+        n.to_string()
+    } else {
+        format!("{:.1}k", n as f64 / 1000.0)
+    }
+}
+
+impl Renderer {
+    fn render_ctx_speed(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        speeds: &Result<Vec<ContextSpeed>, String>,
+        sel: usize,
+    ) {
+        let width = area.width.saturating_sub(4).min(100);
+        let height = area.height.saturating_sub(2).min(26);
+        let rect = Rect {
+            x: area.x + (area.width - width) / 2,
+            y: area.y + (area.height - height) / 2,
+            width,
+            height,
+        };
+        frame.render_widget(Clear, rect);
+        let block = panel(" ◆ DECODE SPEED vs CONTEXT ", pal::CYAN);
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
+        let w = inner.width as usize;
+        let h = inner.height as usize;
+        let text = Style::default().fg(pal::c(pal::TEXT));
+        let dim = Style::default().fg(pal::c(pal::TEXT_DIM));
+        let head = Style::default()
+            .fg(pal::c(pal::accent(pal::CYAN)))
+            .add_modifier(Modifier::BOLD);
+        let key = |k: &'static str, label: &'static str| {
+            [
+                Span::styled(k, text.add_modifier(Modifier::BOLD)),
+                Span::styled(label, dim),
+            ]
+        };
+        let mut hint: Vec<Span<'static>> = Vec::new();
+        if speeds.as_ref().is_ok_and(|v| v.len() > 1) {
+            hint.extend(key(" ←→", " model "));
+        }
+        hint.extend(key(" r", " refresh "));
+        hint.extend(key(" esc", " close "));
+        let keys = Line::from(fit_spans(&hint, w));
+
+        let mut lines: Vec<Line> = Vec::new();
+        let m = match speeds {
+            Ok(v) if !v.is_empty() => &v[sel.min(v.len() - 1)],
+            Ok(_) | Err(_) => {
+                let (msg, style) = match speeds {
+                    Err(e) => (e.clone(), Style::default().fg(pal::c(pal::MAGENTA))),
+                    _ => ("no decode samples logged yet".into(), text),
+                };
+                lines.push(Line::styled(truncate(&format!(" {msg}"), w), style));
+                lines.push(Line::styled(
+                    truncate(
+                        " Built from the --log-db samples taken while a model decodes.",
+                        w,
+                    ),
+                    dim,
+                ));
+                lines.push(Line::raw(""));
+                lines.push(keys);
+                frame.render_widget(Paragraph::new(lines), inner);
+                return;
+            }
+        };
+        let count = speeds.as_ref().map_or(1, |v| v.len());
+        lines.push(Line::from(vec![
+            Span::styled(" model ", dim),
+            Span::styled(
+                truncate(&m.model, w.saturating_sub(16)),
+                text.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {}/{count}", sel.min(count - 1) + 1), dim),
+        ]));
+        lines.push(Line::styled(
+            truncate(
+                &format!(
+                    " mean decode tok/s per {} tokens of context, {} samples",
+                    fmt_tokens(m.step),
+                    fmt_int(m.samples as usize)
+                ),
+                w,
+            ),
+            dim,
+        ));
+        lines.push(Line::raw(""));
+
+        let label_w = 14;
+        let bar_w = w.saturating_sub(label_w + 8 + 9 + 3);
+        lines.push(Line::styled(
+            truncate(
+                &format!(
+                    " {:<label_w$} {:<bar_w$} {:>8} {:>8}",
+                    "CONTEXT", "", "t/s", "SAMPLES"
+                ),
+                w,
+            ),
+            head,
+        ));
+        let peak = m.buckets.iter().map(|b| b.1).fold(0.0, f64::max);
+        let (first, last) = (m.buckets[0].0, m.buckets[m.buckets.len() - 1].0);
+        // Every row from the shortest to the longest context, empty ones too,
+        // so the vertical axis stays linear in tokens.
+        let mut start = first;
+        // Leave a blank line, the summary and the key row below.
+        while start <= last && lines.len() + 3 < h {
+            let range = format!("{}–{}", fmt_tokens(start), fmt_tokens(start + m.step));
+            let mut spans = vec![Span::styled(format!(" {range:<label_w$} "), text)];
+            match m.buckets.iter().find(|b| b.0 == start) {
+                Some(&(_, tps, n)) => {
+                    spans.extend(gauge((tps / peak) as f32, None, bar_w, GaugeStyle::Flow));
+                    // A handful of samples is a noisy mean; say so by dimming.
+                    let st = if n < 5 { dim } else { text };
+                    spans.push(Span::styled(format!(" {:>8}", fmt_rate(tps as f32)), st));
+                    spans.push(Span::styled(format!(" {:>8}", fmt_int(n as usize)), dim));
+                }
+                None => spans.push(Span::styled(format!("{:>w2$}", "–", w2 = bar_w + 9), dim)),
+            }
+            lines.push(Line::from(fit_spans(&spans, w)));
+            start += m.step;
+        }
+        lines.push(Line::raw(""));
+        let (lo, hi) = (m.buckets[0].1, m.buckets[m.buckets.len() - 1].1);
+        if m.buckets.len() > 1 && lo > 0.0 {
+            lines.push(Line::from(vec![
+                Span::styled(" shortest → longest context ", dim),
+                Span::styled(
+                    format!(
+                        "{} → {} t/s ({:+.0}%)",
+                        fmt_rate(lo as f32),
+                        fmt_rate(hi as f32),
+                        (hi / lo - 1.0) * 100.0
+                    ),
+                    text.add_modifier(Modifier::BOLD),
+                ),
+            ]));
         }
         while lines.len() + 1 < h {
             lines.push(Line::raw(""));
