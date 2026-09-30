@@ -272,6 +272,11 @@ gauge, temperature coloured by heat, SM clock, fan, PCIe link, a VRAM bar split
 into weights / KV in use / KV reserved / free, and utilisation and power
 history sparklines.
 
+Below the cards, a system RAM section shows memory in use / page cache / free
+against the machine's total, the focused model's resident size, and a history
+of RAM in use. It is on both the dashboard and the perf view, and is the first
+thing the panel drops on a short terminal.
+
 ### Context and MTP
 
 The context bar shows cached, prompt and generated tokens against the window
@@ -414,6 +419,7 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | cache hit | llama.cpp: `n_prompt_tokens_cache / n_prompt_tokens`. SGLang without `--enable-metrics` is unknown (shown as "—") |
 | request log | one record per `id_task`; averages from accumulated deltas |
 | util, VRAM, power, °C, clocks, fan, PCIe link | NVIDIA in-process NVML (`nvidia-smi --query-gpu=…` fallback), Intel `xpu-smi --query-gpu=…`, or Linux amdgpu sysfs and hwmon, every poll. On Intel, fan speed is the `xe` driver's hwmon tachometer (RPM); utilization that samples ~0 while clocks are boosted is reconstructed from the clock ratio and marked `~`; PCIe link and an unsupported temperature read blank |
+| system RAM | Linux `/proc/meminfo` (`MemTotal − MemAvailable` in use, `Cached` as page cache) and the server's `VmRSS`; elsewhere the OS memory totals, with no page cache split |
 | VRAM weights vs KV | llama.cpp: **estimate** from GGUF file size × `--tensor-split`. SGLang: `memory.weight_gb` and `memory.kv_cache_gb` from `/v1/loads`. vLLM and other safetensors servers: **estimate** from the summed size of the served directory's weight shards |
 | layers, heads, experts, MTP layers, engram, quant | GGUF header, or HuggingFace `config.json` (`num_hidden_layers`, `num_attention_heads`, `num_experts` / `num_local_experts`, `num_experts_per_tok`) for safetensors dirs |
 | layer → GPU | `--tensor-split` proportions |
