@@ -1273,8 +1273,13 @@ impl Renderer {
                 }
             }
             lines.push(Line::from(facts));
+            let hint = if d.detected.is_some_and(|m| m.engine == "strata") {
+                "Strata does not report draft acceptance"
+            } else {
+                "start llama-server with --metrics for acceptance stats"
+            };
             lines.push(Line::from(Span::styled(
-                truncate("start llama-server with --metrics for acceptance stats", w),
+                truncate(hint, w),
                 Style::default().fg(pal::c(pal::AMBER)),
             )));
             frame.render_widget(Paragraph::new(Text::from(lines)), inner);

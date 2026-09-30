@@ -16,6 +16,7 @@ mod pipeline;
 mod render;
 mod settings;
 mod sglang;
+mod strata;
 mod vllm;
 
 use config::{Args, ViewMode};
@@ -345,6 +346,38 @@ async fn poll_server(
             tokio::time::sleep(sleep).await;
         }
     }
+    if model.engine == "strata" {
+        // Strata has no /slots or Prometheus counters: its /metrics is one
+        // JSON document from a Python server, so never poll it faster than
+        // 400 ms.
+        let delay = poll.max(Duration::from_millis(400));
+        let mut misses = 0u32;
+        loop {
+            if let Some(m) = strata::poll_metrics(&model.host, port, &auth).await {
+                misses = 0;
+                let mut stats = strata::live_stats(&m);
+                if stats.ctx_max == 0 {
+                    stats.ctx_max = model.ctx_max.unwrap_or(0);
+                }
+                let _ = live_tx.try_send((pid, stats));
+            } else {
+                misses = misses.saturating_add(1);
+                if misses == 3 {
+                    let stats = LiveStats {
+                        ctx_max: model.ctx_max.unwrap_or(0),
+                        ..Default::default()
+                    };
+                    let _ = live_tx.try_send((pid, stats));
+                }
+            }
+            let sleep = if misses >= 3 {
+                delay.max(Duration::from_secs(2))
+            } else {
+                delay
+            };
+            tokio::time::sleep(sleep).await;
+        }
+    }
     if model.engine == "vllm" {
         // vLLM has no /slots or /experts endpoints; its /metrics counters
         // drive the live stats and the MTP panel. The 'r' rescan drops
@@ -459,7 +492,7 @@ fn status_for(slots: &[ModelSlot], rescanned: bool) -> String {
     let prefix = if rescanned { "re-scanned: " } else { "" };
     match slots.len() {
         0 => format!(
-            "{prefix}no running LLM found (llama-server / ollama / vLLM / SGLang) — press r to rescan"
+            "{prefix}no running LLM found (llama-server / ollama / vLLM / SGLang / Strata) — press r to rescan"
         ),
         1 => format!("{prefix}attached to {}", slots[0].model),
         n => format!(

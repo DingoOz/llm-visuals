@@ -1,0 +1,134 @@
+{
+ "engine": {
+  "model": "qwen3.8-flash-next-iq2_xs",
+  "max_context": 32768,
+  "images": false,
+  "version": "0.1.21",
+  "context": 32768,
+  "kv": "int8",
+  "kv_resident": 0,
+  "expert_slots": 7465,
+  "expert_cache_mib": 10239,
+  "spec": 6,
+  "mtp_max": 4,
+  "lookup": 3,
+  "vram_free_mib": 452,
+  "cvec": 0,
+  "arena_mib": 33812,
+  "pool_workers": 27,
+  "pcie_frac": "0.00",
+  "spec_min_p": "0.70",
+  "engine": "0.1.21"
+ },
+ "live": {
+  "state": "generating",
+  "queued": 0,
+  "phase": "thinking",
+  "prompt_tokens": 95,
+  "prompt_read": null,
+  "prompt_total": null,
+  "generated": 16371,
+  "max_tokens": 32665,
+  "elapsed_s": 373.4,
+  "tok_s": 43.9
+ },
+ "requests": [
+  {
+   "projection": null,
+   "time": 1790677230.2112987,
+   "duration_s": 7.3,
+   "finish": "stop",
+   "prompt_tokens": 58,
+   "reused": 0,
+   "output_tokens": 132,
+   "prompt_ms": 1891.2,
+   "decode_ms": 5409.9,
+   "decode_tok_s": 24.4,
+   "hit_rate": 0.753
+  }
+ ],
+ "requests_kept": 1,
+ "totals": {
+  "since": 1790677179.759666,
+  "requests": 1,
+  "prompt_tokens": 58,
+  "reused": 0,
+  "output_tokens": 132,
+  "prompt_ms": 1891.2,
+  "decode_ms": 5409.9
+ },
+ "hardware": {
+  "gpu_util": 100,
+  "gpu_mem_used": 16869228544,
+  "gpu_mem_total": 17179869184,
+  "gpu_temp": 64,
+  "gpu_power": 119.335,
+  "gpu_power_limit": 250.0,
+  "gpu_pcie_gen": 3,
+  "gpu_pcie_gen_max": 3,
+  "gpu_pcie_width": 16,
+  "gpu_pcie_rx_mb": 226.115234375,
+  "gpu_pcie_tx_mb": 112.2470703125,
+  "cpu": 52.9,
+  "ram_used": 44515999744,
+  "ram_total": 164310102016,
+  "disk_read_mb": 0.0,
+  "disk_write_mb": 0.29493521944545814,
+  "tok_s": 43.89880913369498
+ },
+ "hardware_static": {
+  "gpu_name": "Tesla V100-PCIE-16GB",
+  "cpu_name": "Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz",
+  "cores": 28,
+  "threads": 56,
+  "psutil": true
+ },
+ "history": {
+  "gpu_util": [
+   100,
+   100,
+   100
+  ],
+  "gpu_mem_used": [
+   16869228544,
+   16869228544,
+   16869228544
+  ],
+  "gpu_temp": [
+   64,
+   64,
+   64
+  ],
+  "gpu_power": [
+   115.22,
+   107.39,
+   119.33
+  ],
+  "gpu_pcie_rx_mb": [
+   497.01,
+   320.15,
+   226.12
+  ],
+  "cpu": [
+   52.5,
+   52.8,
+   52.9
+  ],
+  "ram_used": [
+   44521299968,
+   44528750592,
+   44515999744
+  ],
+  "disk_read_mb": [
+   1.2,
+   0.01,
+   0.0
+  ],
+  "tok_s": [
+   43.76,
+   43.82,
+   43.9
+  ]
+ },
+ "time": 1790677624.7895815
+}
