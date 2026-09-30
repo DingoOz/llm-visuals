@@ -59,6 +59,7 @@ GPUs and the disk are shared.
 | `settings.rs` | per-user config/data paths; loads `settings.json` and places its flags ahead of the command line; the settings screen's fields, keys, validation (re-parsing through clap) and saving |
 | `dblog.rs` | `--log-db` SQLite writer (on by default at the per-user data path) with a size cap |
 | `model_detect.rs` | finds inference processes via `nvidia-smi --query-compute-apps` and `/proc`, parses their command lines (model path, port, ctx size, tensor split, spec mode); returns every server found, best first, minus this process and idle daemons |
+| `vision.rs` | vision encoder detection and placement: llama.cpp projector flags and environment, the GPU runtime from `/proc/<pid>/maps`, and CUDA ordinal → host card via a `--cuda-bus-ids` child process that queries `libcuda` under the server's `CUDA_VISIBLE_DEVICES` / `CUDA_DEVICE_ORDER` |
 | `gguf.rs` | reads the GGUF header without loading tensors; maps layers to GPUs from `--tensor-split`; `read_tensor_summary` walks the tensor table and sizes each tensor from the gap to the next offset (no quant type table needed) |
 | `observe.rs` | HTTP GET with timeouts; parsers for `/slots`, `/metrics` (Prometheus text) and `/experts` |
 | `vllm.rs` | vLLM `/metrics` adapter: reconstructs per-request `LiveStats` from engine-wide Prometheus counters |
