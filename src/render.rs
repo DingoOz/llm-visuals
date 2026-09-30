@@ -185,7 +185,12 @@ impl Renderer {
     fn render_panels(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
         let n_gpus = d.gpus.len();
         let h = area.height;
-        let gpu_rows = (3 * n_gpus.max(1) as u16 + 2).max(9);
+        let ram_rows = if d.perf.bw.host.mem_total_bytes.is_some() {
+            3
+        } else {
+            0
+        };
+        let gpu_rows = (3 * n_gpus.max(1) as u16 + 2).max(9) + ram_rows;
         let show_requests = h >= 22;
         let show_ctx = h >= 16;
         let req_h = if show_requests { 7 } else { 0 };
@@ -607,6 +612,17 @@ impl Renderer {
         let (block, _) = with_right(panel(&title, pal::AMBER), &title, right, area);
         let inner = block.inner(area);
         frame.render_widget(block, area);
+        let n = d.gpus.len() as u16;
+        let mut ram_h = ram_rows(inner.height, n.max(1), d);
+        // Rows the cards cannot split evenly go to the RAM history.
+        if ram_h >= 3 && n > 0 {
+            ram_h += (inner.height - ram_h) % n;
+        }
+        if ram_h > 0 {
+            let ram = Rect::new(inner.x, inner.y + inner.height - ram_h, inner.width, ram_h);
+            self.render_ram(frame, ram, d);
+        }
+        let inner = Rect::new(inner.x, inner.y, inner.width, inner.height - ram_h);
         if d.gpus.is_empty() {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
@@ -632,7 +648,6 @@ impl Renderer {
             );
             return;
         }
-        let n = d.gpus.len() as u16;
         let per = (inner.height / n).max(1);
         let mut y = inner.y;
         for g in d.gpus {
@@ -894,6 +909,94 @@ impl Renderer {
                 spans.push(Span::raw("  "));
                 spans.extend(pw);
                 let _ = i;
+                lines.push(Line::from(spans));
+            }
+        }
+        frame.render_widget(Paragraph::new(Text::from(lines)), area);
+    }
+
+    /// System memory under the GPU cards: a rule, a used / cache / free bar
+    /// and the used-percent history.
+    fn render_ram(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
+        let host = &d.perf.bw.host;
+        let (Some(total), Some(avail)) = (host.mem_total_bytes, host.mem_available_bytes) else {
+            return;
+        };
+        let w = area.width as usize;
+        let total_f = total.max(1) as f32;
+        let used = total.saturating_sub(avail) as f32 / total_f;
+        // Page cache is mostly reclaimable, so it sits inside "available".
+        let cache = host
+            .page_cache_bytes
+            .map(|c| c.min(avail) as f32 / total_f)
+            .unwrap_or(0.0);
+        let gb = |b: f32| b * total_f / 1e9;
+        let mut lines: Vec<Line> = Vec::new();
+
+        if area.height >= 3 {
+            let title = " SYSTEM RAM ";
+            lines.push(Line::from(vec![
+                Span::styled("╶─", Style::default().fg(pal::c(pal::chrome().border))),
+                Span::styled(
+                    title,
+                    Style::default()
+                        .fg(pal::c(pal::accent(pal::VIOLET)))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    "─".repeat(w.saturating_sub(title.len() + 2)),
+                    Style::default().fg(pal::c(pal::chrome().border)),
+                ),
+            ]));
+        }
+
+        let label = format!("{:<12}", "   RAM");
+        let txt = format!(" {:>4.1}/{:<4.1}G ", gb(used), gb(1.0));
+        let mut legend: Vec<Span> = Vec::new();
+        if host.page_cache_bytes.is_some() {
+            legend.push(Span::styled("▒", Style::default().fg(pal::c(pal::VIOLET))));
+            legend.push(Span::styled(
+                format!(" cache {:.1}G ", gb(cache)),
+                Style::default().fg(pal::c(pal::TEXT_DIM)),
+            ));
+        }
+        if let Some(r) = host.rss_bytes.filter(|_| d.detected.is_some()) {
+            legend.push(Span::styled(
+                format!("model {:.1}G", r as f32 / 1e9),
+                Style::default().fg(pal::c(pal::TEXT_DIM)),
+            ));
+        }
+        let legend_w: usize = legend.iter().map(|s| s.content.chars().count()).sum();
+        let legend_w = if w > label.len() + txt.len() + legend_w + 20 {
+            legend_w
+        } else {
+            legend.clear();
+            0
+        };
+        let bar_w = w
+            .saturating_sub(label.len() + txt.len() + legend_w)
+            .clamp(4, 40);
+        let mut spans = vec![Span::styled(
+            label,
+            Style::default().fg(pal::c(pal::TEXT_DIM)),
+        )];
+        spans.extend(ram_bar(bar_w, used, cache));
+        spans.push(Span::styled(
+            txt,
+            Style::default()
+                .fg(pal::vu(used))
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.extend(legend);
+        lines.push(Line::from(spans));
+
+        let spark_rows = area.height as usize - lines.len();
+        if spark_rows > 0 {
+            let label_w = 3;
+            let hist: Vec<f32> = d.perf.bw.ram_used_hist.iter().copied().collect();
+            for row in sparkline(&hist, w.saturating_sub(label_w), spark_rows, 100.0, pal::VU) {
+                let mut spans = vec![Span::raw(" ".repeat(label_w))];
+                spans.extend(row);
                 lines.push(Line::from(spans));
             }
         }
@@ -3569,6 +3672,44 @@ fn vram_bar(
             )
         })
         .collect()
+}
+
+/// System RAM: in-use cells coloured by position like a VU gauge, then the
+/// reclaimable page cache, then free.
+fn ram_bar(width: usize, used: f32, cache: f32) -> Vec<Span<'static>> {
+    let n = width.max(1);
+    let used_n = ((used.clamp(0.0, 1.0) * n as f32).round() as usize).min(n);
+    let cache_n = ((cache.clamp(0.0, 1.0) * n as f32).round() as usize).min(n - used_n);
+    let track = pal::c(pal::chrome().track);
+    (0..n)
+        .map(|x| {
+            let (ch, fg) = if x < used_n {
+                ("█", pal::vu((x as f32 + 0.5) / n as f32))
+            } else if x < used_n + cache_n {
+                ("▒", pal::c(pal::dim_rgb(pal::VIOLET, 0.7)))
+            } else {
+                ("█", track)
+            };
+            Span::styled(ch, Style::default().fg(fg).bg(track))
+        })
+        .collect()
+}
+
+/// Rows the system RAM section takes at the foot of the GPU panel: a rule,
+/// the bar and at least one history row when the cards keep three rows
+/// each, the bar alone when they keep two, nothing below that. Spare height
+/// is shared with the cards so a tall panel grows the history too.
+fn ram_rows(h: u16, n_gpus: u16, d: &Dashboard) -> u16 {
+    if d.perf.bw.host.mem_total_bytes.is_none() || d.perf.bw.host.mem_available_bytes.is_none() {
+        0
+    } else if h >= 3 * n_gpus + 3 {
+        let extra = (h - 3 * n_gpus - 3) / (n_gpus + 1);
+        3 + extra.min(3)
+    } else if h > 2 * n_gpus {
+        1
+    } else {
+        0
+    }
 }
 
 /// Multi-row bar sparkline; newest sample at the right edge. Colour by level.

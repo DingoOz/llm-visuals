@@ -362,6 +362,8 @@ pub struct BandwidthStats {
     last_host: Option<(Instant, HostSample)>,
     pub host: HostSample,
     pub host_seen: bool,
+    /// System RAM in use (total minus available), percent, one per host poll.
+    pub ram_used_hist: VecDeque<f32>,
     /// System-wide disk reads, MB/s.
     pub disk: Meter,
     /// The inference process's own storage reads, MB/s.
@@ -422,6 +424,7 @@ impl BandwidthStats {
             last_host: None,
             host: HostSample::default(),
             host_seen: false,
+            ram_used_hist: VecDeque::with_capacity(HISTORY),
             disk: Meter::auto(500.0),
             proc_disk_mb_s: 0.0,
             majflt_per_s: 0.0,
@@ -485,6 +488,14 @@ impl BandwidthStats {
                 if *tx <= cap {
                     self.pcie_tx[i] = *tx;
                 }
+            }
+        }
+        if let (Some(t), Some(a)) = (s.mem_total_bytes, s.mem_available_bytes) {
+            if t > 0 {
+                push(
+                    &mut self.ram_used_hist,
+                    t.saturating_sub(a) as f32 / t as f32 * 100.0,
+                );
             }
         }
         self.host = s.clone();

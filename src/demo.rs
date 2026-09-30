@@ -510,7 +510,8 @@ impl DemoExperts {
 
 /// Host counters for the demo: a page-cache miss burst on cold requests,
 /// PCIe traffic proportional to load (the second card holds offloaded
-/// layers so it sees more), and a fixed resident set.
+/// layers so it sees more), a fixed resident set, and system RAM that
+/// climbs with load (activations, prompt buffers) and eases back at idle.
 struct DemoHost {
     n_gpus: usize,
     seed: u64,
@@ -518,6 +519,8 @@ struct DemoHost {
     proc_bytes: u64,
     majflt: u64,
     cold_ticks: u32,
+    /// Bytes in use beyond the baseline, eased toward a load-driven target.
+    ram_extra: f32,
 }
 
 impl DemoHost {
@@ -529,6 +532,7 @@ impl DemoHost {
             proc_bytes: 2_000_000_000,
             majflt: 1200,
             cold_ticks: 0,
+            ram_extra: 0.0,
         }
     }
 
@@ -557,6 +561,9 @@ impl DemoHost {
                 (i as u32, rx, rx * 0.12)
             })
             .collect();
+        let target = 6e9 * load + 0.6e9 * jitter;
+        self.ram_extra += (target - self.ram_extra) * 0.08;
+        let extra = self.ram_extra.max(0.0) as u64;
         HostSample {
             disk_read_bytes: Some(self.disk_bytes),
             proc_read_bytes: Some(self.proc_bytes),
@@ -564,7 +571,7 @@ impl DemoHost {
             rss_file_bytes: Some(6_100_000_000),
             rss_bytes: Some(7_300_000_000),
             mem_total_bytes: Some(64_000_000_000),
-            mem_available_bytes: Some(41_000_000_000),
+            mem_available_bytes: Some(41_000_000_000 - extra),
             page_cache_bytes: Some(22_000_000_000),
             pcie_mb_s,
             pcie_ok: true,
