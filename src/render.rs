@@ -191,7 +191,11 @@ impl Renderer {
         } else {
             0
         };
-        let gpu_rows = (3 * n_gpus.max(1) as u16 + 2).max(9) + ram_rows;
+        // One blank line between the cards in the GPUs panel, and one
+        // above the RAM section when it shows.
+        let gpu_gap = n_gpus.saturating_sub(1) as u16;
+        let ram_gap = u16::from(ram_rows > 0);
+        let gpu_rows = (3 * n_gpus.max(1) as u16 + 2).max(9) + gpu_gap + ram_gap + ram_rows;
         let show_requests = h >= 22;
         let show_ctx = h >= 16;
         let req_h = if show_requests { 7 } else { 0 };
@@ -654,15 +658,28 @@ impl Renderer {
         frame.render_widget(block, area);
         let n = d.gpus.len() as u16;
         let mut ram_h = ram_rows(inner.height, n.max(1), d);
+        let cards_h = inner.height.saturating_sub(ram_h);
+        // A single blank line between the cards; dropped once keeping it
+        // would starve the cards under two rows each.
+        let gap = n > 1 && cards_h >= 3 * n - 1;
+        let gaps = if gap { n - 1 } else { 0 };
+        // The same blank line above the RAM section, under the same
+        // two-rows-per-card condition.
+        let ram_gap = u16::from(ram_h > 0 && cards_h >= gaps + 2 * n + 1);
         // Rows the cards cannot split evenly go to the RAM history.
         if ram_h >= 3 && n > 0 {
-            ram_h += (inner.height - ram_h) % n;
+            ram_h += (inner.height - ram_h - gaps - ram_gap) % n;
         }
         if ram_h > 0 {
             let ram = Rect::new(inner.x, inner.y + inner.height - ram_h, inner.width, ram_h);
             self.render_ram(frame, ram, d);
         }
-        let inner = Rect::new(inner.x, inner.y, inner.width, inner.height - ram_h);
+        let inner = Rect::new(
+            inner.x,
+            inner.y,
+            inner.width,
+            inner.height - ram_h - ram_gap,
+        );
         if d.gpus.is_empty() {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
@@ -690,14 +707,23 @@ impl Renderer {
         }
         let per = (inner.height / n).max(1);
         let mut y = inner.y;
-        for g in d.gpus {
+        for (i, g) in d.gpus.iter().enumerate() {
             if y >= inner.y + inner.height {
                 break;
             }
-            let h = per.min(inner.y + inner.height - y);
+            // With the gaps in, share the rows that leave no even split
+            // over the first cards instead of stranding them at the foot.
+            let h = if gap {
+                let avail = inner.height - gaps;
+                let base = (avail / n).max(1);
+                let extra = u16::from(i < (avail % n) as usize);
+                (base + extra).min(inner.y + inner.height - y)
+            } else {
+                per.min(inner.y + inner.height - y)
+            };
             let card = Rect::new(inner.x, y, inner.width, h);
             self.render_gpu_card(frame, card, g, d);
-            y += h;
+            y += h + u16::from(gap && i + 1 < d.gpus.len());
         }
     }
 
