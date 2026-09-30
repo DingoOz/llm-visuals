@@ -338,6 +338,8 @@ pub async fn poll_llama(host: &str, port: u16, auth: &HttpAuth) -> Option<LiveSt
 pub struct LlamaProps {
     pub model_path: String,
     pub model_alias: Option<String>,
+    /// `modalities.vision`: a projector is loaded. Absent on older servers.
+    pub vision: Option<bool>,
 }
 
 pub async fn poll_llama_props(host: &str, port: u16, auth: &HttpAuth) -> Option<LlamaProps> {
@@ -354,6 +356,10 @@ pub fn parse_llama_props(body: &str) -> Option<LlamaProps> {
             .and_then(|x| x.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_owned),
+        vision: v
+            .get("modalities")
+            .and_then(|m| m.get("vision"))
+            .and_then(|x| x.as_bool()),
     })
 }
 
@@ -605,6 +611,18 @@ mod tests {
             Some("ggml-org/Qwen3.8-27B-GGUF:Q4_K_M")
         );
         assert!(parse_llama_props(r#"{"model_alias":"missing-path"}"#).is_none());
+        assert_eq!(props.vision, None);
+    }
+
+    #[test]
+    fn parse_llama_props_vision_modality() {
+        let body = r#"{"model_path":"/m/q.gguf","model_alias":"",
+            "modalities":{"vision":true,"video":false,"audio":false}}"#;
+        let props = parse_llama_props(body).expect("props");
+        assert_eq!(props.vision, Some(true));
+        assert_eq!(props.model_alias, None);
+        let text = r#"{"model_path":"/m/q.gguf","modalities":{"vision":false,"audio":false}}"#;
+        assert_eq!(parse_llama_props(text).unwrap().vision, Some(false));
     }
 
     #[test]
