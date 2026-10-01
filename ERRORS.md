@@ -2,11 +2,12 @@
 
 ## Summary
 
-22 entries (as of 2026-09-24). Recurring themes:
+23 entries (as of 2026-10-01). Recurring themes:
 
 - **Optional or missing telemetry treated as a real value** (Logic, most common): a missing counter read as 0, record close gated on optional TTFT, unknown ctx rendered as full, model ownership derived from an unknown weight estimate. Rule of thumb: keep "unknown" distinct from zero and never gate state or ownership on an optional measurement.
 - **Under-discriminating matches when resolving processes/devices**: docker-proxy matched by IP only, comm-name gating, xe fans keyed by a constant path component, env GPU masks merged with host indices. Match on every discriminating field and prefer authoritative (driver/host) sources over inferred ones.
 - **NVML/driver API semantics differing from the CLI** (API Misuse): power limit, reserved VRAM, NOT_SUPPORTED handling, session lifetime.
+- **Layout arithmetic split across budget and renderer**: optional rows reserved or gated under conditions that differ from what the renderer draws. Keep the split in one tested helper.
 - **Hot-path cost**: per-device queries for filtered GPUs, blocking sleeps inside the 200 ms GPU poll.
 
 ### vLLM positional arg parser consumed argv[0] — 2026-09-16
@@ -229,3 +230,13 @@
 - **Fix applied:** Env affinity applies only when no driver placement exists; both variables parse as comma lists with the tile suffix stripped (`parse_gpu_affinity`, tested).
 - **Prevention rule:** Driver-reported indices are authoritative; inferred placement is a fallback only, never merged with them.
 
+
+### Optional layout gaps took rows from content they should yield to — 2026-10-01
+
+- **Severity:** Medium
+- **Category:** Logic
+- **File(s):** `src/render.rs`
+- **Pattern:** Decorative rows (blank separators) gated on a weaker threshold than the content they sit between needs, or carved out after a sizing function already promised that content its rows.
+- **Root cause:** GPU card gaps were kept while each card had two rows, but a card needs three to draw its sparkline, and `ram_rows` sizing assumed the cards got every non-RAM row.
+- **Fix applied:** One `gpu_split` helper adds all gaps only when every card keeps three rows, then evens out the cards; tested across GPU counts and heights. The panel budget now reserves RAM rows only when both meminfo fields render.
+- **Prevention rule:** Decoration is dropped before content shrinks: gate optional spacing on the content's full minimum, compute the whole split in one tested function, and keep the panel budget's conditions identical to the renderer's.
