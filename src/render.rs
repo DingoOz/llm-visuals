@@ -186,12 +186,17 @@ impl Renderer {
     fn render_panels(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
         let n_gpus = d.gpus.len();
         let h = area.height;
-        let ram_rows = if d.perf.bw.host.mem_total_bytes.is_some() {
+        let host = &d.perf.bw.host;
+        let ram_rows = if host.mem_total_bytes.is_some() && host.mem_available_bytes.is_some() {
             3
         } else {
             0
         };
-        let gpu_rows = (3 * n_gpus.max(1) as u16 + 2).max(9) + ram_rows;
+        // One blank line between the cards in the GPUs panel, and one
+        // above the RAM section when it shows.
+        let gpu_gap = n_gpus.saturating_sub(1) as u16;
+        let ram_gap = u16::from(ram_rows > 0);
+        let gpu_rows = (3 * n_gpus.max(1) as u16 + 2).max(9) + gpu_gap + ram_gap + ram_rows;
         let show_requests = h >= 22;
         let show_ctx = h >= 16;
         let req_h = if show_requests { 7 } else { 0 };
@@ -653,16 +658,18 @@ impl Renderer {
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let n = d.gpus.len() as u16;
-        let mut ram_h = ram_rows(inner.height, n.max(1), d);
-        // Rows the cards cannot split evenly go to the RAM history.
-        if ram_h >= 3 && n > 0 {
-            ram_h += (inner.height - ram_h) % n;
-        }
+        let (cards, ram_h, gap) = gpu_split(inner.height, n, ram_rows(inner.height, n.max(1), d));
         if ram_h > 0 {
             let ram = Rect::new(inner.x, inner.y + inner.height - ram_h, inner.width, ram_h);
             self.render_ram(frame, ram, d);
         }
-        let inner = Rect::new(inner.x, inner.y, inner.width, inner.height - ram_h);
+        let ram_gap = u16::from(gap && ram_h > 0);
+        let inner = Rect::new(
+            inner.x,
+            inner.y,
+            inner.width,
+            inner.height - ram_h - ram_gap,
+        );
         if d.gpus.is_empty() {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
@@ -688,16 +695,15 @@ impl Renderer {
             );
             return;
         }
-        let per = (inner.height / n).max(1);
         let mut y = inner.y;
-        for g in d.gpus {
+        for (g, &h) in d.gpus.iter().zip(&cards) {
             if y >= inner.y + inner.height {
                 break;
             }
-            let h = per.min(inner.y + inner.height - y);
+            let h = h.max(1).min(inner.y + inner.height - y);
             let card = Rect::new(inner.x, y, inner.width, h);
             self.render_gpu_card(frame, card, g, d);
-            y += h;
+            y += h + u16::from(gap);
         }
     }
 
@@ -3752,6 +3758,28 @@ fn ram_rows(h: u16, n_gpus: u16, d: &Dashboard) -> u16 {
     }
 }
 
+/// Splits the GPUs panel's `h` rows between `n` cards and the RAM section
+/// (`ram_h` rows, from `ram_rows`). Returns the card heights, the final RAM
+/// height, and whether a blank line follows each card (between cards and
+/// above RAM). The blank lines go in only when every card still keeps its
+/// three rows, so a sparkline never pays for one.
+fn gpu_split(h: u16, n: u16, mut ram_h: u16) -> (Vec<u16>, u16, bool) {
+    let n = n.max(1);
+    let cards_h = h.saturating_sub(ram_h);
+    let gaps = n - 1 + u16::from(ram_h > 0);
+    let gap = gaps > 0 && cards_h >= 3 * n + gaps;
+    let mut avail = cards_h - if gap { gaps } else { 0 };
+    // Rows the cards cannot split evenly go to the RAM history.
+    if ram_h >= 3 {
+        ram_h += avail % n;
+        avail -= avail % n;
+    }
+    let cards = (0..n)
+        .map(|i| avail / n + u16::from(i < avail % n))
+        .collect();
+    (cards, ram_h, gap)
+}
+
 /// Multi-row bar sparkline; newest sample at the right edge. Colour by level.
 fn sparkline(
     values: &[f32],
@@ -4072,6 +4100,39 @@ fn quant_from_path(m: &DetectedModel) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpu_split_keeps_three_rows_per_card_before_adding_gaps() {
+        for n in [1u16, 2, 3, 4, 8] {
+            for h in 0..60u16 {
+                // RAM sizes ram_rows can hand out: none, compact, multi-row.
+                for ram in [0u16, 1, 3, 5] {
+                    if ram > h || (ram >= 3 && h < 3 * n + 3) {
+                        continue;
+                    }
+                    let (cards, ram_h, gap) = gpu_split(h, n, ram);
+                    let gaps = if gap { n - 1 + u16::from(ram_h > 0) } else { 0 };
+                    let used: u16 = cards.iter().sum::<u16>() + ram_h + gaps;
+                    assert!(used <= h, "n={n} h={h} ram={ram}: {used} rows > {h}");
+                    if gap {
+                        assert!(
+                            cards.iter().all(|&c| c >= 3),
+                            "n={n} h={h} ram={ram}: {cards:?}"
+                        );
+                    }
+                    if ram >= 3 {
+                        assert!(cards.iter().all(|&c| c == cards[0]), "uneven {cards:?}");
+                    }
+                }
+            }
+        }
+        // Two cards, 10 rows, RAM 3: no room for gaps, so both cards keep 3 rows.
+        assert_eq!(gpu_split(10, 2, 3), (vec![3, 3], 4, false));
+        // Two cards, budgeted 12 rows, RAM 4: gaps fit alongside 3-row cards.
+        assert_eq!(gpu_split(12, 2, 4), (vec![3, 3], 4, true));
+        // Two cards, 8 rows, compact RAM: no gap rather than a 3/2 split.
+        assert_eq!(gpu_split(8, 2, 1), (vec![4, 3], 1, false));
+    }
 
     #[test]
     fn gauge_uses_position_colours_and_peak() {
