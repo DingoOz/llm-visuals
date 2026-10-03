@@ -528,9 +528,15 @@ impl NvmlSession {
             });
         }
 
-        // Every device unreadable means NVML is not a usable backend here; the Err lets
-        // GpuBackend::detect fall through to nvidia-smi. Same test collect_amd applies.
-        if count > 0 && stats_list.iter().all(|gpu| gpu.mem_total_mb == 0) {
+        // No device answered a single query means NVML is not a usable backend
+        // here; the Err lets GpuBackend::detect fall through to nvidia-smi.
+        // A zero memory.total alone is not a reason to demote: unified-memory
+        // parts (GB10 / DGX Spark) and MIG rows report no device memory by
+        // design — nvidia-smi prints [N/A] for them too, so falling back buys
+        // nothing but subprocess polls. The stricter mem_total test collect_amd
+        // applies stays right there: a missing sysfs node really is no
+        // telemetry at all.
+        if count > 0 && !telemetry_readable(&stats_list) {
             return Err(format!(
                 "NVML reported {count} device(s), but failed to query readable telemetry"
             ));
@@ -586,6 +592,20 @@ impl Drop for NvmlSession {
     }
 }
 
+/// Did any device answer at least one query the panel can draw? Unified-memory
+/// SoCs (GB10 / DGX Spark) report no device memory at all, so a usable backend
+/// can consist entirely of zeroed `mem_*` rows — utilization, power,
+/// temperature and clocks are what make NVML worth keeping there.
+fn telemetry_readable(stats: &[GpuStats]) -> bool {
+    stats.iter().any(|g| {
+        g.mem_total_mb > 0
+            || g.temperature.is_some()
+            || g.power_watts > 0.0
+            || g.clock_sm_mhz > 0
+            || g.utilization_gpu > 0.0
+    })
+}
+
 pub(crate) fn decode_device_name(buf: &[u8]) -> String {
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     String::from_utf8_lossy(&buf[..len]).trim().to_string()
@@ -631,6 +651,51 @@ mod tests {
     }
 
     #[test]
+    fn unified_soc_without_device_memory_is_readable() {
+        // GB10 / DGX Spark: nvmlDeviceGetMemoryInfo reports [N/A], so the row
+        // carries zeroed mem_* fields while utilization, power, temperature
+        // and clocks all answer. collect_stats must keep this backend.
+        let gb10 = GpuStats {
+            index: 0,
+            name: "NVIDIA GB10".into(),
+            utilization_gpu: 96.0,
+            mem_total_mb: 0,
+            mem_used_mb: 0,
+            mem_free_mb: 0,
+            power_watts: 36.84,
+            temperature: Some(64.0),
+            clock_sm_mhz: 2522,
+            ..Default::default()
+        };
+        assert!(telemetry_readable(&[gb10]));
+    }
+
+    #[test]
+    fn zeroed_rows_are_not_readable() {
+        let dead = GpuStats {
+            index: 0,
+            name: "GPU 0".into(),
+            ..Default::default()
+        };
+        assert!(!telemetry_readable(&[dead.clone(), dead]));
+        // One live card keeps the backend even when other rows are dead.
+        let live = GpuStats {
+            index: 1,
+            name: "NVIDIA GeForce RTX 4090".into(),
+            mem_total_mb: 24576,
+            ..Default::default()
+        };
+        assert!(telemetry_readable(&[
+            GpuStats {
+                index: 0,
+                name: "GPU 0".into(),
+                ..Default::default()
+            },
+            live
+        ]));
+    }
+
+    #[test]
     fn memory_v2_matches_nvml_h() {
         // nvml.h: #define nvmlMemory_v2 NVML_STRUCT_VERSION(Memory, 2), with
         // unsigned int version padded to 8 ahead of four unsigned long longs.
@@ -655,9 +720,10 @@ mod tests {
             println!("NVML loaded but no devices visible (skipping test)");
             return;
         };
-        // Ok implies at least one device answered; individual rows may be zeroed.
+        // Ok implies at least one device answered one query; on unified-memory
+        // parts (GB10) or MIG rows every mem_* field may legitimately be zero.
         assert!(
-            stats.iter().any(|gpu| gpu.mem_total_mb > 0),
+            telemetry_readable(&stats),
             "collect_stats returned Ok with no readable device"
         );
         println!(
