@@ -338,6 +338,7 @@ impl VllmAdapter {
             cache_unknown: false,
             weight_gb: None,
             kv_cache_gb: None,
+            graph_gb: None,
             kv_tokens: None,
         };
 

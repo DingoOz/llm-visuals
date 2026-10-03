@@ -432,9 +432,9 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | tok/J | decode tok/s ÷ summed GPU power draw |
 | cache hit | llama.cpp: `n_prompt_tokens_cache / n_prompt_tokens`. SGLang without `--enable-metrics` is unknown (shown as "—") |
 | request log | one record per `id_task`; averages from accumulated deltas |
-| util, VRAM, power, °C, clocks, fan, PCIe link | NVIDIA in-process NVML (`nvidia-smi --query-gpu=…` fallback), Intel `xpu-smi --query-gpu=…`, or Linux amdgpu sysfs and hwmon, every poll. On Intel, fan speed is the `xe` driver's hwmon tachometer (RPM); utilization that samples ~0 while clocks are boosted is reconstructed from the clock ratio and marked `~`; PCIe link and an unsupported temperature read blank |
+| util, VRAM, power, °C, clocks, fan, PCIe link | NVIDIA in-process NVML (`nvidia-smi --query-gpu=…` fallback), Intel `xpu-smi --query-gpu=…`, or Linux amdgpu sysfs and hwmon, every poll. On Intel, fan speed is the `xe` driver's hwmon tachometer (RPM); utilization that samples ~0 while clocks are boosted is reconstructed from the clock ratio and marked `~`; PCIe link and an unsupported temperature read blank. Unified-memory parts (NVIDIA GB10 / DGX Spark) report no device memory, fan or memory-busy counter at all: NVML stays the backend for the fields that *do* answer, and the memory bar relabels itself (see `VRAM weights vs KV` and Troubleshooting) |
 | system RAM | Linux `/proc/meminfo` (`MemTotal − MemAvailable` in use, `Cached` as page cache) and the server's `VmRSS`; elsewhere the OS memory totals, with no page cache split |
-| VRAM weights vs KV | llama.cpp: **estimate** from GGUF file size × `--tensor-split`. SGLang: `memory.weight_gb` and `memory.kv_cache_gb` from `/v1/loads`. vLLM and other safetensors servers: **estimate** from the summed size of the served directory's weight shards |
+| VRAM weights vs KV | llama.cpp: **estimate** from GGUF file size × `--tensor-split`. SGLang: `memory.weight_gb` and `memory.kv_cache_gb` from `/v1/loads`. vLLM and other safetensors servers: **estimate** from the summed size of the served directory's weight shards. On a part with no device memory (GB10 / DGX Spark) the bar is labelled `UNIFIED`: used = the server's weight + KV + CUDA-graph GiB from `/v1/loads` summed over the models that report it, denominator = system RAM — the pool the accelerator shares. With no server-reported occupancy the row degrades to zeros rather than a stand-in |
 | layers, heads, experts, MTP layers, engram, quant | GGUF header, or HuggingFace `config.json` (`num_hidden_layers`, `num_attention_heads`, `num_experts` / `num_local_experts`, `num_experts_per_tok`) for safetensors dirs |
 | vision encoder | llama.cpp: `modalities.vision` from `GET /props`, else `--mmproj` / `-hf` on the command line or `LLAMA_ARG_MMPROJ` in `/proc/<pid>/environ`. Placement: CPU for `--no-mmproj-offload` or a process with no GPU runtime in `/proc/<pid>/maps`; otherwise `--mmproj-device` or the first GPU device, mapped to a card by the CUDA driver's `cuDeviceGetPCIBusId` (run in a child process with the server's CUDA variables) matched against nvidia-smi's `pci.bus_id`, or by the one card the process occupies. vLLM / SGLang: `vision_config` in `config.json`, on the model's GPUs (none with `--language-model-only`) |
 | layer → GPU | `--tensor-split` proportions |
@@ -619,6 +619,21 @@ name the process with `--pid`.
 failing: the NVIDIA userspace was upgraded under a running kernel module.
 Reload the modules or reboot. The panel shows whatever `nvidia-smi` prints so
 the cause is visible.
+
+**Fewer GPU fields on a GB10 / DGX Spark (unified-memory) machine.** Nothing is
+broken: the driver exposes no device memory, no fan tachometer and no
+memory-controller counter there. The GPU panel stays on in-process NVML for
+utilisation, power, temperature and clocks; the VRAM bar becomes `UNIFIED` with
+system RAM as the denominator and the SGLang server's own
+`memory.weight_gb + kv_cache_gb + graph_gb` from `/v1/loads` as the fill (other
+engines do not report occupancy, so the bar shows zeros). Fan and `VRAM busy %`
+read as absent, not as errors. The two bars show the same pool at different
+units and different scopes: `UNIFIED` is GiB like every VRAM bar and counts
+only what the servers report as model occupancy; the `RAM` row is decimal GB
+(`/ 1e9`) and counts the whole system (`MemTotal − MemAvailable`). The same
+119.6 GiB pool is 128.5 G and 119 GiB to btop. The `b` memory pipeline's PCIe
+and VRAM stages have no hardware to measure on a unified part — do not blame
+them for a decode bottleneck.
 
 **AMD GPU panel is unavailable.** AMD telemetry requires Linux with the
 `amdgpu` driver and readable DRM sysfs/hwmon files under `/sys/class/drm`.
