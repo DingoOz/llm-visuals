@@ -523,6 +523,7 @@ impl NvmlSession {
                 fan_pct,
                 fan_rpm: None,
                 util_estimated: false,
+                unified: false,
                 pcie_gen,
                 pcie_width,
             });

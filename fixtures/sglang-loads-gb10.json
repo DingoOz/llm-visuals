@@ -1,0 +1,61 @@
+{
+    "timestamp": "2026-10-03T10:49:52.424063+00:00",
+    "version": "0.0.0.dev1+g4ccff141d",
+    "accelerator": "NVIDIA GB10",
+    "num_accelerators": 1,
+    "loads": [
+        {
+            "timestamp": 1791024591.5859656,
+            "dp_rank": 0,
+            "num_running_reqs": 1,
+            "num_waiting_reqs": 0,
+            "num_waiting_uncached_tokens": 0,
+            "num_used_tokens": 68288,
+            "num_total_tokens": 68288,
+            "num_active_tokens": 68288,
+            "max_total_num_tokens": 442944,
+            "max_running_requests": 4,
+            "token_usage": 0.1542,
+            "gen_throughput": 35.67,
+            "cache_hit_rate": 0.0,
+            "utilization": 0.0,
+            "total_prefill_uncached_tokens": 1705998,
+            "total_prefill_busy_us": 787065703,
+            "decode_moments": [
+                487501.0,
+                524125.0,
+                39159884517.0,
+                607883.0,
+                43095567338.0,
+                1382332.0
+            ],
+            "memory": {
+                "weight_gb": 82.172,
+                "kv_cache_gb": 10.457,
+                "graph_gb": 0.234,
+                "token_capacity": 442944
+            },
+            "speculative": {
+                "accept_length": 2.626557160909618,
+                "accept_rate": 0.6416666666666667
+            },
+            "disaggregation": {
+                "mode": "null",
+                "prefill_bootstrap_queue_reqs": 0,
+                "prefill_inflight_queue_reqs": 0,
+                "decode_prealloc_queue_reqs": 0,
+                "decode_transfer_queue_reqs": 0,
+                "decode_retracted_queue_reqs": 0,
+                "kv_transfer_speed_gb_s": 0.0,
+                "kv_transfer_latency_ms": 0.0
+            },
+            "queues": {
+                "waiting": 0,
+                "grammar": 0,
+                "paused": 0,
+                "retracted": 0,
+                "prealloc_ready": 0
+            }
+        }
+    ]
+}
