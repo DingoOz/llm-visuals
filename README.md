@@ -530,8 +530,10 @@ Everything live comes from Strata's JSON `GET /metrics`, polled no faster
 than every 400 ms. Prefill progress and generated tokens come from `live`;
 the prefix reuse and the server's own prefill and decode times are only
 known once a request ends, so while one runs cache hit shows "—". The MTP
-depth is `engine.mtp_max`; Strata does not report draft acceptance, so the
-MTP panel has no acceptance gauge. The VRAM weights/KV split is the usual
+depth is `engine.mtp_max`. From Strata 0.1.35 the acceptance gauge comes
+from the `totals.drafts_offered` / `drafts_accepted` counters; they move only
+when a request ends, so the gauge shows each finished request's acceptance
+(spread over its server-measured decode time) and holds it until the next. The VRAM weights/KV split is the usual
 file-size estimate, which does not fit Strata's RAM-resident experts.
 
 ---

@@ -209,6 +209,10 @@ pub struct SpecMetrics {
     pub verify_steps: u64,
     pub n_decode: u64,
     pub tokens_predicted: u64,
+    /// Cumulative server-measured decode time, for servers whose counters
+    /// move only when a request ends (Strata): the delta then spans this
+    /// long, not the poll interval. 0 = use the poll timing.
+    pub busy_secs: f64,
 }
 
 pub async fn poll_metrics(host: &str, port: u16, auth: &HttpAuth) -> Option<SpecMetrics> {

@@ -11,9 +11,10 @@
 //! (`prompt_read`) and generated count. The prefix reuse and the server's
 //! own prefill / decode timings are only known once the request is in
 //! `requests`, so the idle sample reports them for the request that just
-//! closed.
+//! closed. MTP draft counts (Strata 0.1.35+) likewise move only when a
+//! request ends.
 
-use crate::observe::{http_get, HttpAuth, LiveStats};
+use crate::observe::{http_get, HttpAuth, LiveStats, SpecMetrics};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -47,6 +48,9 @@ pub struct StrataMetrics {
     pub last: Option<StrataRequest>,
     /// MTP draft depth (`engine.mtp_max`); 0 when speculation is off.
     pub mtp_max: usize,
+    /// Running draft totals (`totals.drafts_offered` / `drafts_accepted`,
+    /// Strata 0.1.35+). None on older servers.
+    pub spec: Option<SpecMetrics>,
 }
 
 impl StrataMetrics {
@@ -73,6 +77,23 @@ pub fn parse_metrics(body: &str) -> Option<StrataMetrics> {
             prompt_ms: f64_at(r, "prompt_ms").unwrap_or(0.0),
             decode_ms: f64_at(r, "decode_ms").unwrap_or(0.0),
         });
+    let totals = v.get("totals");
+    let total = |k: &str| totals.and_then(|t| usize_at(t, k)).map(|n| n as u64);
+    let spec = match (total("drafts_offered"), total("drafts_accepted")) {
+        (Some(offered), Some(accepted)) => {
+            let output = total("output_tokens").unwrap_or(0);
+            Some(SpecMetrics {
+                draft_tokens: offered,
+                accepted,
+                // Each verify step emits one token plus its accepted drafts.
+                verify_steps: output.saturating_sub(accepted),
+                n_decode: output,
+                tokens_predicted: output,
+                busy_secs: totals.and_then(|t| f64_at(t, "decode_ms")).unwrap_or(0.0) / 1000.0,
+            })
+        }
+        _ => None,
+    };
     Some(StrataMetrics {
         model: engine
             .get("model")
@@ -87,12 +108,10 @@ pub fn parse_metrics(body: &str) -> Option<StrataMetrics> {
         prompt_tokens: usize_at(live, "prompt_tokens").unwrap_or(0),
         prompt_read: usize_at(live, "prompt_read"),
         generated: usize_at(live, "generated").unwrap_or(0),
-        requests_done: v
-            .get("totals")
-            .and_then(|t| usize_at(t, "requests"))
-            .unwrap_or(0) as u64,
+        requests_done: total("requests").unwrap_or(0),
         last,
         mtp_max: usize_at(engine, "mtp_max").unwrap_or(0),
+        spec,
     })
 }
 
@@ -244,6 +263,23 @@ mod tests {
         assert!(s.cache_unknown);
         assert_eq!(s.spec_types, "mtp");
         assert_eq!(s.spec_depth, 4);
+        // Captured from 0.1.21, before the draft totals existed.
+        assert!(m.spec.is_none());
+    }
+
+    #[test]
+    fn draft_totals() {
+        let m = parse_metrics(
+            r#"{"engine":{"mtp_max":3},"live":{"state":"idle"},
+                "totals":{"requests":2,"output_tokens":500,"decode_ms":4000.0,
+                          "drafts_offered":600,"drafts_accepted":300}}"#,
+        )
+        .unwrap();
+        let sp = m.spec.unwrap();
+        assert_eq!((sp.draft_tokens, sp.accepted), (600, 300));
+        assert_eq!(sp.verify_steps, 200);
+        assert_eq!(sp.tokens_predicted, 500);
+        assert!((sp.busy_secs - 4.0).abs() < 1e-9);
     }
 
     #[test]

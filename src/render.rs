@@ -1320,7 +1320,7 @@ impl Renderer {
             }
             lines.push(Line::from(facts));
             let hint = if d.detected.is_some_and(|m| m.engine == "strata") {
-                "Strata does not report draft acceptance"
+                "Strata reports draft acceptance from 0.1.35"
             } else {
                 "start llama-server with --metrics for acceptance stats"
             };

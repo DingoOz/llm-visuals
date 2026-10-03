@@ -376,6 +376,9 @@ async fn poll_server(
                     stats.ctx_max = model.ctx_max.unwrap_or(0);
                 }
                 let _ = live_tx.try_send((pid, stats));
+                if let Some(sp) = m.spec {
+                    let _ = spec_tx.try_send((pid, sp));
+                }
             } else {
                 misses = misses.saturating_add(1);
                 if misses == 3 {
