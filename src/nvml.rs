@@ -77,7 +77,7 @@ type FnNvmlDeviceGetPcieWidth = unsafe extern "C" fn(*mut c_void, *mut u32) -> u
 type FnNvmlDeviceGetPcieThroughput = unsafe extern "C" fn(*mut c_void, u32, *mut u32) -> u32;
 
 #[cfg(windows)]
-mod os {
+pub(crate) mod os {
     use std::ffi::c_void;
 
     extern "system" {
@@ -115,7 +115,7 @@ mod os {
 }
 
 #[cfg(unix)]
-mod os {
+pub(crate) mod os {
     use std::ffi::c_void;
 
     extern "C" {
@@ -155,7 +155,7 @@ mod os {
 }
 
 #[cfg(not(any(windows, unix)))]
-mod os {
+pub(crate) mod os {
     use std::ffi::c_void;
 
     pub struct Library;

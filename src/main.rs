@@ -17,6 +17,7 @@ mod render;
 mod settings;
 mod sglang;
 mod strata;
+mod vision;
 mod vllm;
 
 use config::{Args, ViewMode};
@@ -168,6 +169,15 @@ async fn discover(args: &Args, auth: &HttpAuth) -> (Vec<DetectedModel>, Option<S
                     fm.gguf = m.gguf;
                     fm.tensors = m.tensors;
                 }
+                // The process scan can place the encoder; a port probe can't.
+                if m.vision.is_some()
+                    && fm
+                        .vision
+                        .as_ref()
+                        .map_or(true, |v| v.place == vision::Place::Unknown)
+                {
+                    fm.vision = m.vision;
+                }
                 if fm.path.is_none() || fm.path.as_ref().is_some_and(|p| !p.exists()) {
                     if let Some(p) = m.path {
                         fm.path = Some(p);
@@ -182,9 +192,10 @@ async fn discover(args: &Args, auth: &HttpAuth) -> (Vec<DetectedModel>, Option<S
     // `llama-server -hf owner/repo:quant` does not put a local GGUF path on
     // its command line. Current llama.cpp exposes the resolved path via
     // `/props`; use it so layer counts and tensor layout remain available.
+    // `/props` also says whether a vision projector actually loaded.
     let mut probes = tokio::task::JoinSet::new();
     for (index, model) in found.iter().enumerate() {
-        if model.engine == "llama.cpp" && model.gguf.is_none() {
+        if model.engine == "llama.cpp" {
             if let Some(port) = model.port {
                 let auth = auth_for(model, auth);
                 let host = model.host.clone();
@@ -197,9 +208,14 @@ async fn discover(args: &Args, auth: &HttpAuth) -> (Vec<DetectedModel>, Option<S
     while let Some(result) = probes.join_next().await {
         if let Ok((index, Some(props))) = result {
             if let Some(model) = found.get_mut(index) {
-                model_detect::load_gguf_metadata(model, props.model_path.into());
-                if let Some(alias) = props.model_alias {
-                    model.name = alias;
+                if let Some(loaded) = props.vision {
+                    model_detect::apply_props_vision(model, loaded);
+                }
+                if model.gguf.is_none() {
+                    model_detect::load_gguf_metadata(model, props.model_path.into());
+                    if let Some(alias) = props.model_alias {
+                        model.name = alias;
+                    }
                 }
             }
         }
@@ -508,6 +524,10 @@ fn status_for(slots: &[ModelSlot], rescanned: bool) -> String {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Child of vision::cuda_bus_ids, run under a server's CUDA environment.
+    if std::env::args().nth(1).as_deref() == Some(vision::CUDA_PROBE_ARG) {
+        std::process::exit(if vision::print_cuda_bus_ids() { 0 } else { 1 });
+    }
     let launch = settings::launch();
     let mut args = launch.args.clone();
     let auth = HttpAuth::from_key_file(args.api_key_file.as_deref())?;

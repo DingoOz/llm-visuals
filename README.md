@@ -277,6 +277,20 @@ against the machine's total, the focused model's resident size, and a history
 of RAM in use. It is on both the dashboard and the perf view, and is the first
 thing the panel drops on a short terminal.
 
+### Vision encoder
+
+When the model has a vision encoder loaded, the header says where it runs:
+`vision CPU`, or the card in the GPU panel's numbering followed by the
+engine's own name for it, e.g. `vision G1 RTX 3070 (CUDA0)`. llama.cpp puts
+the projector (`--mmproj`) on a device of its own, independent of
+`--device` and `--tensor-split`: the first CUDA device unless
+`--no-mmproj-offload` or `--mmproj-device` (`MTMD_BACKEND_DEVICE`) says
+otherwise. CUDA numbers cards fastest-first by default, not in nvidia-smi's
+PCI order, so `CUDA0` is often not `G0`; the dashboard asks the CUDA driver
+which card each ordinal is, under the server's own `CUDA_VISIBLE_DEVICES` and
+`CUDA_DEVICE_ORDER`. vLLM and SGLang shard the vision tower over the model's
+own GPUs (`vision G0+G1`).
+
 ### Context and MTP
 
 The context bar shows cached, prompt and generated tokens against the window
@@ -422,6 +436,7 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | system RAM | Linux `/proc/meminfo` (`MemTotal − MemAvailable` in use, `Cached` as page cache) and the server's `VmRSS`; elsewhere the OS memory totals, with no page cache split |
 | VRAM weights vs KV | llama.cpp: **estimate** from GGUF file size × `--tensor-split`. SGLang: `memory.weight_gb` and `memory.kv_cache_gb` from `/v1/loads`. vLLM and other safetensors servers: **estimate** from the summed size of the served directory's weight shards |
 | layers, heads, experts, MTP layers, engram, quant | GGUF header, or HuggingFace `config.json` (`num_hidden_layers`, `num_attention_heads`, `num_experts` / `num_local_experts`, `num_experts_per_tok`) for safetensors dirs |
+| vision encoder | llama.cpp: `modalities.vision` from `GET /props`, else `--mmproj` / `-hf` on the command line or `LLAMA_ARG_MMPROJ` in `/proc/<pid>/environ`. Placement: CPU for `--no-mmproj-offload` or a process with no GPU runtime in `/proc/<pid>/maps`; otherwise `--mmproj-device` or the first GPU device, mapped to a card by the CUDA driver's `cuDeviceGetPCIBusId` (run in a child process with the server's CUDA variables) matched against nvidia-smi's `pci.bus_id`, or by the one card the process occupies. vLLM / SGLang: `vision_config` in `config.json`, on the model's GPUs (none with `--language-model-only`) |
 | layer → GPU | `--tensor-split` proportions |
 | layer activity | utilisation of the GPU the layer lives on, smoothed |
 | expert blocks | real top-k routing from `GET /experts` (patched server), else a deterministic stand-in keyed by layer and token step |

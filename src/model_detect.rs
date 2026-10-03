@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::gguf::{self, GgufInfo};
+use crate::vision::{self, Place, Vision};
 
 /// Information about a detected running LLM process
 #[derive(Debug, Clone)]
@@ -27,6 +28,8 @@ pub struct DetectedModel {
     pub gguf: Option<GgufInfo>,
     /// Weight byte layout from the tensor table (for bandwidth estimates).
     pub tensors: Option<gguf::TensorSummary>,
+    /// Vision encoder, when the server has (or may have) one.
+    pub vision: Option<Vision>,
 }
 
 impl std::fmt::Display for DetectedModel {
@@ -139,6 +142,65 @@ pub fn load_gguf_metadata(model: &mut DetectedModel, path: PathBuf) {
         model.gguf = Some(info);
         model.tensors = gguf::read_tensor_summary(&path).ok();
     }
+}
+
+/// The vision encoder a detected server has (or may have) loaded, from its
+/// arguments, environment and weights config.
+fn detect_vision(m: &DetectedModel) -> Option<Vision> {
+    match m.engine.as_str() {
+        "llama.cpp" => {
+            let env = vision::read_environ(m.pid);
+            let args = vision::parse_mmproj_args(&m.cmdline, &env);
+            if args.loaded == Some(false) {
+                return None;
+            }
+            Some(Vision {
+                loaded: args.loaded,
+                place: vision::llama_place(&args, m.pid, &env, &m.gpu_indices),
+            })
+        }
+        "vllm" | "sglang" => {
+            let dir = m.path.as_ref().filter(|p| p.is_dir())?;
+            let txt = std::fs::read_to_string(dir.join("config.json")).ok()?;
+            let v: serde_json::Value = serde_json::from_str(&txt).ok()?;
+            // vLLM skips the encoder entirely in language-model-only mode.
+            let text_only = m
+                .cmdline
+                .split_whitespace()
+                .any(|t| t == "--language-model-only");
+            (vision::hf_config_has_vision(&v) && !text_only).then(|| Vision {
+                loaded: Some(true),
+                // Sharded (or replicated) over the same cards as the model.
+                place: Place::Gpus(m.gpu_indices.clone()),
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Settle the vision encoder from llama.cpp `/props` `modalities.vision`,
+/// which reports what the server actually loaded.
+pub fn apply_props_vision(model: &mut DetectedModel, loaded: bool) {
+    if !loaded {
+        model.vision = None;
+        return;
+    }
+    if let Some(v) = &mut model.vision {
+        v.loaded = Some(true);
+        return;
+    }
+    // Found by port only: no command line or environment to place it by.
+    let place = if model.pid == 0 {
+        Place::Unknown
+    } else {
+        let env = vision::read_environ(model.pid);
+        let args = vision::parse_mmproj_args(&model.cmdline, &env);
+        vision::llama_place(&args, model.pid, &env, &model.gpu_indices)
+    };
+    model.vision = Some(Vision {
+        loaded: Some(true),
+        place,
+    });
 }
 
 /// Undo the escapes mountinfo applies to mount points/roots
@@ -541,6 +603,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
             cmdline: cmdline.clone(),
             gguf: None,
             tensors: None,
+            vision: None,
         });
         if !entry.gpu_indices.contains(&app.gpu_index) {
             entry.gpu_indices.push(app.gpu_index);
@@ -592,6 +655,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
                 cmdline,
                 gguf: None,
                 tensors: None,
+                vision: None,
             },
         );
     }
@@ -652,6 +716,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
             }
         }
         m.gpu_indices.sort_unstable();
+        m.vision = detect_vision(m);
     }
 
     // GPU memory first; when nvidia-smi is unavailable that is zero for all,
@@ -1671,6 +1736,7 @@ pub async fn probe_endpoint(
         }
     }
 
+    let mut vision: Option<Vision> = None;
     let mut saw_vllm_metrics = false;
     if let Ok(body) = http_get(host, port, "/metrics", auth).await {
         if body.contains("vllm:") {
@@ -1703,6 +1769,12 @@ pub async fn probe_endpoint(
                 engine = "llama.cpp".to_string();
                 model_name = p.model_alias.or(Some(p.model_path.clone()));
                 model_path = Some(PathBuf::from(p.model_path));
+                if p.vision == Some(true) {
+                    vision = Some(Vision {
+                        loaded: Some(true),
+                        place: Place::Unknown,
+                    });
+                }
                 got_props = true;
             }
         }
@@ -1775,6 +1847,7 @@ pub async fn probe_endpoint(
         cmdline: format!("{final_name} --port {port}"),
         gguf: gguf_info,
         tensors: tensor_summary,
+        vision,
     })
 }
 
@@ -2269,6 +2342,7 @@ mod tests {
             cmdline: "test --port 7000".into(),
             gguf: None,
             tensors: None,
+            vision: None,
         };
         assert_eq!(m.key(), (7000_u32) | 0x8000_0000);
         assert_eq!(format!("{m}"), "test-model (:7000 · vllm · GPU ? · 0 MB)");
