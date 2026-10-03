@@ -627,9 +627,13 @@ utilisation, power, temperature and clocks; the VRAM bar becomes `UNIFIED` with
 system RAM as the denominator and the SGLang server's own
 `memory.weight_gb + kv_cache_gb + graph_gb` from `/v1/loads` as the fill (other
 engines do not report occupancy, so the bar shows zeros). Fan and `VRAM busy %`
-read as absent, not as errors. The `b` memory pipeline's PCIe and VRAM stages
-have no hardware to measure on a unified part — do not blame them for a decode
-bottleneck.
+read as absent, not as errors. The two bars show the same pool at different
+units and different scopes: `UNIFIED` is GiB like every VRAM bar and counts
+only what the servers report as model occupancy; the `RAM` row is decimal GB
+(`/ 1e9`) and counts the whole system (`MemTotal − MemAvailable`). The same
+119.6 GiB pool is 128.5 G and 119 GiB to btop. The `b` memory pipeline's PCIe
+and VRAM stages have no hardware to measure on a unified part — do not blame
+them for a decode bottleneck.
 
 **AMD GPU panel is unavailable.** AMD telemetry requires Linux with the
 `amdgpu` driver and readable DRM sysfs/hwmon files under `/sys/class/drm`.
