@@ -2,7 +2,7 @@
 
 ## Summary
 
-23 entries (as of 2026-10-01). Recurring themes:
+24 entries (as of 2026-10-03). Recurring themes:
 
 - **Optional or missing telemetry treated as a real value** (Logic, most common): a missing counter read as 0, record close gated on optional TTFT, unknown ctx rendered as full, model ownership derived from an unknown weight estimate. Rule of thumb: keep "unknown" distinct from zero and never gate state or ownership on an optional measurement.
 - **Under-discriminating matches when resolving processes/devices**: docker-proxy matched by IP only, comm-name gating, xe fans keyed by a constant path component, env GPU masks merged with host indices. Match on every discriminating field and prefer authoritative (driver/host) sources over inferred ones.
@@ -240,3 +240,14 @@
 - **Root cause:** GPU card gaps were kept while each card had two rows, but a card needs three to draw its sparkline, and `ram_rows` sizing assumed the cards got every non-RAM row.
 - **Fix applied:** One `gpu_split` helper adds all gaps only when every card keeps three rows, then evens out the cards; tested across GPU counts and heights. The panel budget now reserves RAM rows only when both meminfo fields render.
 - **Prevention rule:** Decoration is dropped before content shrinks: gate optional spacing on the content's full minimum, compute the whole split in one tested function, and keep the panel budget's conditions identical to the renderer's.
+
+
+### Idle speculative window read as 0% acceptance — 2026-10-03
+
+- **Severity:** Low
+- **Category:** Logic
+- **File(s):** `src/perf.rs`
+- **Pattern:** A windowed ratio (accepted / drafted) reset to 0 when the window holds no denominator, so "nothing measured lately" displays as a real measurement of zero.
+- **Root cause:** `SpecStats::observe` assigned `0.0` whenever no drafts landed in the window; harmless while counters move every step, but completion-only counters (Strata) left the gauge at 0% for all but ~1.5 s per request.
+- **Fix applied:** Acceptance and mean accepted length update only while drafts land in the window and hold otherwise (the renderer already mutes them when not live); completion-only deltas are spread over the server's decode time via `SpecMetrics::busy_secs`.
+- **Prevention rule:** A ratio with an empty denominator is unknown, not zero: hold or blank it, and test windowed rates with counters that move only at request completion.

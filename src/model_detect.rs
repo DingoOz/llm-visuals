@@ -376,6 +376,11 @@ fn parent_pid(_pid: u32) -> Option<u32> {
     None
 }
 
+#[cfg(target_os = "linux")]
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
 #[cfg(not(target_os = "linux"))]
 fn process_cwd(pid: u32) -> Option<PathBuf> {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
@@ -549,13 +554,16 @@ pub fn detect_models() -> Vec<DetectedModel> {
     }
     let mut by_pid: std::collections::HashMap<u32, DetectedModel> =
         std::collections::HashMap::new();
-    // SGLang workers hold the GPU memory; fold it onto the launcher PID.
+    // SGLang workers and Strata's native engine hold the GPU memory; fold it
+    // onto the PID that serves HTTP.
     let mut worker_gpu: std::collections::HashMap<u32, (u64, Vec<u32>)> =
         std::collections::HashMap::new();
 
     for app in gpu_procs {
         let cmdline = read_cmdline(app.pid).unwrap_or_else(|| app.process_name.clone());
-        if is_sglang_worker(&app.process_name) {
+        if is_sglang_worker(&app.process_name)
+            || crate::strata::is_engine(&app.process_name, &cmdline)
+        {
             if let Some(ppid) = parent_pid(app.pid) {
                 let e = worker_gpu.entry(ppid).or_insert((0, Vec::new()));
                 e.0 = e.0.saturating_add(app.mem_used_mb);
@@ -676,6 +684,9 @@ pub fn detect_models() -> Vec<DetectedModel> {
 
     let mut models: Vec<DetectedModel> = by_pid.into_values().collect();
     for m in &mut models {
+        if m.engine == "strata" {
+            apply_strata_config(m);
+        }
         if let Some(path) = m.path.clone() {
             // A containerized server reports the model path as seen from
             // its own mount namespace (e.g. /model); re-anchor it through
@@ -714,7 +725,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
     models.sort_by_key(|m| {
         let has_model = m.path.is_some() || m.gguf.is_some();
         let engine_rank = match m.engine.as_str() {
-            "llama.cpp" | "vllm" | "sglang" | "exllamav2" => 2,
+            "llama.cpp" | "vllm" | "sglang" | "strata" | "exllamav2" => 2,
             "ollama" => 0,
             _ => 1,
         };
@@ -726,6 +737,29 @@ pub fn detect_models() -> Vec<DetectedModel> {
         models.retain(|m| !m.is_idle_daemon());
     }
     models
+}
+
+/// Strata's command line names only its `--config` JSON; the model's name,
+/// first GGUF shard and context size are in there.
+fn apply_strata_config(m: &mut DetectedModel) {
+    let Some(path) = crate::strata::config_path(&m.cmdline, process_cwd(m.pid).as_deref()) else {
+        return;
+    };
+    let Some(cfg) = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|body| crate::strata::parse_config(&body))
+    else {
+        return;
+    };
+    if let Some(name) = cfg.model_name {
+        m.name = name;
+    }
+    if m.path.is_none() {
+        m.path = cfg.gguf;
+    }
+    if m.ctx_max.is_none() {
+        m.ctx_max = cfg.max_context;
+    }
 }
 
 /// This dashboard is itself a process with `--model` on its command line;
@@ -787,6 +821,7 @@ fn looks_like_llm(process_name: &str, cmdline: &str) -> bool {
     };
     keys.iter().any(|k| p.contains(k))
         || c.split_whitespace().any(token_matches)
+        || crate::strata::is_server(cmdline)
         || names_a_model(cmdline)
 }
 
@@ -862,7 +897,9 @@ fn names_a_model(cmdline: &str) -> bool {
 
 fn engine_from(process_name: &str, cmdline: &str) -> String {
     let blob = format!("{process_name} {cmdline}").to_lowercase();
-    if blob.contains("llama-server") || blob.contains("llama.cpp") {
+    if crate::strata::is_server(cmdline) {
+        "strata".into()
+    } else if blob.contains("llama-server") || blob.contains("llama.cpp") {
         "llama.cpp".into()
     } else if blob.contains("ollama") {
         "ollama".into()
@@ -1074,6 +1111,9 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
     }
     if parsed.port.is_none() && parsed.engine == "sglang" {
         parsed.port = Some(30000);
+    }
+    if parsed.port.is_none() && parsed.engine == "strata" {
+        parsed.port = Some(crate::strata::DEFAULT_PORT);
     }
     if parsed.host.is_empty() {
         parsed.host = "127.0.0.1".into();
@@ -1711,6 +1751,14 @@ pub async fn probe_endpoint(
             engine = "llama.cpp".to_string();
         } else if body.contains("sglang:") {
             engine = "sglang".to_string();
+        } else if let Some(m) = crate::strata::parse_metrics(&body) {
+            engine = "strata".to_string();
+            if model_name.is_none() {
+                model_name = m.model;
+            }
+            if m.max_context > 0 {
+                ctx_max = Some(m.max_context);
+            }
         }
     }
 
@@ -1805,7 +1853,7 @@ pub async fn probe_endpoint(
 
 /// Probe candidate local ports for running inference servers.
 pub async fn probe_local_endpoints(auth: &crate::observe::HttpAuth) -> Vec<DetectedModel> {
-    const CANDIDATES: &[u16] = &[7000, 8000, 8080, 11434, 30000, 5000, 8001, 8081, 7001];
+    const CANDIDATES: &[u16] = &[7000, 8000, 8080, 11434, 30000, 5000, 8001, 8081, 7001, 8095];
     // A server bound to a LAN address never accepts a loopback connection.
     // The process scan reads `--host` when it can see the command line;
     // this probe covers the case where it cannot (another user, a container

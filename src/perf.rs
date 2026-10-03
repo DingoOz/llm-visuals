@@ -260,6 +260,12 @@ impl SpecStats {
         self.available = true;
         if let (Some(prev), Some(t0)) = (&self.last, self.last_time) {
             let d = |a: u64, b: u64| a.saturating_sub(b) as usize;
+            let busy = m.busy_secs - prev.busy_secs;
+            let t0 = if busy > 0.0 {
+                now.checked_sub(Duration::from_secs_f64(busy)).unwrap_or(t0)
+            } else {
+                t0
+            };
             self.draft_win
                 .push(t0, now, d(m.draft_tokens, prev.draft_tokens));
             self.accept_win.push(t0, now, d(m.accepted, prev.accepted));
@@ -270,14 +276,12 @@ impl SpecStats {
             let steps = self.steps_win.rate(now);
             self.drafts_per_sec = drafts;
             self.steps_per_sec = steps;
-            self.accept_rate = if drafts > 0.0 {
-                (acc / drafts).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            self.mean_accepted = if steps > 0.0 { acc / steps } else { 0.0 };
-            // Record only while drafting so the sparkline is a real trace.
+            // Only while drafting: an idle window keeps the last measured
+            // acceptance (shown muted) instead of reading as 0%, and the
+            // sparkline stays a real trace.
             if drafts > 0.0 {
+                self.accept_rate = (acc / drafts).clamp(0.0, 1.0);
+                self.mean_accepted = if steps > 0.0 { acc / steps } else { 0.0 };
                 push(&mut self.accept_hist, self.accept_rate);
             }
         }
@@ -1113,6 +1117,7 @@ mod tests {
             verify_steps: s,
             n_decode: 0,
             tokens_predicted: a + s,
+            busy_secs: 0.0,
         };
         p.observe_spec(&m(100, 60, 100), t0);
         p.observe_spec(&m(120, 75, 120), t0 + Duration::from_millis(200));
@@ -1127,6 +1132,34 @@ mod tests {
         assert!((p.spec.mean_accepted - 0.625).abs() < 1e-3);
         assert!((p.spec.session_accept_rate() - 85.0 / 140.0).abs() < 1e-4);
         assert_eq!(p.spec.accept_hist.len(), 2);
+    }
+
+    #[test]
+    fn spec_stats_completion_only_counters() {
+        // Strata: the whole request's drafts land on one poll, with the
+        // server's decode time to spread them over.
+        let mut p = PerfTracker::new();
+        let t0 = Instant::now();
+        let m = |d: u64, a: u64, s: u64, busy: f64| SpecMetrics {
+            draft_tokens: d,
+            accepted: a,
+            verify_steps: s,
+            n_decode: 0,
+            tokens_predicted: a + s,
+            busy_secs: busy,
+        };
+        p.observe_spec(&m(0, 0, 0, 0.0), t0);
+        p.observe_spec(&m(300, 150, 100, 5.0), t0 + Duration::from_millis(400));
+        assert!((p.spec.accept_rate - 0.5).abs() < 1e-3);
+        assert!(
+            (p.spec.steps_per_sec - 20.0).abs() < 0.5,
+            "{}",
+            p.spec.steps_per_sec
+        );
+        // Idle polls past the window keep the last acceptance.
+        p.observe_spec(&m(300, 150, 100, 5.0), t0 + Duration::from_secs(3));
+        assert_eq!(p.spec.drafts_per_sec, 0.0);
+        assert!((p.spec.accept_rate - 0.5).abs() < 1e-3);
     }
 
     #[test]
