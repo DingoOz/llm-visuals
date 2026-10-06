@@ -142,6 +142,35 @@ pub async fn poll_metrics(host: &str, port: u16, auth: &HttpAuth) -> Option<Stra
     parse_metrics(&body)
 }
 
+/// What `GET /v1/status` says: `{"service":"strata", ...}`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StrataStatus {
+    pub model: Option<String>,
+    pub max_context: usize,
+}
+
+/// Parse `/v1/status`. `None` unless it names the strata service, so other
+/// servers' status endpoints never false-positive.
+pub fn parse_status(body: &str) -> Option<StrataStatus> {
+    let v: Value = serde_json::from_str(body).ok()?;
+    if v.get("service").and_then(|s| s.as_str())? != "strata" {
+        return None;
+    }
+    Some(StrataStatus {
+        model: v
+            .get("model")
+            .and_then(|m| m.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        max_context: usize_at(&v, "max_context").unwrap_or(0),
+    })
+}
+
+pub async fn poll_status(host: &str, port: u16, auth: &HttpAuth) -> Option<StrataStatus> {
+    let body = http_get(host, port, "/v1/status", auth).await.ok()?;
+    parse_status(&body)
+}
+
 /// `LiveStats` for one scrape. The caller fills nothing else.
 pub fn live_stats(m: &StrataMetrics) -> LiveStats {
     let busy = m.busy();
@@ -360,6 +389,19 @@ mod tests {
         assert_eq!(live(6, 1).id_task, 7);
         // A new one is admitted beside it.
         assert_eq!(live(6, 2).id_task, 8);
+    }
+
+    #[test]
+    fn status_names_the_service_and_rejects_others() {
+        let st = parse_status(
+            r#"{"service":"strata","model":"qwen-iq2","max_context":32768,"version":"0.1.35"}"#,
+        )
+        .unwrap();
+        assert_eq!(st.model.as_deref(), Some("qwen-iq2"));
+        assert_eq!(st.max_context, 32768);
+        assert!(parse_status(r#"{"service":"vllm"}"#).is_none());
+        assert!(parse_status(r#"{"status":"ok"}"#).is_none());
+        assert!(parse_status("<html>401</html>").is_none());
     }
 
     #[test]
