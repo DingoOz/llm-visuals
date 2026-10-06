@@ -428,7 +428,7 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 |---|---|
 | decode tok/s | llama.cpp: delta of `n_decoded` from `GET /slots`. When that field is absent, delta of `llamacpp:tokens_predicted_total` from `GET /metrics`, anchored at the start of the request. vLLM: `/metrics` generation counter. SGLang: `decode_moments[5]` from `GET /v1/loads`. Strata: `live.generated` from `GET /metrics`. 1 s sliding window. Polls go to the server's `--host` (loopback when it bound `0.0.0.0`) |
 | prefill tok/s | llama.cpp: `n_prompt_tokens_processed`. vLLM: prompt-token counter. SGLang: `total_prefill_uncached_tokens`, or `sglang:realtime_tokens_total{mode="prefill_compute"}` with `--enable-metrics`. Strata: `live.prompt_read` from `GET /metrics` |
-| time to first token | slot turning busy → first decoded token, quantised to the poll interval. Strata: the finished request's `prompt_ms` |
+| time to first token | slot turning busy → first decoded token, quantised to the poll interval. Strata: the finished request's `prompt_ms`, the server's time reading the new prompt tokens (time spent queued is not in it) |
 | tok/J | decode tok/s ÷ summed GPU power draw |
 | cache hit | llama.cpp: `n_prompt_tokens_cache / n_prompt_tokens`. SGLang without `--enable-metrics` is unknown (shown as "—"). Strata: the finished request's `reused`, unknown ("—") while it runs |
 | request log | one record per `id_task`; averages from accumulated deltas |
@@ -529,7 +529,8 @@ server process.
 Everything live comes from Strata's JSON `GET /metrics`, polled no faster
 than every 400 ms. Prefill progress and generated tokens come from `live`;
 the prefix reuse and the server's own prefill and decode times are only
-known once a request ends, so while one runs cache hit shows "—". The MTP
+known once a request ends, so while one runs cache hit shows "—". A
+batching engine (`live.parallel`) is followed by its newest request. The MTP
 depth is `engine.mtp_max`. From Strata 0.1.35 the acceptance gauge comes
 from the `totals.drafts_offered` / `drafts_accepted` counters; they move only
 when a request ends, so the gauge shows each finished request's acceptance

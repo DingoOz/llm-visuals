@@ -2850,10 +2850,13 @@ impl Renderer {
         ]));
 
         if p.spec.available && p.spec.totals.draft_tokens > 0 {
+            // Held from the last drafting window when idle: muted, like the
+            // gauge in the speculative panel.
+            let live = p.spec.drafts_per_sec > 0.0;
             lines.push(kv(
                 "accept",
                 format!("{:.0}%", p.spec.accept_rate * 100.0),
-                pal::GREEN,
+                if live { pal::GREEN } else { pal::TEXT_DIM },
             ));
         }
         if let Some(g) = &m.detected.gguf {

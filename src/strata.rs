@@ -5,7 +5,8 @@
 //! child that holds the GPU memory. It has no `/slots` or Prometheus
 //! counters; `GET /metrics` is one JSON document with the engine's facts,
 //! the request in flight and the last finished requests. One sequence runs
-//! at a time, so there is a single slot.
+//! at a time unless the engine batches (`live.parallel` slots); then `live`
+//! describes the newest request in flight.
 //!
 //! The in-flight request carries its prompt size, prefill progress
 //! (`prompt_read`) and generated count. The prefix reuse and the server's
@@ -36,8 +37,12 @@ pub struct StrataRequest {
 pub struct StrataMetrics {
     pub model: Option<String>,
     pub max_context: usize,
-    /// `idle`, `reading` (prefill) or `generating`.
+    /// `idle`, `unloaded`, `reading` (prefill) or `generating`.
     pub state: String,
+    /// Batch slots (`live.parallel`); 0 when the engine runs one sequence.
+    pub parallel: usize,
+    /// Requests in flight together (`live.running`, batching engines only).
+    pub running: usize,
     pub queued: usize,
     pub prompt_tokens: usize,
     /// Prefill position reached while reading; a reused prefix counts as read.
@@ -54,8 +59,15 @@ pub struct StrataMetrics {
 }
 
 impl StrataMetrics {
+    /// A request is in flight. An `unloaded` model (`--lazy`,
+    /// `--idle-unload`) is not one.
     pub fn busy(&self) -> bool {
-        self.state != "idle"
+        matches!(self.state.as_str(), "reading" | "generating")
+    }
+
+    /// Requests in flight: `live.running` when batching, else 0 or 1.
+    pub fn in_flight(&self) -> usize {
+        self.running.max(usize::from(self.busy()))
     }
 }
 
@@ -104,6 +116,8 @@ pub fn parse_metrics(body: &str) -> Option<StrataMetrics> {
             .or_else(|| usize_at(engine, "context"))
             .unwrap_or(0),
         state,
+        parallel: usize_at(live, "parallel").unwrap_or(0),
+        running: usize_at(live, "running").unwrap_or(0),
         queued: usize_at(live, "queued").unwrap_or(0),
         prompt_tokens: usize_at(live, "prompt_tokens").unwrap_or(0),
         prompt_read: usize_at(live, "prompt_read"),
@@ -131,16 +145,18 @@ pub async fn poll_metrics(host: &str, port: u16, auth: &HttpAuth) -> Option<Stra
 /// `LiveStats` for one scrape. The caller fills nothing else.
 pub fn live_stats(m: &StrataMetrics) -> LiveStats {
     let busy = m.busy();
-    // The request number: finished requests, plus the one running. It stays
-    // put from the running request's samples to the idle one that closes it.
-    let id_task = m.requests_done as i64 + i64::from(busy);
+    // The request number: finished requests plus those in flight, which is
+    // the newest request's ordinal. It stays put from that request's samples
+    // to the idle one that closes it, and when an older batched request
+    // finishes beside it.
+    let id_task = (m.requests_done + m.in_flight() as u64) as i64;
     let mut s = LiveStats {
         ctx_max: m.max_context,
         processing: busy,
         decoded_present: true,
         id_task,
-        n_slots: 1,
-        slots_busy: usize::from(busy),
+        n_slots: m.parallel.max(1),
+        slots_busy: m.in_flight(),
         spec_types: if m.mtp_max > 0 {
             "mtp".into()
         } else {
@@ -315,6 +331,35 @@ mod tests {
         assert_eq!(s.decoded, 50);
         assert!((s.ttft_secs - 1.5).abs() < 1e-9);
         assert!((s.itl_sum - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unloaded_model_is_not_a_request() {
+        let m =
+            parse_metrics(r#"{"engine":{},"totals":{"requests":3},"live":{"state":"unloaded"}}"#)
+                .unwrap();
+        let s = live_stats(&m);
+        assert!(!s.processing);
+        assert_eq!(s.slots_busy, 0);
+        assert_eq!(s.id_task, 3);
+    }
+
+    #[test]
+    fn batched_request_keeps_its_number_when_an_older_one_finishes() {
+        let live = |done: u32, running: u32| {
+            let m = parse_metrics(&format!(
+                r#"{{"engine":{{}},"totals":{{"requests":{done}}},
+                    "live":{{"state":"generating","parallel":4,"running":{running},"generated":9}}}}"#
+            ))
+            .unwrap();
+            live_stats(&m)
+        };
+        let two = live(5, 2);
+        assert_eq!((two.n_slots, two.slots_busy, two.id_task), (4, 2, 7));
+        // The older request ends; the newest is still the seventh.
+        assert_eq!(live(6, 1).id_task, 7);
+        // A new one is admitted beside it.
+        assert_eq!(live(6, 2).id_task, 8);
     }
 
     #[test]
