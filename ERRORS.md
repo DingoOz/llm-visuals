@@ -2,7 +2,7 @@
 
 ## Summary
 
-26 entries (as of 2026-10-06). Recurring themes:
+27 entries (as of 2026-10-06). Recurring themes:
 
 - **Optional or missing telemetry treated as a real value** (Logic, most common): a missing counter read as 0, record close gated on optional TTFT, unknown ctx rendered as full, model ownership derived from an unknown weight estimate. Rule of thumb: keep "unknown" distinct from zero and never gate state or ownership on an optional measurement.
 - **Under-discriminating matches when resolving processes/devices**: docker-proxy matched by IP only, comm-name gating, xe fans keyed by a constant path component, env GPU masks merged with host indices. Match on every discriminating field and prefer authoritative (driver/host) sources over inferred ones.
@@ -272,3 +272,13 @@
 - **Root cause:** With Strata's batch slots, an older request finishing bumps the finished count while the newest is still running, so its id changed mid-flight and the request log split it in two.
 - **Fix applied:** The id is finished + in flight (`live.running`), the newest request's ordinal, which is unchanged when an older one ends; slot counts come from `live.parallel` / `live.running`.
 - **Prevention rule:** A synthetic id must be invariant under every event except that request's own start; test it with a concurrent request finishing.
+
+### Hardware class inferred from a missing reading — 2026-10-06
+
+- **Severity:** Medium
+- **Category:** Logic
+- **File(s):** `src/gpu.rs`, `src/nvml.rs`, `src/dblog.rs`
+- **Pattern:** Treating `mem_total_mb == 0` as "this is a unified-memory part" when the same zero also means a failed or unsupported memory query on a discrete card (MIG parent).
+- **Root cause:** The unified-memory bar and the "keep NVML" rule both keyed on zero device memory alone, so a MIG host would lose its nvidia-smi fallback and have system RAM drawn as its VRAM; the stand-in totals were also written to the SQLite log as device memory.
+- **Fix applied:** `gpu::is_unified_part` recognises the part by the driver's name (GB10); both rules require it, and `gpu_samples` stores zeros for a unified part.
+- **Prevention rule:** Identify a hardware class by positive evidence, never by an absent value, and keep synthesised numbers out of columns that mean a measured quantity.
