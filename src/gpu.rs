@@ -29,6 +29,10 @@ pub struct GpuStats {
     pub util_estimated: bool,
     pub pcie_gen: u32,
     pub pcie_width: u32,
+    /// mem_* fields hold system RAM and server-reported occupancy, not device
+    /// memory: set by `apply_unified_memory` on parts without device memory
+    /// (GB10 / DGX Spark), never by the drivers themselves.
+    pub unified: bool,
 }
 
 impl GpuStats {
@@ -416,6 +420,7 @@ fn amd_stats(index: u32, device: &AmdDevice) -> GpuStats {
         fan_pct,
         fan_rpm: None,
         util_estimated: false,
+        unified: false,
         pcie_gen,
         pcie_width,
     }
@@ -561,11 +566,49 @@ pub fn parse_csv(stdout: &str) -> Vec<GpuStats> {
             fan_pct: opt(13),
             fan_rpm: None,
             util_estimated: false,
+            unified: false,
             pcie_gen: int(14) as u32,
             pcie_width: int(15) as u32,
         });
     }
     stats
+}
+
+/// Fill the VRAM fields of cards that have no device memory (GB10 / DGX
+/// Spark class: NVML answers util, power, temp and clocks but reports no
+/// `nvmlMemoryInfo` at all) from the server's own `/v1/loads` occupancy:
+/// weight + KV + CUDA-graph GiB over system RAM, the pool the accelerator
+/// really shares. The bar then draws real, labelled-as-unified numbers
+/// instead of `0.0/0.0 G` while the server handed the exact figures over.
+/// Cards that do report device memory are never touched, and without
+/// server-reported numbers the row degrades to zeros as before.
+///
+/// Only parts known to be unified: a discrete card can also read zero
+/// memory (MIG parent, a failed query) and must not be given system RAM
+/// as its VRAM.
+pub fn apply_unified_memory(gpus: &mut [GpuStats], system_ram_mb: u64, model_gb: Option<f32>) {
+    let Some(model_gb) = model_gb.filter(|gb| *gb > 0.0) else {
+        return;
+    };
+    if system_ram_mb == 0 {
+        return;
+    }
+    for g in gpus.iter_mut() {
+        if g.mem_total_mb > 0 || !is_unified_part(&g.name) {
+            continue;
+        }
+        g.mem_total_mb = system_ram_mb;
+        g.mem_used_mb = ((model_gb * 1024.0) as u64).min(system_ram_mb);
+        g.mem_free_mb = g.mem_total_mb.saturating_sub(g.mem_used_mb);
+        g.unified = true;
+    }
+}
+
+/// NVIDIA SoCs whose accelerator shares system RAM and so reports no device
+/// memory. A DGX Spark's GPU names itself `NVIDIA GB10`. Add new unified
+/// parts here by the name the driver reports.
+pub fn is_unified_part(name: &str) -> bool {
+    name.contains("GB10")
 }
 
 pub fn filter_gpus(stats: Vec<GpuStats>, filter: &[usize]) -> Vec<GpuStats> {
@@ -660,6 +703,7 @@ impl DemoGpu {
             } else {
                 Some((20.0 + 60.0 * self.power).clamp(0.0, 100.0))
             },
+            unified: false,
             pcie_gen: 3,
             pcie_width: if self.index == 0 { 8 } else { 16 },
         }
@@ -688,6 +732,65 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(amd.short_name(), "Navi 31 [Radeon RX 7900 XTX]");
+    }
+
+    #[test]
+    fn unified_memory_fills_bar_from_server_numbers() {
+        // GB10 as NVML reports it: telemetry alive, mem_* all zero.
+        let mut gpus = vec![GpuStats {
+            index: 0,
+            name: "NVIDIA GB10".into(),
+            utilization_gpu: 96.0,
+            power_watts: 36.84,
+            temperature: Some(64.0),
+            clock_sm_mhz: 2522,
+            ..Default::default()
+        }];
+        // /v1/loads on the same box (fixtures/sglang-loads-gb10.json).
+        apply_unified_memory(&mut gpus, 122_500, Some(82.172 + 10.457 + 0.234));
+        let g = &gpus[0];
+        assert!(g.unified);
+        assert_eq!(g.mem_total_mb, 122_500);
+        assert_eq!(g.mem_used_mb, (92.863 * 1024.0) as u64);
+        assert!((g.vram_percent() - 77.6).abs() < 0.2);
+        assert!((g.vram_gb() - 92.9).abs() < 0.1);
+        assert!((g.vram_total_gb() - 119.6).abs() < 0.1);
+    }
+
+    #[test]
+    fn unified_memory_leaves_discrete_cards_and_degrades_without_numbers() {
+        let mut gpus = vec![
+            GpuStats {
+                index: 0,
+                mem_total_mb: 24576,
+                mem_used_mb: 23000,
+                ..Default::default()
+            },
+            GpuStats {
+                index: 1,
+                name: "NVIDIA GB10".into(),
+                ..Default::default()
+            },
+            // A discrete card whose memory query failed (MIG parent): zero
+            // memory, but not a unified part.
+            GpuStats {
+                index: 2,
+                name: "NVIDIA A100-SXM4-40GB".into(),
+                ..Default::default()
+            },
+        ];
+        // No server-reported numbers: the zero row must stay zero, not be
+        // dressed up as unified occupancy.
+        apply_unified_memory(&mut gpus, 122_500, None);
+        apply_unified_memory(&mut gpus, 0, Some(80.0));
+        assert!(!gpus[0].unified && gpus[0].mem_total_mb == 24576);
+        assert!(!gpus[1].unified && gpus[1].mem_total_mb == 0);
+        apply_unified_memory(&mut gpus, 122_500, Some(92.9));
+        assert_eq!(gpus[0].mem_total_mb, 24576);
+        assert!(!gpus[0].unified);
+        assert!(gpus[1].unified);
+        assert!(gpus[1].mem_used_mb <= gpus[1].mem_total_mb);
+        assert!(!gpus[2].unified && gpus[2].mem_total_mb == 0);
     }
 
     #[test]

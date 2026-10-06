@@ -42,6 +42,7 @@ pub struct SglangLoads {
     pub generated: u64,
     pub weight_gb: Option<f32>,
     pub kv_cache_gb: Option<f32>,
+    pub graph_gb: Option<f32>,
 }
 
 /// Optional Prometheus counters from `GET /metrics` (`--enable-metrics`).
@@ -122,6 +123,9 @@ pub fn parse_loads(body: &str) -> Option<SglangLoads> {
             }
             if let Some(k) = json_f32(mem, "kv_cache_gb") {
                 out.kv_cache_gb = Some(out.kv_cache_gb.unwrap_or(0.0) + k);
+            }
+            if let Some(g) = json_f32(mem, "graph_gb") {
+                out.graph_gb = Some(out.graph_gb.unwrap_or(0.0) + g);
             }
         }
     }
@@ -385,6 +389,7 @@ impl SglangAdapter {
             cache_unknown: cache_unknown && running,
             weight_gb: c.weight_gb,
             kv_cache_gb: c.kv_cache_gb,
+            graph_gb: c.graph_gb,
             kv_tokens: Some(used),
         };
 
@@ -452,6 +457,7 @@ mod tests {
         assert_eq!(c.generated, 8400);
         assert!((c.weight_gb.unwrap() - 14.2).abs() < 1e-4);
         assert!((c.kv_cache_gb.unwrap() - 8.1).abs() < 1e-4);
+        assert!((c.graph_gb.unwrap() - 1.0).abs() < 1e-4);
     }
 
     #[test]
@@ -468,6 +474,8 @@ mod tests {
         assert_eq!(c.generated, 27);
         assert_eq!(c.decode_steps, 5);
         assert!((c.weight_gb.unwrap() - 6.0).abs() < 1e-4);
+        // A field the payload omits is None, never a fabricated zero.
+        assert!(c.graph_gb.is_none());
     }
 
     #[test]
@@ -500,6 +508,21 @@ mod tests {
         assert_eq!(c.generated, 8400);
         assert_eq!(c.decode_steps, 1200);
         assert!(c.weight_gb.is_some());
+        assert!((c.graph_gb.unwrap() - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn parse_loads_gb10_fixture() {
+        // Captured from SGLang on a GB10 (DGX Spark class): a unified-memory
+        // machine has no device memory to read from the driver, so these
+        // numbers are the only real occupancy figures the VRAM bar can use.
+        let body = std::fs::read_to_string("fixtures/sglang-loads-gb10.json").unwrap();
+        let c = parse_loads(&body).expect("gb10 fixture");
+        assert_eq!(c.decode_steps, 487501);
+        assert_eq!(c.generated, 1382332);
+        assert!((c.weight_gb.unwrap() - 82.172).abs() < 1e-4);
+        assert!((c.kv_cache_gb.unwrap() - 10.457).abs() < 1e-4);
+        assert!((c.graph_gb.unwrap() - 0.234).abs() < 1e-4);
     }
 
     #[test]

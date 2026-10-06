@@ -167,8 +167,10 @@ impl DbLog {
                     g.index,
                     g.name,
                     g.utilization_gpu,
-                    g.mem_used_mb as i64,
-                    g.mem_total_mb as i64,
+                    // Device memory only: a unified part's bar is built
+                    // from system RAM and the servers' report, not the card.
+                    if g.unified { 0 } else { g.mem_used_mb as i64 },
+                    if g.unified { 0 } else { g.mem_total_mb as i64 },
                     g.power_watts,
                     g.temperature
                 ],

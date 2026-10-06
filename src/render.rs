@@ -813,7 +813,10 @@ impl Renderer {
             let weights = d.fade.weight_frac.get(gi).copied().unwrap_or(0.0).min(used);
             let kv = d.fade.kv_alloc_frac.get(gi).copied().unwrap_or(0.0);
             let kv_fill = d.fade.kv_frac;
-            let label = format!("{:<12}", "   VRAM");
+            // Same bar, honest name: on unified-memory parts (GB10 / DGX
+            // Spark) the pool is system RAM, not VRAM — labelled per
+            // "real numbers only".
+            let label = format!("{:<12}", if g.unified { "   UNIFIED" } else { "   VRAM" });
             let txt = format!(" {:>4.1}/{:<4.1}G ", g.vram_gb(), g.vram_total_gb());
             // With several models sharing the box, say which ones live here.
             let tenants: Vec<usize> = if d.models.len() > 1 {
