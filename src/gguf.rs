@@ -576,7 +576,11 @@ mod tests {
                 ("tokenizer.chat_template", 8, gguf_str("{{ messages }}")),
                 ("deepseek4.block_count", 4, 43u32.to_le_bytes().to_vec()),
                 ("deepseek4.expert_count", 4, 256u32.to_le_bytes().to_vec()),
-                ("deepseek4.expert_used_count", 4, 6u32.to_le_bytes().to_vec()),
+                (
+                    "deepseek4.expert_used_count",
+                    4,
+                    6u32.to_le_bytes().to_vec(),
+                ),
             ],
         );
         let info = read_info(&path).expect("gguf header");

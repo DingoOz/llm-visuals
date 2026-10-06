@@ -1322,8 +1322,13 @@ impl Renderer {
                 }
             }
             lines.push(Line::from(facts));
+            let hint = if d.detected.is_some_and(|m| m.engine == "strata") {
+                "Strata reports draft acceptance from 0.1.35"
+            } else {
+                "start llama-server with --metrics for acceptance stats"
+            };
             lines.push(Line::from(Span::styled(
-                truncate("start llama-server with --metrics for acceptance stats", w),
+                truncate(hint, w),
                 Style::default().fg(pal::c(pal::AMBER)),
             )));
             frame.render_widget(Paragraph::new(Text::from(lines)), inner);
@@ -2848,10 +2853,13 @@ impl Renderer {
         ]));
 
         if p.spec.available && p.spec.totals.draft_tokens > 0 {
+            // Held from the last drafting window when idle: muted, like the
+            // gauge in the speculative panel.
+            let live = p.spec.drafts_per_sec > 0.0;
             lines.push(kv(
                 "accept",
                 format!("{:.0}%", p.spec.accept_rate * 100.0),
-                pal::GREEN,
+                if live { pal::GREEN } else { pal::TEXT_DIM },
             ));
         }
         if let Some(g) = &m.detected.gguf {

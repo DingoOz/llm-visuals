@@ -2,7 +2,7 @@
 
 ## Summary
 
-23 entries (as of 2026-10-01). Recurring themes:
+26 entries (as of 2026-10-06). Recurring themes:
 
 - **Optional or missing telemetry treated as a real value** (Logic, most common): a missing counter read as 0, record close gated on optional TTFT, unknown ctx rendered as full, model ownership derived from an unknown weight estimate. Rule of thumb: keep "unknown" distinct from zero and never gate state or ownership on an optional measurement.
 - **Under-discriminating matches when resolving processes/devices**: docker-proxy matched by IP only, comm-name gating, xe fans keyed by a constant path component, env GPU masks merged with host indices. Match on every discriminating field and prefer authoritative (driver/host) sources over inferred ones.
@@ -240,3 +240,35 @@
 - **Root cause:** GPU card gaps were kept while each card had two rows, but a card needs three to draw its sparkline, and `ram_rows` sizing assumed the cards got every non-RAM row.
 - **Fix applied:** One `gpu_split` helper adds all gaps only when every card keeps three rows, then evens out the cards; tested across GPU counts and heights. The panel budget now reserves RAM rows only when both meminfo fields render.
 - **Prevention rule:** Decoration is dropped before content shrinks: gate optional spacing on the content's full minimum, compute the whole split in one tested function, and keep the panel budget's conditions identical to the renderer's.
+
+
+### Idle speculative window read as 0% acceptance — 2026-10-03
+
+- **Severity:** Low
+- **Category:** Logic
+- **File(s):** `src/perf.rs`
+- **Pattern:** A windowed ratio (accepted / drafted) reset to 0 when the window holds no denominator, so "nothing measured lately" displays as a real measurement of zero.
+- **Root cause:** `SpecStats::observe` assigned `0.0` whenever no drafts landed in the window; harmless while counters move every step, but completion-only counters (Strata) left the gauge at 0% for all but ~1.5 s per request.
+- **Fix applied:** Acceptance and mean accepted length update only while drafts land in the window and hold otherwise (the renderer already mutes them when not live); completion-only deltas are spread over the server's decode time via `SpecMetrics::busy_secs`.
+- **Prevention rule:** A ratio with an empty denominator is unknown, not zero: hold or blank it, and test windowed rates with counters that move only at request completion.
+
+
+### Busy defined as "not idle" over an open set of states — 2026-10-06
+
+- **Severity:** High
+- **Category:** Logic
+- **File(s):** `src/strata.rs`
+- **Pattern:** Deriving "a request is running" from `state != "idle"` when the server reports more states than the ones the adapter was written against.
+- **Root cause:** Strata's `live.state` is also `unloaded` (`--lazy`, `--idle-unload`), which read as busy: the dashboard showed a request in flight and opened a phantom record that the next real request inherited.
+- **Fix applied:** `StrataMetrics::busy` matches the busy states (`reading`, `generating`) by name; a test covers `unloaded`.
+- **Prevention rule:** Match the states that mean busy, never the complement of idle; read the server source for the full state list before writing an adapter.
+
+### Synthetic request id shifted when a different request finished — 2026-10-06
+
+- **Severity:** Medium
+- **Category:** Logic
+- **File(s):** `src/strata.rs`
+- **Pattern:** A request id built as "finished count + 1 if busy" on a server that can run several requests at once.
+- **Root cause:** With Strata's batch slots, an older request finishing bumps the finished count while the newest is still running, so its id changed mid-flight and the request log split it in two.
+- **Fix applied:** The id is finished + in flight (`live.running`), the newest request's ordinal, which is unchanged when an older one ends; slot counts come from `live.parallel` / `live.running`.
+- **Prevention rule:** A synthetic id must be invariant under every event except that request's own start; test it with a concurrent request finishing.

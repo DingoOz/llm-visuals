@@ -415,6 +415,7 @@ pub fn spec_from_moments(generated: u64, steps: u64, num_draft_tokens: u32) -> O
         verify_steps: steps,
         n_decode: generated,
         tokens_predicted: generated,
+        busy_secs: 0.0,
     })
 }
 
