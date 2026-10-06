@@ -32,6 +32,8 @@ pub struct RequestRecord {
     /// Prompt tokens actually pushed through prefill (prompt minus cache hits).
     pub prefill_tokens: usize,
     pub prefill_secs: f32,
+    /// Engine-measured prefill mean, preferred to polling estimates.
+    pub measured_prefill_tps: Option<f32>,
     pub decode_secs: f32,
     pub peak_decode_tps: f32,
 }
@@ -50,6 +52,7 @@ impl RequestRecord {
             decoded: s.decoded,
             prefill_tokens: 0,
             prefill_secs: 0.0,
+            measured_prefill_tps: None,
             decode_secs: 0.0,
             peak_decode_tps: 0.0,
         }
@@ -90,6 +93,9 @@ impl RequestRecord {
     }
 
     pub fn avg_prefill_tps(&self) -> f32 {
+        if let Some(rate) = self.measured_prefill_tps {
+            return rate;
+        }
         // The server-measured TTFT (vLLM) is the true prefill duration
         // — total prefill tokens divided by TTFT. Without it
         // (llama.cpp) fall back to the poll-interval sum.
@@ -107,6 +113,16 @@ impl RequestRecord {
 
     pub fn is_live(&self) -> bool {
         self.ended.is_none()
+    }
+
+    fn set_prefill_timing(&mut self, tokens: usize, secs: f64) {
+        self.prefill_tokens = tokens;
+        self.prefill_secs = secs as f32;
+        self.measured_prefill_tps = Some(if secs > 0.0 {
+            (tokens as f64 / secs) as f32
+        } else {
+            0.0
+        });
     }
 }
 
@@ -652,6 +668,27 @@ impl PerfTracker {
                         self.session_prefilled += done.prefill_tokens as u64;
                         self.session_decoded += done.decoded as u64;
                     }
+                    if let Some(secs) = close.prefill_secs {
+                        // Strata's live read position includes cached tokens.
+                        // Replace those estimates with the final engine count
+                        // even when this request already had live samples.
+                        let tokens = close.prompt.saturating_sub(close.cached);
+                        self.session_prefilled = self
+                            .session_prefilled
+                            .saturating_sub(done.prefill_tokens as u64)
+                            .saturating_add(tokens as u64);
+                        self.session_decoded += close.gen.saturating_sub(done.decoded) as u64;
+                        done.prompt_tokens = close.prompt;
+                        done.cached_tokens = close.cached;
+                        done.decoded = done.decoded.max(close.gen);
+                        done.set_prefill_timing(tokens, secs);
+                        if close.ttft_secs > 0.0 {
+                            done.ttft = Some(close.ttft_secs as f32);
+                        }
+                        if close.itl_sum > 0.0 {
+                            done.itl_sum = Some(close.itl_sum as f32);
+                        }
+                    }
                     // The detection stamps can lag a busy server
                     // (vLLM's /metrics handler only answers between
                     // event-loop work), so backdate `started` to the
@@ -716,6 +753,9 @@ impl PerfTracker {
         if !s.processing && s.ttft_secs > 0.0 && d_pre > 0 {
             self.prefill_tps = self.prefill_tps.max(d_pre as f32 / s.ttft_secs as f32);
         }
+        if let Some(rate) = s.prefill_tps {
+            self.prefill_tps = rate;
+        }
         // Same for decode: vLLM's generation counter moves only on the
         // completion poll — which is exactly when the window above was
         // cleared — so use the measured ITL sum (one sample per decode
@@ -753,6 +793,18 @@ impl PerfTracker {
             if d_pre > 0 {
                 cur.prefill_tokens += d_pre;
                 cur.prefill_secs += dt;
+            }
+            if self.phase == Phase::Prefill {
+                if let Some(rate) = s.prefill_tps {
+                    cur.measured_prefill_tps = Some(rate);
+                }
+            }
+            if let Some(secs) = s.prefill_secs {
+                self.session_prefilled = self
+                    .session_prefilled
+                    .saturating_sub(cur.prefill_tokens as u64)
+                    .saturating_add(s.prompt_processed as u64);
+                cur.set_prefill_timing(s.prompt_processed, secs);
             }
             if d_dec > 0 {
                 cur.decode_secs += dt;
@@ -912,6 +964,8 @@ mod tests {
         // remain the source of truth.
         assert!(r.ttft.is_none());
         assert!(r.itl_sum.is_none());
+        assert!(r.measured_prefill_tps.is_none());
+        assert!((r.avg_prefill_tps() - 1000.0 / 0.6).abs() < 0.01);
     }
 
     /// vLLM-shaped slot: counters jump only at completion; the
@@ -959,6 +1013,7 @@ mod tests {
         );
         let r = p.history.back().expect("finished request");
         assert_eq!(r.prefill_tokens, 1000);
+        assert!(r.measured_prefill_tps.is_none());
         // The user's formula: total prefill tokens / TTFT.
         assert!(
             (r.avg_prefill_tps() - 500.0).abs() < 1.0,
@@ -1013,6 +1068,7 @@ mod tests {
                     prompt: 1000,
                     cached: 100,
                     gen: 40,
+                    prefill_secs: None,
                     ttft_secs: 2.0,
                     itl_sum: 0.05,
                 }),
@@ -1076,6 +1132,7 @@ mod tests {
                     prompt: 100,
                     cached: 0,
                     gen: 10,
+                    prefill_secs: None,
                     ttft_secs: 0.0,
                     itl_sum: 0.0,
                 }),

@@ -9,13 +9,14 @@
 //! describes the newest request in flight.
 //!
 //! The in-flight request carries its prompt size, prefill progress
-//! (`prompt_read`) and generated count. The prefix reuse and the server's
-//! own prefill / decode timings are only known once the request is in
+//! (`prompt_read`), measured prefill rate (`prefill_tok_s_mean`, newer
+//! engines) and generated count. The prefix reuse and the server's
+//! final prefill / decode timings are only known once the request is in
 //! `requests`, so the idle sample reports them for the request that just
 //! closed. MTP draft counts (Strata 0.1.35+) likewise move only when a
 //! request ends.
 
-use crate::observe::{http_get, HttpAuth, LiveStats, SpecMetrics};
+use crate::observe::{http_get, ClosingRequest, HttpAuth, LiveStats, SpecMetrics};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -28,8 +29,30 @@ pub struct StrataRequest {
     pub prompt_tokens: usize,
     pub reused: usize,
     pub output_tokens: usize,
+    /// Fresh tokens actually read, including partial cancelled prefills
+    /// (Strata 0.1.36+). Unlike live.prompt_read, this excludes cache hits.
+    pub prompt_read: Option<usize>,
     pub prompt_ms: f64,
     pub decode_ms: f64,
+}
+
+impl StrataRequest {
+    fn uncached_tokens(&self) -> usize {
+        let uncached = self.prompt_tokens.saturating_sub(self.reused);
+        self.prompt_read.unwrap_or(uncached).min(uncached)
+    }
+
+    fn closing(&self) -> ClosingRequest {
+        let cached = self.reused.min(self.prompt_tokens);
+        ClosingRequest {
+            prompt: cached + self.uncached_tokens(),
+            cached,
+            gen: self.output_tokens,
+            prefill_secs: Some(self.prompt_ms / 1000.0),
+            ttft_secs: self.prompt_ms / 1000.0,
+            itl_sum: self.decode_ms / 1000.0,
+        }
+    }
 }
 
 /// One `GET /metrics` document.
@@ -47,6 +70,8 @@ pub struct StrataMetrics {
     pub prompt_tokens: usize,
     /// Prefill position reached while reading; a reused prefix counts as read.
     pub prompt_read: Option<usize>,
+    /// Engine-timed prefill mean, not a rate inferred from polled progress.
+    pub prefill_tok_s_mean: Option<f32>,
     pub generated: usize,
     /// Finished requests since the server started.
     pub requests_done: u64,
@@ -86,6 +111,7 @@ pub fn parse_metrics(body: &str) -> Option<StrataMetrics> {
             prompt_tokens: usize_at(r, "prompt_tokens").unwrap_or(0),
             reused: usize_at(r, "reused").unwrap_or(0),
             output_tokens: usize_at(r, "output_tokens").unwrap_or(0),
+            prompt_read: usize_at(r, "prompt_read"),
             prompt_ms: f64_at(r, "prompt_ms").unwrap_or(0.0),
             decode_ms: f64_at(r, "decode_ms").unwrap_or(0.0),
         });
@@ -121,6 +147,9 @@ pub fn parse_metrics(body: &str) -> Option<StrataMetrics> {
         queued: usize_at(live, "queued").unwrap_or(0),
         prompt_tokens: usize_at(live, "prompt_tokens").unwrap_or(0),
         prompt_read: usize_at(live, "prompt_read"),
+        prefill_tok_s_mean: f64_at(live, "prefill_tok_s_mean")
+            .map(|rate| rate as f32)
+            .filter(|rate| rate.is_finite() && *rate >= 0.0),
         generated: usize_at(live, "generated").unwrap_or(0),
         requests_done: total("requests").unwrap_or(0),
         last,
@@ -163,6 +192,14 @@ pub fn live_stats(m: &StrataMetrics) -> LiveStats {
             "none".into()
         },
         spec_depth: m.mtp_max,
+        // Live progress includes cache hits and advances by whole chunks.
+        // Without an engine clock, wait for the completed request's timing
+        // instead of dividing those positions by one HTTP poll interval.
+        prefill_tps: Some(if m.state == "reading" {
+            m.prefill_tok_s_mean.unwrap_or(0.0)
+        } else {
+            0.0
+        }),
         ..Default::default()
     };
     if busy {
@@ -177,14 +214,57 @@ pub fn live_stats(m: &StrataMetrics) -> LiveStats {
         s.cache_unknown = true;
     } else if let Some(r) = &m.last {
         // Idle: the request that just closed, as the server measured it.
-        s.prompt_tokens = r.prompt_tokens;
-        s.prompt_processed = r.prompt_tokens;
-        s.cache_tokens = r.reused.min(r.prompt_tokens);
+        let close = r.closing();
+        s.prompt_tokens = close.prompt;
+        s.prompt_processed = r.uncached_tokens();
+        s.cache_tokens = close.cached;
+        s.prefill_secs = close.prefill_secs;
+        s.prefill_tps = Some(if r.prompt_ms > 0.0 {
+            (s.prompt_processed as f64 * 1000.0 / r.prompt_ms) as f32
+        } else {
+            0.0
+        });
         s.decoded = r.output_tokens;
         s.ttft_secs = r.prompt_ms / 1000.0;
         s.itl_sum = r.decode_ms / 1000.0;
     }
     s
+}
+
+/// Keep completion timings attached to their own request even when the
+/// next request starts between polls, and emit a completed rate only once.
+#[derive(Default)]
+pub struct StrataAdapter {
+    previous: Option<StrataMetrics>,
+}
+
+impl StrataAdapter {
+    pub fn observe(&mut self, m: &StrataMetrics) -> LiveStats {
+        let mut stats = live_stats(m);
+        let completed = self
+            .previous
+            .as_ref()
+            .is_some_and(|previous| m.requests_done > previous.requests_done);
+        if !stats.processing && !completed {
+            stats.prefill_tps = Some(0.0);
+        }
+        if completed && stats.processing {
+            if let Some(previous) = &self.previous {
+                // Batched completions do not identify which slot finished;
+                // never attribute an older slot's timings to the newest one.
+                let previous_id = previous.requests_done + previous.in_flight() as u64;
+                if previous.busy()
+                    && previous.parallel <= 1
+                    && m.parallel <= 1
+                    && previous_id == m.requests_done
+                {
+                    stats.closing = m.last.as_ref().map(StrataRequest::closing);
+                }
+            }
+        }
+        self.previous = Some(m.clone());
+        stats
+    }
 }
 
 /// `serve/server.py --engine strata`: the process that serves HTTP.
@@ -252,10 +332,231 @@ pub fn config_path(cmdline: &str, cwd: Option<&Path>) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::perf::{PerfTracker, Phase};
+    use std::time::{Duration, Instant};
 
     const SERVER: &str =
         ".venv/bin/python serve/server.py --engine strata --config strata-iq2_xs.json --port 8080";
     const ENGINE: &str = "/opt/strata/engine/strata --serve --pack /d/packs/iq2_xs --native /d/m-00001-of-00002.gguf --max-context 32768";
+
+    fn observe_json(perf: &mut PerfTracker, now: Instant, body: &str) {
+        perf.observe(&live_stats(&parse_metrics(body).unwrap()), now);
+    }
+
+    fn replay(bodies: &[&str]) -> PerfTracker {
+        let mut adapter = StrataAdapter::default();
+        let mut perf = PerfTracker::new();
+        let now = Instant::now();
+        for (i, body) in bodies.iter().enumerate() {
+            let stats = adapter.observe(&parse_metrics(body).unwrap());
+            perf.observe(&stats, now + Duration::from_millis(400 * i as u64));
+        }
+        perf
+    }
+
+    #[test]
+    fn chained_requests_keep_their_own_prefill_counts_and_timings() {
+        let perf = replay(&[
+            r#"{"engine":{},"live":{"state":"idle"},"totals":{"requests":0}}"#,
+            r#"{"engine":{},"live":{"state":"reading","prompt_tokens":1000,
+                "prompt_read":900,"prefill_tok_s_mean":250.0},"totals":{"requests":0}}"#,
+            r#"{"engine":{},"live":{"state":"generating","prompt_tokens":1000,
+                "generated":5},"totals":{"requests":0}}"#,
+            // No idle poll separates A's completion from B's admission.
+            r#"{"engine":{},"live":{"state":"reading","prompt_tokens":50,
+                "prompt_read":40,"prefill_tok_s_mean":100.0},"totals":{"requests":1},
+                "requests":[{"prompt_tokens":1000,"reused":800,"output_tokens":20,
+                             "prompt_ms":800.0,"decode_ms":1200.0}]}"#,
+            r#"{"engine":{},"live":{"state":"generating","prompt_tokens":50,
+                "generated":10},"totals":{"requests":1}}"#,
+            r#"{"engine":{},"live":{"state":"idle"},"totals":{"requests":2},
+                "requests":[{"prompt_tokens":50,"reused":10,"output_tokens":20,
+                             "prompt_ms":80.0,"decode_ms":200.0}]}"#,
+        ]);
+        assert_eq!(perf.history.len(), 2);
+        let a = &perf.history[0];
+        assert_eq!(
+            (a.id_task, a.prefill_tokens, a.cached_tokens),
+            (1, 200, 800)
+        );
+        assert_eq!(a.avg_prefill_tps(), 250.0);
+        assert_eq!(a.decoded, 20);
+        let b = &perf.history[1];
+        assert_eq!((b.id_task, b.prefill_tokens, b.cached_tokens), (2, 40, 10));
+        assert_eq!(b.avg_prefill_tps(), 500.0);
+        assert_eq!(b.decoded, 20);
+        assert_eq!(perf.session_prefilled, 240);
+        assert_eq!(perf.session_decoded, 40);
+        assert_eq!(perf.session_requests, 2);
+    }
+
+    #[test]
+    fn repeated_idle_scrapes_do_not_replay_the_completed_prefill_rate() {
+        let finished = r#"{"engine":{},"live":{"state":"idle"},"totals":{"requests":1},
+            "requests":[{"prompt_tokens":1000,"reused":800,"output_tokens":20,
+                         "prompt_ms":800.0,"decode_ms":1200.0}]}"#;
+        let perf = replay(&[
+            r#"{"engine":{},"live":{"state":"idle"},"totals":{"requests":0}}"#,
+            r#"{"engine":{},"live":{"state":"generating","prompt_tokens":1000,
+                "generated":5},"totals":{"requests":0}}"#,
+            finished,
+            finished,
+            finished,
+        ]);
+        assert_eq!(perf.phase, Phase::Idle);
+        assert_eq!(perf.prefill_tps, 0.0);
+        assert_eq!(perf.peak_prefill_tps, 250.0);
+        assert_eq!(perf.prefill_hist.back(), Some(&0.0));
+        assert_eq!(perf.session_prefilled, 200);
+        assert_eq!(perf.history.len(), 1);
+    }
+
+    #[test]
+    fn cancelled_prefill_counts_only_tokens_actually_read() {
+        // Recent servers report the prefix + read tokens as prompt_tokens;
+        // tolerate a server retaining the full original prompt as well.
+        for reported_prompt in [3000, 10000] {
+            let finished = format!(
+                r#"{{"engine":{{}},"live":{{"state":"idle"}},"totals":{{"requests":1}},
+                    "requests":[{{"prompt_tokens":{reported_prompt},"reused":1000,
+                                 "prompt_read":2000,"output_tokens":0,"prompt_ms":2000.0}}]}}"#
+            );
+            let perf = replay(&[
+                r#"{"engine":{},"live":{"state":"idle"},"totals":{"requests":0}}"#,
+                r#"{"engine":{},"live":{"state":"reading","prompt_tokens":10000,
+                    "prompt_read":3000,"prefill_tok_s_mean":1000.0},"totals":{"requests":0}}"#,
+                &finished,
+            ]);
+            let request = perf.history.back().unwrap();
+            assert_eq!(request.prefill_tokens, 2000);
+            assert_eq!(request.prompt_tokens, 3000);
+            assert_eq!(request.cached_tokens, 1000);
+            assert_eq!(request.avg_prefill_tps(), 1000.0);
+            assert_eq!(perf.session_prefilled, 2000);
+        }
+    }
+
+    #[test]
+    fn absent_or_invalid_live_timing_does_not_fabricate_a_rate() {
+        for mean in ["null", "-1.0", "\"9999\"", "1e100"] {
+            let m = parse_metrics(&format!(
+                r#"{{"engine":{{}},"live":{{"state":"reading","prompt_tokens":1000,
+                    "prompt_read":900,"prefill_tok_s_mean":{mean}}}}}"#
+            ))
+            .unwrap();
+            assert!(m.prefill_tok_s_mean.is_none());
+            assert_eq!(live_stats(&m).prefill_tps, Some(0.0));
+        }
+        // Older Strata engines still provide the final prompt_ms.
+        let perf = replay(&[
+            r#"{"engine":{},"live":{"state":"idle"},"totals":{"requests":0}}"#,
+            r#"{"engine":{},"live":{"state":"reading","prompt_tokens":1000,
+                "prompt_read":900},"totals":{"requests":0}}"#,
+            r#"{"engine":{},"live":{"state":"idle"},"totals":{"requests":1},
+                "requests":[{"prompt_tokens":1000,"reused":800,"output_tokens":20,
+                             "prompt_ms":800.0,"decode_ms":1200.0}]}"#,
+        ]);
+        assert_eq!(perf.history.back().unwrap().avg_prefill_tps(), 250.0);
+        assert_eq!(perf.peak_prefill_tps, 250.0);
+    }
+
+    #[test]
+    fn batched_completions_do_not_apply_an_older_slots_prefill_to_the_newest() {
+        let mut adapter = StrataAdapter::default();
+        let previous = parse_metrics(
+            r#"{"engine":{},"totals":{"requests":5},"live":{"state":"generating",
+                "parallel":4,"running":2,"prompt_tokens":1000,"generated":9}}"#,
+        )
+        .unwrap();
+        let newest_id = adapter.observe(&previous).id_task;
+        let next = parse_metrics(
+            r#"{"engine":{},"totals":{"requests":6},"live":{"state":"generating",
+                "parallel":4,"running":2,"prompt_tokens":500,"generated":1},
+                "requests":[{"prompt_tokens":100,"reused":0,"output_tokens":20,"prompt_ms":80.0}]}"#,
+        )
+        .unwrap();
+        let stats = adapter.observe(&next);
+        assert_eq!(stats.id_task, newest_id + 1);
+        assert!(stats.closing.is_none());
+        assert!(stats.prefill_secs.is_none());
+    }
+
+    #[test]
+    fn live_prefill_uses_engine_time_not_cached_positions_or_poll_interval() {
+        let mut perf = PerfTracker::new();
+        let now = Instant::now();
+        observe_json(
+            &mut perf,
+            now,
+            r#"{"engine":{},"live":{"state":"idle"},"totals":{"requests":0}}"#,
+        );
+        observe_json(
+            &mut perf,
+            now + Duration::from_millis(400),
+            r#"{"engine":{},"live":{"state":"reading","prompt_tokens":1000,
+                "prompt_read":900,"prefill_tok_s_mean":250.0},"totals":{"requests":0}}"#,
+        );
+        assert_eq!(perf.phase, Phase::Prefill);
+        assert_eq!(perf.prefill_tps, 250.0);
+        assert_eq!(perf.current.as_ref().unwrap().avg_prefill_tps(), 250.0);
+    }
+
+    #[test]
+    fn completed_prefill_counts_only_uncached_tokens() {
+        let mut perf = PerfTracker::new();
+        let now = Instant::now();
+        observe_json(
+            &mut perf,
+            now,
+            r#"{"engine":{},"live":{"state":"idle"},"totals":{"requests":0}}"#,
+        );
+        observe_json(
+            &mut perf,
+            now + Duration::from_millis(400),
+            r#"{"engine":{},"live":{"state":"generating","prompt_tokens":1000,
+                "generated":5},"totals":{"requests":0}}"#,
+        );
+        // A short prefill completed between polls: 200 new tokens / 50 ms.
+        observe_json(
+            &mut perf,
+            now + Duration::from_millis(800),
+            r#"{"engine":{},"live":{"state":"idle"},"totals":{"requests":1},
+                "requests":[{"prompt_tokens":1000,"reused":800,"output_tokens":10,
+                             "prompt_ms":50.0,"decode_ms":300.0}]}"#,
+        );
+        let request = perf.history.back().unwrap();
+        assert_eq!(request.prefill_tokens, 200);
+        assert_eq!(request.avg_prefill_tps(), 4000.0);
+        assert_eq!(perf.prefill_tps, 4000.0);
+        assert_eq!(perf.session_prefilled, 200);
+    }
+
+    #[test]
+    fn fully_cached_prefill_is_zero_not_prompt_size_divided_by_poll_time() {
+        let mut perf = PerfTracker::new();
+        let now = Instant::now();
+        observe_json(
+            &mut perf,
+            now,
+            r#"{"engine":{},"live":{"state":"idle"},"totals":{"requests":0}}"#,
+        );
+        observe_json(
+            &mut perf,
+            now + Duration::from_millis(400),
+            r#"{"engine":{},"live":{"state":"generating","prompt_tokens":1000,
+                "generated":5},"totals":{"requests":0}}"#,
+        );
+        assert_eq!(perf.prefill_tps, 0.0);
+        observe_json(
+            &mut perf,
+            now + Duration::from_millis(800),
+            r#"{"engine":{},"live":{"state":"idle"},"totals":{"requests":1},
+                "requests":[{"prompt_tokens":1000,"reused":1000,"output_tokens":10,
+                             "prompt_ms":0.0,"decode_ms":300.0}]}"#,
+        );
+        assert_eq!(perf.history.back().unwrap().avg_prefill_tps(), 0.0);
+        assert_eq!(perf.session_prefilled, 0);
+    }
 
     #[test]
     fn parse_fixture_generating() {
