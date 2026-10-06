@@ -582,6 +582,10 @@ pub fn parse_csv(stdout: &str) -> Vec<GpuStats> {
 /// instead of `0.0/0.0 G` while the server handed the exact figures over.
 /// Cards that do report device memory are never touched, and without
 /// server-reported numbers the row degrades to zeros as before.
+///
+/// Only parts known to be unified: a discrete card can also read zero
+/// memory (MIG parent, a failed query) and must not be given system RAM
+/// as its VRAM.
 pub fn apply_unified_memory(gpus: &mut [GpuStats], system_ram_mb: u64, model_gb: Option<f32>) {
     let Some(model_gb) = model_gb.filter(|gb| *gb > 0.0) else {
         return;
@@ -590,7 +594,7 @@ pub fn apply_unified_memory(gpus: &mut [GpuStats], system_ram_mb: u64, model_gb:
         return;
     }
     for g in gpus.iter_mut() {
-        if g.mem_total_mb > 0 {
+        if g.mem_total_mb > 0 || !is_unified_part(&g.name) {
             continue;
         }
         g.mem_total_mb = system_ram_mb;
@@ -598,6 +602,13 @@ pub fn apply_unified_memory(gpus: &mut [GpuStats], system_ram_mb: u64, model_gb:
         g.mem_free_mb = g.mem_total_mb.saturating_sub(g.mem_used_mb);
         g.unified = true;
     }
+}
+
+/// NVIDIA SoCs whose accelerator shares system RAM and so reports no device
+/// memory. A DGX Spark's GPU names itself `NVIDIA GB10`. Add new unified
+/// parts here by the name the driver reports.
+pub fn is_unified_part(name: &str) -> bool {
+    name.contains("GB10")
 }
 
 pub fn filter_gpus(stats: Vec<GpuStats>, filter: &[usize]) -> Vec<GpuStats> {
@@ -757,6 +768,14 @@ mod tests {
             },
             GpuStats {
                 index: 1,
+                name: "NVIDIA GB10".into(),
+                ..Default::default()
+            },
+            // A discrete card whose memory query failed (MIG parent): zero
+            // memory, but not a unified part.
+            GpuStats {
+                index: 2,
+                name: "NVIDIA A100-SXM4-40GB".into(),
                 ..Default::default()
             },
         ];
@@ -771,6 +790,7 @@ mod tests {
         assert!(!gpus[0].unified);
         assert!(gpus[1].unified);
         assert!(gpus[1].mem_used_mb <= gpus[1].mem_total_mb);
+        assert!(!gpus[2].unified && gpus[2].mem_total_mb == 0);
     }
 
     #[test]

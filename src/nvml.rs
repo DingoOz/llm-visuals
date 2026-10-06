@@ -529,14 +529,13 @@ impl NvmlSession {
             });
         }
 
-        // No device answered a single query means NVML is not a usable backend
-        // here; the Err lets GpuBackend::detect fall through to nvidia-smi.
-        // A zero memory.total alone is not a reason to demote: unified-memory
-        // parts (GB10 / DGX Spark) and MIG rows report no device memory by
-        // design — nvidia-smi prints [N/A] for them too, so falling back buys
-        // nothing but subprocess polls. The stricter mem_total test collect_amd
-        // applies stays right there: a missing sysfs node really is no
-        // telemetry at all.
+        // No readable device means NVML is not a usable backend here; the Err
+        // lets GpuBackend::detect fall through to nvidia-smi. On a
+        // unified-memory part (GB10 / DGX Spark) a zero memory.total is not a
+        // reason to demote: it reports no device memory by design and
+        // nvidia-smi prints [N/A] for it too, so falling back buys nothing but
+        // subprocess polls. Every other card keeps the mem_total test
+        // collect_amd applies.
         if count > 0 && !telemetry_readable(&stats_list) {
             return Err(format!(
                 "NVML reported {count} device(s), but failed to query readable telemetry"
@@ -593,17 +592,18 @@ impl Drop for NvmlSession {
     }
 }
 
-/// Did any device answer at least one query the panel can draw? Unified-memory
-/// SoCs (GB10 / DGX Spark) report no device memory at all, so a usable backend
-/// can consist entirely of zeroed `mem_*` rows — utilization, power,
-/// temperature and clocks are what make NVML worth keeping there.
+/// Did any device answer what the panel needs? Device memory, for a discrete
+/// card. Unified-memory SoCs (GB10 / DGX Spark) report none at all, so there
+/// a usable backend can consist entirely of zeroed `mem_*` rows — utilization,
+/// power, temperature and clocks are what make NVML worth keeping.
 fn telemetry_readable(stats: &[GpuStats]) -> bool {
     stats.iter().any(|g| {
         g.mem_total_mb > 0
-            || g.temperature.is_some()
-            || g.power_watts > 0.0
-            || g.clock_sm_mhz > 0
-            || g.utilization_gpu > 0.0
+            || crate::gpu::is_unified_part(&g.name)
+                && (g.temperature.is_some()
+                    || g.power_watts > 0.0
+                    || g.clock_sm_mhz > 0
+                    || g.utilization_gpu > 0.0)
     })
 }
 
@@ -679,6 +679,16 @@ mod tests {
             ..Default::default()
         };
         assert!(!telemetry_readable(&[dead.clone(), dead]));
+        // A discrete card with no memory answer (all-MIG host) still demotes
+        // to nvidia-smi, as before; only unified parts are exempt.
+        let mig = GpuStats {
+            index: 0,
+            name: "NVIDIA A100-SXM4-40GB".into(),
+            temperature: Some(41.0),
+            power_watts: 55.0,
+            ..Default::default()
+        };
+        assert!(!telemetry_readable(&[mig]));
         // One live card keeps the backend even when other rows are dead.
         let live = GpuStats {
             index: 1,
@@ -721,8 +731,8 @@ mod tests {
             println!("NVML loaded but no devices visible (skipping test)");
             return;
         };
-        // Ok implies at least one device answered one query; on unified-memory
-        // parts (GB10) or MIG rows every mem_* field may legitimately be zero.
+        // Ok implies at least one device is readable; on unified-memory parts
+        // (GB10) every mem_* field may legitimately be zero.
         assert!(
             telemetry_readable(&stats),
             "collect_stats returned Ok with no readable device"
