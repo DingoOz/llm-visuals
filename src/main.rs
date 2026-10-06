@@ -16,6 +16,7 @@ mod pipeline;
 mod render;
 mod settings;
 mod sglang;
+mod strata;
 mod vision;
 mod vllm;
 
@@ -219,6 +220,32 @@ async fn discover(args: &Args, auth: &HttpAuth) -> (Vec<DetectedModel>, Option<S
             }
         }
     }
+    // Strata's /v1/status is the authoritative identity: the process scan
+    // sees only the Python launcher's argv0, and the port probe has no
+    // model path to name it after.
+    let mut sprobes = tokio::task::JoinSet::new();
+    for (index, model) in found.iter().enumerate() {
+        if model.engine == "strata" {
+            if let Some(port) = model.port {
+                let auth = auth_for(model, auth);
+                let host = model.host.clone();
+                sprobes.spawn(async move { (index, strata::poll_status(&host, port, &auth).await) });
+            }
+        }
+    }
+    while let Some(result) = sprobes.join_next().await {
+        if let Ok((index, Some(st))) = result {
+            if let Some(model) = found.get_mut(index) {
+                if !st.model.is_empty() {
+                    model.name = st.model;
+                }
+                if st.max_context > 0 {
+                    model.ctx_max = Some(st.max_context);
+                }
+                model_detect::apply_props_vision(model, st.images);
+            }
+        }
+    }
     (found, explicit_error)
 }
 
@@ -361,6 +388,41 @@ async fn poll_server(
             tokio::time::sleep(sleep).await;
         }
     }
+    if model.engine == "strata" {
+        // Strata serves everything the dashboard needs from one JSON
+        // /metrics: the live request, the cumulative draft counters and
+        // the finished request's cache hit. No /slots, no /experts.
+        let mut adapter = strata::StrataAdapter::new();
+        let mut misses = 0u32;
+        loop {
+            if let Some(s) = strata::poll_strata(&model.host, port, &auth).await {
+                misses = 0;
+                let (mut stats, spec) = adapter.observe(&s);
+                if stats.ctx_max == 0 {
+                    stats.ctx_max = model.ctx_max.unwrap_or(0);
+                }
+                let _ = live_tx.try_send((pid, stats));
+                if let Some(m) = spec {
+                    let _ = spec_tx.try_send((pid, m));
+                }
+            } else {
+                misses = misses.saturating_add(1);
+                if misses == 3 {
+                    let stats = LiveStats {
+                        ctx_max: model.ctx_max.unwrap_or(0),
+                        ..Default::default()
+                    };
+                    let _ = live_tx.try_send((pid, stats));
+                }
+            }
+            let delay = if misses >= 3 {
+                poll.max(Duration::from_secs(2))
+            } else {
+                poll
+            };
+            tokio::time::sleep(delay).await;
+        }
+    }
     if model.engine == "vllm" {
         // vLLM has no /slots or /experts endpoints; its /metrics counters
         // drive the live stats and the MTP panel. The 'r' rescan drops
@@ -475,7 +537,7 @@ fn status_for(slots: &[ModelSlot], rescanned: bool) -> String {
     let prefix = if rescanned { "re-scanned: " } else { "" };
     match slots.len() {
         0 => format!(
-            "{prefix}no running LLM found (llama-server / ollama / vLLM / SGLang) — press r to rescan"
+            "{prefix}no running LLM found (llama-server / ollama / vLLM / SGLang / Strata) — press r to rescan"
         ),
         1 => format!("{prefix}attached to {}", slots[0].model),
         n => format!(
@@ -1425,6 +1487,61 @@ mod tests {
         assert_eq!(m.engine, "ollama");
         assert_eq!(m.name, "llama3:latest");
         assert_eq!(m.pid, 0);
+    }
+
+    const CANNED_STRATA_MODELS: &str = r#"{"object":"list","data":[{"id":"qwen3.8-flash-next-ud","object":"model","meta":{"n_ctx":204800}}]}"#;
+    const CANNED_STRATA_METRICS: &str = r#"{"engine":{"model":"qwen3.8-flash-next-ud","max_context":204800,"spec":4},"live":{"state":"idle"},"requests":[],"totals":{"drafts_offered":10,"drafts_accepted":7,"output_tokens":90}}"#;
+    const CANNED_STRATA_STATUS: &str = r#"{"service":"strata","model":"qwen3.8-flash-next-ud","context":{"native":204800},"vision":{"enabled":false}}"#;
+
+    #[tokio::test]
+    async fn discover_detects_strata_server() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (_shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    res = listener.accept() => {
+                        let (mut stream, _) = match res {
+                            Ok(c) => c,
+                            Err(_) => break,
+                        };
+                        tokio::spawn(async move {
+                            let mut buf = [0u8; 1024];
+                            if let Ok(n) = stream.read(&mut buf).await {
+                                let req = String::from_utf8_lossy(&buf[..n]);
+                                let body = if req.starts_with("GET /v1/status") {
+                                    CANNED_STRATA_STATUS
+                                } else if req.starts_with("GET /metrics") {
+                                    CANNED_STRATA_METRICS
+                                } else if req.starts_with("GET /v1/models") {
+                                    CANNED_STRATA_MODELS
+                                } else {
+                                    ""
+                                };
+                                let resp = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                    body.len()
+                                );
+                                let _ = stream.write_all(resp.as_bytes()).await;
+                            }
+                        });
+                    }
+                }
+            }
+        });
+        let ep = format!("http://127.0.0.1:{port}/v1");
+        let args = Args::try_parse_from(["llm-visuals", "--endpoint", &ep]).unwrap();
+        let (models, err) = discover(&args, &HttpAuth::default()).await;
+        assert!(err.is_none());
+        let m = models
+            .iter()
+            .find(|m| m.port == Some(port))
+            .expect("strata endpoint");
+        assert_eq!(m.engine, "strata");
+        assert_eq!(m.name, "qwen3.8-flash-next-ud");
+        assert_eq!(m.ctx_max, Some(204800));
     }
 
     #[tokio::test]

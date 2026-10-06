@@ -359,6 +359,15 @@ fn is_sglang_worker(process_name: &str) -> bool {
     base.starts_with("sglang::")
 }
 
+/// Strata runs a C++ engine child (`strata --serve ...`) that holds the
+/// GPU but speaks no HTTP; the Python front-end (its parent) is the server.
+/// The child is folded into the parent like an SGLang worker.
+fn is_strata_worker(process_name: &str) -> bool {
+    Path::new(process_name)
+        .file_name()
+        .is_some_and(|f| f == "strata")
+}
+
 #[allow(dead_code)]
 fn ppid_from_stat(txt: &str) -> Option<u32> {
     let rest = txt.rsplit_once(')')?.1;
@@ -552,6 +561,10 @@ pub fn detect_models() -> Vec<DetectedModel> {
     // SGLang workers hold the GPU memory; fold it onto the launcher PID.
     let mut worker_gpu: std::collections::HashMap<u32, (u64, Vec<u32>)> =
         std::collections::HashMap::new();
+    // Strata's engine child holds the GPU and the native weights path; fold
+    // both onto the Python front-end that actually serves the API.
+    let mut strata_child: std::collections::HashMap<u32, ParsedCmd> =
+        std::collections::HashMap::new();
 
     for app in gpu_procs {
         let cmdline = read_cmdline(app.pid).unwrap_or_else(|| app.process_name.clone());
@@ -561,6 +574,20 @@ pub fn detect_models() -> Vec<DetectedModel> {
                 e.0 = e.0.saturating_add(app.mem_used_mb);
                 if !e.1.contains(&app.gpu_index) {
                     e.1.push(app.gpu_index);
+                }
+            }
+            continue;
+        }
+        if is_strata_worker(&app.process_name) {
+            if let Some(ppid) = parent_pid(app.pid) {
+                let e = worker_gpu.entry(ppid).or_insert((0, Vec::new()));
+                e.0 = e.0.saturating_add(app.mem_used_mb);
+                if !e.1.contains(&app.gpu_index) {
+                    e.1.push(app.gpu_index);
+                }
+                if let Some(cmdline) = read_cmdline(app.pid) {
+                    strata_child
+                        .insert(ppid, parse_cmdline(&app.process_name, &cmdline));
                 }
             }
             continue;
@@ -620,6 +647,9 @@ pub fn detect_models() -> Vec<DetectedModel> {
         if is_sglang_worker(&name) {
             continue;
         }
+        if is_strata_worker(&name) {
+            continue;
+        }
         // A vLLM server in a container reports its internal port;
         // re-anchor to the port published on the host.
         if parsed.engine == "vllm" {
@@ -658,6 +688,22 @@ pub fn detect_models() -> Vec<DetectedModel> {
             for g in gpus {
                 if !m.gpu_indices.contains(&g) {
                     m.gpu_indices.push(g);
+                }
+            }
+        }
+    }
+
+    // The front-end's command line names no weights file; borrow the
+    // engine child's --native path and --max-context so the GGUF metadata
+    // (layers, experts, quant) and the context panel populate.
+    for (ppid, child) in strata_child {
+        if let Some(m) = by_pid.get_mut(&ppid) {
+            if m.engine == "strata" {
+                if m.path.is_none() {
+                    m.path = child.path.clone();
+                }
+                if m.ctx_max.is_none() {
+                    m.ctx_max = child.ctx_max;
                 }
             }
         }
@@ -714,7 +760,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
     models.sort_by_key(|m| {
         let has_model = m.path.is_some() || m.gguf.is_some();
         let engine_rank = match m.engine.as_str() {
-            "llama.cpp" | "vllm" | "sglang" | "exllamav2" => 2,
+            "llama.cpp" | "vllm" | "sglang" | "exllamav2" | "strata" => 2,
             "ollama" => 0,
             _ => 1,
         };
@@ -765,6 +811,7 @@ fn looks_like_llm(process_name: &str, cmdline: &str) -> bool {
         "kobold",
         "tabbyapi",
         "transformers",
+        "strata",
     ];
     // A bare ".gguf" substring match is too loose: it fires on anything that
     // merely mentions a GGUF filename (a download, an `ls`, a `cp`), not just
@@ -872,6 +919,8 @@ fn engine_from(process_name: &str, cmdline: &str) -> String {
         "sglang".into()
     } else if blob.contains("exllama") {
         "exllamav2".into()
+    } else if blob.contains("strata") {
+        "strata".into()
     } else {
         "llm".into()
     }
@@ -919,6 +968,30 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
             "--alias" => {
                 if let Some(v) = next() {
                     parsed.name = v;
+                    if inline.is_none() {
+                        i += 1;
+                    }
+                }
+            }
+            // Strata's engine child names the native GGUF with --native;
+            // the front-end's --config JSON only holds the friendly name,
+            // which /v1/status reports anyway.
+            "--native" => {
+                if let Some(v) = next() {
+                    let p = PathBuf::from(&v);
+                    parsed.name = p
+                        .file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or(v.clone());
+                    parsed.path = Some(p);
+                    if inline.is_none() {
+                        i += 1;
+                    }
+                }
+            }
+            "--max-context" | "--max_context" => {
+                if let Some(v) = next() {
+                    parsed.ctx_max = v.parse().ok();
                     if inline.is_none() {
                         i += 1;
                     }
@@ -1074,6 +1147,9 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
     }
     if parsed.port.is_none() && parsed.engine == "sglang" {
         parsed.port = Some(30000);
+    }
+    if parsed.port.is_none() && parsed.engine == "strata" {
+        parsed.port = Some(8095);
     }
     if parsed.host.is_empty() {
         parsed.host = "127.0.0.1".into();
@@ -1492,6 +1568,7 @@ pub fn parse_v1_models_json(body: &str) -> Option<(String, Option<String>, Optio
     let max_len = first
         .get("max_model_len")
         .and_then(|m| m.as_u64())
+        .or_else(|| first.pointer("/meta/n_ctx").and_then(|m| m.as_u64()))
         .map(|n| n as usize);
     let owned_by = first
         .get("owned_by")
@@ -1698,11 +1775,12 @@ pub async fn probe_endpoint(
 
     let mut vision: Option<Vision> = None;
     let mut saw_vllm_metrics = false;
-    if let Ok(body) = http_get(host, port, "/metrics", auth).await {
+    let metrics_body = http_get(host, port, "/metrics", auth).await.ok();
+    if let Some(body) = metrics_body.as_deref() {
         if body.contains("vllm:") {
             saw_vllm_metrics = true;
             engine = "vllm".to_string();
-            if let Some(c) = crate::vllm::parse_vllm_metrics(&body) {
+            if let Some(c) = crate::vllm::parse_vllm_metrics(body) {
                 if model_name.is_none() {
                     model_name = c.model_name;
                 }
@@ -1711,6 +1789,42 @@ pub async fn probe_endpoint(
             engine = "llama.cpp".to_string();
         } else if body.contains("sglang:") {
             engine = "sglang".to_string();
+        }
+    }
+
+    // Strata answers /metrics with JSON (no Prometheus markers) and says
+    // what it is on /v1/status; without this it would keep the "vllm"
+    // default its /v1/models (no owned_by) implies. The JSON shape alone
+    // identifies it too — an API key guards /v1/* but not /metrics.
+    if engine == "vllm" && !saw_vllm_metrics {
+        let status = http_get(host, port, "/v1/status", auth)
+            .await
+            .ok()
+            .and_then(|body| crate::strata::parse_strata_status(&body))
+            .or_else(|| {
+                metrics_body
+                    .as_deref()
+                    .and_then(crate::strata::parse_strata_metrics)
+                    .map(|s| crate::strata::StrataStatus {
+                        model: s.model,
+                        max_context: s.max_context,
+                        images: false,
+                    })
+            });
+        if let Some(st) = status {
+            engine = "strata".to_string();
+            if st.max_context > 0 {
+                ctx_max = Some(st.max_context);
+            }
+            if model_name.is_none() && !st.model.is_empty() {
+                model_name = Some(st.model);
+            }
+            if st.images {
+                vision = Some(Vision {
+                    loaded: Some(true),
+                    place: Place::Unknown,
+                });
+            }
         }
     }
 
@@ -1939,6 +2053,34 @@ mod tests {
         assert!(p.tensor_split.is_empty());
         let p = parse_cmdline("llama-server", "llama-server -m m.gguf --tensor-split 0,0");
         assert!(p.tensor_split.is_empty());
+    }
+
+    // Strata: a Python front-end serving HTTP, and a C++ engine child that
+    // holds the GPU and names the native weights.
+    const STRATA_SERVE_CMD: &str = "/home/u/dev/strata/.venv/bin/python /home/u/dev/strata/serve/server.py --engine strata --config /home/u/dev/strata/run.json --port 8080";
+    const STRATA_ENGINE_CMD: &str = "/home/u/dev/strata/engine/strata --serve --pack /home/u/packs/ud --native /home/u/models/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf --spec 4 --mtp /home/u/mtp/rt --max-context 204800 --kv int8";
+
+    #[test]
+    fn strata_front_end_and_engine_child() {
+        assert!(looks_like_llm("python", STRATA_SERVE_CMD));
+        let front = parse_cmdline("python", STRATA_SERVE_CMD);
+        assert_eq!(front.engine, "strata");
+        assert_eq!(front.port, Some(8080));
+
+        let child = parse_cmdline("strata", STRATA_ENGINE_CMD);
+        assert_eq!(child.engine, "strata");
+        assert_eq!(child.ctx_max, Some(204800));
+        assert_eq!(
+            child.path.as_deref(),
+            Some(std::path::Path::new(
+                "/home/u/models/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf"
+            ))
+        );
+        // The engine child speaks no HTTP; it folds into the front-end.
+        assert!(is_strata_worker("strata"));
+        assert!(!is_strata_worker("python"));
+        // A llama-server is never mistaken for it, and vice versa.
+        assert_eq!(engine_from("llama-server", "llama-server --port 8080"), "llama.cpp");
     }
 
     #[test]

@@ -647,6 +647,36 @@ impl PerfTracker {
                         // counters to the session totals explicitly.
                         self.session_prefilled += done.prefill_tokens as u64;
                         self.session_decoded += done.decoded as u64;
+                    } else if close.prompt > 0 && done.prompt_tokens == close.prompt {
+                        // Partially starved (Strata): a single-chunk read
+                        // never moved the live progress counter, and a
+                        // chained admission skipped the idle poll that
+                        // settles it — fill the fields the live deltas
+                        // missed, billing only what was not already
+                        // counted.
+                        if done.cached_tokens == 0 && close.cached > 0 {
+                            done.cached_tokens = close.cached;
+                        }
+                        if done.prefill_tokens == 0 {
+                            let read = close.prompt.saturating_sub(close.cached);
+                            if read > 0 {
+                                done.prefill_tokens = read;
+                                self.session_prefilled += read as u64;
+                            }
+                        }
+                        if done.decoded == 0 && close.gen > 0 {
+                            done.decoded = close.gen;
+                            self.session_decoded += close.gen as u64;
+                        }
+                        // The dashboard-measured TTFT lives in
+                        // `first_token`; `avg_prefill_tps` divides by the
+                        // server-measured one, so stamp it too.
+                        if done.ttft.is_none() && close.ttft_secs > 0.0 {
+                            done.ttft = Some(close.ttft_secs as f32);
+                        }
+                        if done.itl_sum.is_none() && close.itl_sum > 0.0 {
+                            done.itl_sum = Some(close.itl_sum as f32);
+                        }
                     }
                     // The detection stamps can lag a busy server
                     // (vLLM's /metrics handler only answers between

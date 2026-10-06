@@ -3,7 +3,7 @@
 **A live terminal dashboard for the LLM running on your machine.**
 
 It finds the inference servers you already have up (llama.cpp `llama-server`,
-ollama, vLLM, SGLang, …), reads their counters and NVIDIA, AMD or Intel
+ollama, vLLM, SGLang, Strata, …), reads their counters and NVIDIA, AMD or Intel
 GPU telemetry, and turns them into a truecolor picture of what the model is doing
 right now: tokens per second, time to first token, GPU load and memory, context fill, speculative-decoding
 acceptance, which layers are busy on which GPU, and, with a small server patch,
@@ -115,9 +115,9 @@ console, pass `--color truecolor` if colours look flat.
   Windows hides the command line of a process started by another user or as
   administrator, so that server is matched by name only: it is assumed to be on
   its engine's default port (8080 for llama.cpp, 11434 for Ollama, 30000 for
-  SGLang, 8000 for vLLM), and the model name, context size and GGUF details are
-  missing. Starting the dashboard from an administrator terminal should also
-  expose them.
+  SGLang, 8000 for vLLM, 8095 for Strata), and the model name, context size and
+  GGUF details are missing. Starting the dashboard from an administrator
+  terminal should also expose them.
 - **GPU memory per process**: Windows drivers report it as `[N/A]`, so a
   server shows 0 MB in the model strip. Card-level VRAM is unaffected.
 - **Memory pipeline (`b`)**: RAM totals and the server's resident memory come
