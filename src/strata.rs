@@ -30,6 +30,7 @@ pub struct StrataRequest {
     pub output_tokens: usize,
     pub prompt_ms: f64,
     pub decode_ms: f64,
+    pub read: Option<usize>,
 }
 
 /// One `GET /metrics` document.
@@ -47,6 +48,8 @@ pub struct StrataMetrics {
     pub prompt_tokens: usize,
     /// Prefill position reached while reading; a reused prefix counts as read.
     pub prompt_read: Option<usize>,
+    /// Tokens the finished request actually read (`requests[0].prompt_read`).
+    pub last_read: Option<usize>,
     pub generated: usize,
     /// Finished requests since the server started.
     pub requests_done: u64,
@@ -88,6 +91,7 @@ pub fn parse_metrics(body: &str) -> Option<StrataMetrics> {
             output_tokens: usize_at(r, "output_tokens").unwrap_or(0),
             prompt_ms: f64_at(r, "prompt_ms").unwrap_or(0.0),
             decode_ms: f64_at(r, "decode_ms").unwrap_or(0.0),
+            read: usize_at(r, "prompt_read"),
         });
     let totals = v.get("totals");
     let total = |k: &str| totals.and_then(|t| usize_at(t, k)).map(|n| n as u64);
@@ -121,6 +125,7 @@ pub fn parse_metrics(body: &str) -> Option<StrataMetrics> {
         queued: usize_at(live, "queued").unwrap_or(0),
         prompt_tokens: usize_at(live, "prompt_tokens").unwrap_or(0),
         prompt_read: usize_at(live, "prompt_read"),
+        last_read: last.as_ref().and_then(|r| r.read),
         generated: usize_at(live, "generated").unwrap_or(0),
         requests_done: total("requests").unwrap_or(0),
         last,
@@ -177,14 +182,59 @@ pub fn live_stats(m: &StrataMetrics) -> LiveStats {
         s.cache_unknown = true;
     } else if let Some(r) = &m.last {
         // Idle: the request that just closed, as the server measured it.
+        // The exact read count (reused prefix excluded) settles whatever
+        // the latched live progress missed.
         s.prompt_tokens = r.prompt_tokens;
-        s.prompt_processed = r.prompt_tokens;
+        s.prompt_processed = r.read.unwrap_or(r.prompt_tokens);
         s.cache_tokens = r.reused.min(r.prompt_tokens);
         s.decoded = r.output_tokens;
         s.ttft_secs = r.prompt_ms / 1000.0;
         s.itl_sum = r.decode_ms / 1000.0;
     }
     s
+}
+
+/// The live prefill position counts the reused prefix; `prompt_processed`
+/// must not. The tracker latches the first position seen for a request as
+/// the base (reused prefix plus the first chunk, so it reports 0) and
+/// counts only the advance from there.
+#[derive(Default)]
+pub struct PrefillTracker {
+    task: i64,
+    base: Option<usize>,
+    latch: usize,
+}
+
+impl PrefillTracker {
+    /// `live_stats` with the prefill progress rebased to newly-read tokens.
+    /// When a successor is admitted without an idle sample in between, the
+    /// finished request still rides in `requests[0]`: hand it over as the
+    /// closing view so a starved record keeps its exact counters.
+    pub fn observe(&mut self, m: &StrataMetrics) -> LiveStats {
+        let mut s = live_stats(m);
+        if s.processing {
+            if s.id_task != self.task {
+                self.task = s.id_task;
+                self.base = None;
+                self.latch = 0;
+                s.closing = m.last.as_ref().map(|r| crate::observe::ClosingRequest {
+                    prompt: r.prompt_tokens,
+                    cached: r.reused,
+                    gen: r.output_tokens,
+                    ttft_secs: r.prompt_ms / 1000.0,
+                    itl_sum: r.decode_ms / 1000.0,
+                });
+            }
+            if m.state == "reading" {
+                if let Some(pos) = m.prompt_read {
+                    let base = *self.base.get_or_insert(pos);
+                    self.latch = self.latch.max(pos.saturating_sub(base));
+                }
+            }
+            s.prompt_processed = self.latch;
+        }
+        s
+    }
 }
 
 /// `serve/server.py --engine strata`: the process that serves HTTP.
@@ -274,6 +324,8 @@ mod tests {
         let s = live_stats(&m);
         assert!(s.processing);
         assert_eq!(s.id_task, 2);
+        // The raw live view counts the whole prompt; the tracker rebases
+        // to newly-read tokens.
         assert_eq!(s.prompt_processed, 95);
         assert_eq!(s.decoded, 16371);
         assert!(s.cache_unknown);
@@ -315,6 +367,10 @@ mod tests {
         assert_eq!(s.id_task, 4);
         assert_eq!(s.prompt_processed, 1200);
         assert_eq!(s.decoded, 0);
+        // Rebased: the position includes the reused prefix, so the first
+        // sample only latches the base.
+        let s = PrefillTracker::default().observe(&reading);
+        assert_eq!(s.prompt_processed, 0);
 
         let idle = parse_metrics(
             r#"{"engine":{"max_context":4096},"totals":{"requests":4},
@@ -331,6 +387,99 @@ mod tests {
         assert_eq!(s.decoded, 50);
         assert!((s.ttft_secs - 1.5).abs() < 1e-9);
         assert!((s.itl_sum - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn tracker_rebases_prefill_and_settles_at_completion() {
+        let doc = |state: &str, read: Option<u32>, done: u32, last: &str| {
+            parse_metrics(&format!(
+                r#"{{"engine":{{"max_context":4096}},"totals":{{"requests":{done}}},
+                    "live":{{"state":"{state}","prompt_tokens":2000,
+                             "prompt_read":{},"generated":null}},
+                    "requests":{last}}}"#,
+                read.map(|n| n.to_string()).unwrap_or_else(|| "null".into())
+            ))
+            .unwrap()
+        };
+        let finished = r#"[{"prompt_tokens":2000,"reused":800,"output_tokens":50,
+                             "prompt_ms":1500.0,"decode_ms":2000.0,"prompt_read":1200}]"#;
+        let mut t = PrefillTracker::default();
+        // Admitted with 800 reused: the first position latches the base.
+        let s = t.observe(&doc("reading", Some(850), 3, "[]"));
+        assert_eq!((s.id_task, s.prompt_processed), (4, 0));
+        // Reading advances: only the newly-read tokens count.
+        let s = t.observe(&doc("reading", Some(1500), 3, "[]"));
+        assert_eq!(s.prompt_processed, 650);
+        // Decoding holds the latch, not the full prompt.
+        let s = t.observe(&doc("generating", None, 3, "[]"));
+        assert_eq!(s.prompt_processed, 650);
+        // The idle sample settles the exact read count (1200, first chunk
+        // included) and the measured spans.
+        let s = t.observe(&doc("idle", None, 4, finished));
+        assert_eq!(s.prompt_processed, 1200);
+        assert_eq!(s.cache_tokens, 800);
+        assert!((s.ttft_secs - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn tracker_hands_a_closing_view_to_chained_successors() {
+        let doc = |state: &str, gen: Option<u32>, done: u32, last: &str| {
+            parse_metrics(&format!(
+                r#"{{"engine":{{"max_context":4096}},"totals":{{"requests":{done}}},
+                    "live":{{"state":"{state}","prompt_tokens":2000,"generated":{}}},
+                    "requests":{last}}}"#,
+                gen.map(|n| n.to_string()).unwrap_or_else(|| "null".into())
+            ))
+            .unwrap()
+        };
+        let finished = r#"[{"prompt_tokens":2000,"reused":800,"output_tokens":50,
+                             "prompt_ms":1500.0,"decode_ms":2000.0,"prompt_read":1200}]"#;
+        let mut t = PrefillTracker::default();
+        t.observe(&doc("generating", Some(30), 3, "[]"));
+        // The successor is admitted before any idle sample: the finished
+        // request still rides in requests[0], as a closing view.
+        let s = t.observe(&doc("generating", Some(5), 4, finished));
+        assert_eq!(s.id_task, 5);
+        let close = s.closing.expect("closing view");
+        assert_eq!((close.prompt, close.cached, close.gen), (2000, 800, 50));
+        assert!((close.ttft_secs - 1.5).abs() < 1e-9);
+        // Only on the admission sample.
+        let s = t.observe(&doc("generating", Some(20), 4, finished));
+        assert!(s.closing.is_none());
+    }
+
+    #[test]
+    fn closing_view_rescues_a_partially_starved_record() {
+        use crate::perf::PerfTracker;
+        use std::time::{Duration, Instant};
+        let doc = |gen: u32, done: u32, last: &str| {
+            parse_metrics(&format!(
+                r#"{{"engine":{{"max_context":4096}},"totals":{{"requests":{done}}},
+                    "live":{{"state":"generating","prompt_tokens":2000,"generated":{gen}}},
+                    "requests":{last}}}"#
+            ))
+            .unwrap()
+        };
+        let finished = r#"[{"prompt_tokens":2000,"reused":800,"output_tokens":50,
+                             "prompt_ms":1500.0,"decode_ms":2000.0,"prompt_read":1200}]"#;
+        let mut t = PrefillTracker::default();
+        let mut p = PerfTracker::new();
+        let t0 = Instant::now();
+        let step = Duration::from_millis(150);
+        // A cold request decodes; its single-chunk read never moved the
+        // progress counter.
+        let s = t.observe(&doc(30, 3, "[]"));
+        p.observe(&s, t0);
+        // The successor is admitted before any idle sample settles it.
+        let s = t.observe(&doc(5, 4, finished));
+        p.observe(&s, t0 + step);
+        let r = p.history.back().expect("finished request");
+        assert_eq!(r.prompt_tokens, 2000);
+        assert_eq!(r.cached_tokens, 800, "rescued from the closing view");
+        assert_eq!(r.prefill_tokens, 1200);
+        assert_eq!(r.decoded, 30, "live count kept");
+        assert_eq!(r.ttft, Some(1.5));
+        assert!(r.avg_prefill_tps() > 700.0, "{}", r.avg_prefill_tps());
     }
 
     #[test]
