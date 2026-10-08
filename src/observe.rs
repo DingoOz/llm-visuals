@@ -57,14 +57,20 @@ impl HttpAuth {
     }
 }
 
-fn http_request(host: &str, port: u16, path: &str, auth: &HttpAuth) -> String {
+/// What every endpoint is asked for unless it negotiates its format.
+const ACCEPT_ANY: &str = "application/json, text/plain, */*";
+/// For an endpoint that picks its format from `Accept`: Strata's `/metrics`
+/// (0.1.40.2+) answers anyone who takes `text/plain` in Prometheus text.
+const ACCEPT_JSON: &str = "application/json";
+
+fn http_request(host: &str, port: u16, path: &str, auth: &HttpAuth, accept: &str) -> String {
     let authority = if host.contains(':') && !host.starts_with('[') {
         format!("[{host}]:{port}")
     } else {
         format!("{host}:{port}")
     };
     format!(
-        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nAccept: application/json, text/plain, */*\r\n{}\r\n",
+        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nAccept: {accept}\r\n{}\r\n",
         auth.authorization_header()
     )
 }
@@ -480,12 +486,33 @@ pub async fn http_get(
     path: &str,
     auth: &HttpAuth,
 ) -> Result<String, HttpError> {
+    http_fetch(host, port, path, auth, ACCEPT_ANY).await
+}
+
+/// `http_get` that accepts JSON only, for an endpoint that would otherwise
+/// answer in another format.
+pub async fn http_get_json(
+    host: &str,
+    port: u16,
+    path: &str,
+    auth: &HttpAuth,
+) -> Result<String, HttpError> {
+    http_fetch(host, port, path, auth, ACCEPT_JSON).await
+}
+
+async fn http_fetch(
+    host: &str,
+    port: u16,
+    path: &str,
+    auth: &HttpAuth,
+    accept: &str,
+) -> Result<String, HttpError> {
     let connect = TcpStream::connect((host, port));
     let mut stream = tokio::time::timeout(Duration::from_millis(500), connect)
         .await
         .map_err(|_| HttpError::ConnectTimeout)?
         .map_err(HttpError::Connect)?;
-    let req = http_request(host, port, path, auth);
+    let req = http_request(host, port, path, auth, accept);
     stream
         .write_all(req.as_bytes())
         .await
@@ -511,24 +538,47 @@ mod tests {
     #[test]
     fn authenticated_request_uses_bearer_header() {
         let auth = HttpAuth(Some(Arc::from("test-secret")));
-        let request = http_request("127.0.0.1", 11434, "/metrics", &auth);
+        let request = http_request("127.0.0.1", 11434, "/metrics", &auth, ACCEPT_ANY);
         assert!(request.contains("Authorization: Bearer test-secret\r\n"));
         assert!(request.ends_with("\r\n\r\n"));
 
-        let request = http_request("127.0.0.1", 11434, "/metrics", &HttpAuth::default());
+        let request = http_request(
+            "127.0.0.1",
+            11434,
+            "/metrics",
+            &HttpAuth::default(),
+            ACCEPT_ANY,
+        );
         assert!(!request.contains("Authorization:"));
 
         let detected = HttpAuth::from_token(Some("cmdline-key".into()));
         let file = HttpAuth::from_token(Some("file-key".into()));
-        let request = http_request("127.0.0.1", 8080, "/slots", &detected.or(&file));
+        let request = http_request("127.0.0.1", 8080, "/slots", &detected.or(&file), ACCEPT_ANY);
         assert!(request.contains("Authorization: Bearer cmdline-key\r\n"));
         let request = http_request(
             "127.0.0.1",
             8080,
             "/slots",
             &HttpAuth::from_token(None).or(&file),
+            ACCEPT_ANY,
         );
         assert!(request.contains("Authorization: Bearer file-key\r\n"));
+    }
+
+    #[test]
+    fn json_request_does_not_accept_plain_text() {
+        // Strata's serve/prometheus.py: Prometheus text for an Accept that
+        // names text/plain or openmetrics, the JSON document otherwise.
+        let wants_prometheus =
+            |request: &str| request.contains("text/plain") || request.contains("openmetrics");
+        let auth = HttpAuth::default();
+        let any = http_request("127.0.0.1", 8095, "/metrics", &auth, ACCEPT_ANY);
+        assert!(any.contains("\r\nAccept: application/json, text/plain, */*\r\n"));
+        assert!(wants_prometheus(&any));
+        let json = http_request("127.0.0.1", 8095, "/metrics", &auth, ACCEPT_JSON);
+        assert!(json.contains("\r\nAccept: application/json\r\n"));
+        assert!(!wants_prometheus(&json));
+        assert!(json.ends_with("\r\n\r\n"));
     }
 
     #[test]

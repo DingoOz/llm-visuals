@@ -2,7 +2,7 @@
 
 ## Summary
 
-27 entries (as of 2026-10-06). Recurring themes:
+28 entries (as of 2026-10-08). Recurring themes:
 
 - **Optional or missing telemetry treated as a real value** (Logic, most common): a missing counter read as 0, record close gated on optional TTFT, unknown ctx rendered as full, model ownership derived from an unknown weight estimate. Rule of thumb: keep "unknown" distinct from zero and never gate state or ownership on an optional measurement.
 - **Under-discriminating matches when resolving processes/devices**: docker-proxy matched by IP only, comm-name gating, xe fans keyed by a constant path component, env GPU masks merged with host indices. Match on every discriminating field and prefer authoritative (driver/host) sources over inferred ones.
@@ -282,3 +282,13 @@
 - **Root cause:** The unified-memory bar and the "keep NVML" rule both keyed on zero device memory alone, so a MIG host would lose its nvidia-smi fallback and have system RAM drawn as its VRAM; the stand-in totals were also written to the SQLite log as device memory.
 - **Fix applied:** `gpu::is_unified_part` recognises the part by the driver's name (GB10); both rules require it, and `gpu_samples` stores zeros for a unified part.
 - **Prevention rule:** Identify a hardware class by positive evidence, never by an absent value, and keep synthesised numbers out of columns that mean a measured quantity.
+
+### One Accept header for every endpoint, sent to one that negotiates — 2026-10-08
+
+- **Severity:** High
+- **Category:** API Misuse
+- **File(s):** `src/observe.rs`, `src/strata.rs`, `src/model_detect.rs`
+- **Pattern:** Sending a permissive `Accept: application/json, text/plain, */*` to an endpoint whose format depends on it, then parsing the reply as the one format the adapter knows.
+- **Root cause:** Strata 0.1.40.2 began answering `/metrics` in Prometheus text (under vLLM's metric names) for any client that accepts `text/plain`. The JSON parser failed on every scrape, so a detected Strata server sat idle with no live numbers, and the endpoint probe matched `vllm:` in the text and called the server vLLM.
+- **Fix applied:** `http_get_json` asks for `application/json` alone and Strata's poll uses it; the probe recognises Strata's rendering by its `strata:` samples before the `vllm:` test and re-reads it as JSON.
+- **Prevention rule:** Ask an endpoint for exactly the format its parser reads, and identify a server by what only it emits, never by names another server's compatibility layer copies.

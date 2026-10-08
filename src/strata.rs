@@ -2,9 +2,10 @@
 //!
 //! Strata (github.com/Niko1221/Strata) is a Python HTTP front end
 //! (`serve/server.py --engine strata`) driving a native `strata --serve`
-//! child that holds the GPU memory. It has no `/slots` or Prometheus
-//! counters; `GET /metrics` is one JSON document with the engine's facts,
-//! the request in flight and the last finished requests. One sequence runs
+//! child that holds the GPU memory. `GET /metrics` is one JSON document
+//! with the engine's facts, the request in flight and the last finished
+//! requests; from 0.1.40.2 a client that accepts `text/plain` gets a
+//! Prometheus rendering of it instead, so this asks for JSON. One sequence runs
 //! at a time unless the engine batches (`live.parallel` slots); then `live`
 //! describes the newest request in flight.
 //!
@@ -16,7 +17,7 @@
 //! closed. MTP draft counts (Strata 0.1.35+) likewise move only when a
 //! request ends.
 
-use crate::observe::{http_get, ClosingRequest, HttpAuth, LiveStats, SpecMetrics};
+use crate::observe::{http_get_json, ClosingRequest, HttpAuth, LiveStats, SpecMetrics};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -166,9 +167,19 @@ fn usize_at(v: &Value, k: &str) -> Option<usize> {
     f64_at(v, k).map(|n| n.max(0.0) as usize)
 }
 
+/// From 0.1.40.2 the server picks the format of `/metrics` from `Accept`:
+/// Prometheus text for a client that takes `text/plain`, the JSON document
+/// otherwise. Ask for JSON alone, or every scrape fails to parse.
 pub async fn poll_metrics(host: &str, port: u16, auth: &HttpAuth) -> Option<StrataMetrics> {
-    let body = http_get(host, port, "/metrics", auth).await.ok()?;
+    let body = http_get_json(host, port, "/metrics", auth).await.ok()?;
     parse_metrics(&body)
+}
+
+/// Strata's Prometheus rendering of `/metrics`. It carries vLLM's metric
+/// names for everything vLLM has a name for, so those cannot tell the two
+/// servers apart; its own facts are samples named `strata:`.
+pub fn is_prometheus_text(body: &str) -> bool {
+    body.lines().any(|line| line.starts_with("strata:"))
 }
 
 /// `LiveStats` for one scrape. The caller fills nothing else.
@@ -605,6 +616,24 @@ mod tests {
         );
         assert_eq!(perf.history.back().unwrap().avg_prefill_tps(), 0.0);
         assert_eq!(perf.session_prefilled, 0);
+    }
+
+    #[test]
+    fn prometheus_rendering_is_told_apart_from_vllm() {
+        // fixtures/strata-metrics.json as Strata 0.1.40.3 renders it for a
+        // client that accepts text/plain.
+        let body = std::fs::read_to_string("fixtures/strata-metrics.prom").unwrap();
+        assert!(body.contains("vllm:num_requests_running"));
+        assert!(parse_metrics(&body).is_none());
+        assert!(is_prometheus_text(&body));
+        let vllm = std::fs::read_to_string("fixtures/vllm-brain-metrics.txt").unwrap();
+        assert!(!is_prometheus_text(&vllm));
+        // A label value that mentions it is not a strata: sample.
+        assert!(!is_prometheus_text(
+            "vllm:num_requests_running{model_name=\"strata:x\"} 1\n"
+        ));
+        let json = std::fs::read_to_string("fixtures/strata-metrics.json").unwrap();
+        assert!(!is_prometheus_text(&json));
     }
 
     #[test]
