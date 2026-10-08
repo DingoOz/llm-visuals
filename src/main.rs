@@ -368,11 +368,12 @@ async fn poll_server(
         // JSON document from a Python server, so never poll it faster than
         // 400 ms.
         let delay = poll.max(Duration::from_millis(400));
+        let mut adapter = strata::StrataAdapter::default();
         let mut misses = 0u32;
         loop {
             if let Some(m) = strata::poll_metrics(&model.host, port, &auth).await {
                 misses = 0;
-                let mut stats = strata::live_stats(&m);
+                let mut stats = adapter.observe(&m);
                 if stats.ctx_max == 0 {
                     stats.ctx_max = model.ctx_max.unwrap_or(0);
                 }

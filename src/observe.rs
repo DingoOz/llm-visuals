@@ -74,8 +74,15 @@ fn http_request(host: &str, port: u16, path: &str, auth: &HttpAuth) -> String {
 pub struct LiveStats {
     pub ctx_max: usize,
     pub prompt_tokens: usize,
-    /// Prompt tokens pushed through prefill so far in this request (0 when idle).
+    /// Prompt tokens processed so far; adapters may retain final counters
+    /// while idle so a just-completed request can be recorded.
     pub prompt_processed: usize,
+    /// Engine-measured prefill throughput. Some(0) suppresses rates inferred
+    /// from chunked progress or positions belonging to a cached prefix.
+    pub prefill_tps: Option<f32>,
+    /// Completed request's prompt-processing duration. When present,
+    /// prompt_processed is the authoritative uncached token count.
+    pub prefill_secs: Option<f64>,
     pub decoded: usize,
     /// False when this `/slots` sample omitted `n_decoded`. A missing field
     /// is not a real zero: recent llama.cpp dev builds leave it out while
@@ -105,7 +112,7 @@ pub struct LiveStats {
     /// `(decoded - 1) / itl_sum`. Always 0.0 on llama.cpp.
     pub itl_sum: f64,
 
-    /// The finishing request's full counters (vLLM). Set on the poll
+    /// The finishing request's full counters (vLLM or Strata). Set on the poll
     /// where a completion and a successor's admission share one scrape:
     /// the adapter re-anchors its baselines onto the successor, so
     /// without this the finished request would look empty and its row
@@ -169,14 +176,15 @@ impl DecodeFallback {
     }
 }
 
-/// A vLLM request's full counters against the baseline in effect when it
-/// was admitted — captured on the poll where the adapter re-anchors
-/// onto a successor, so the finished request still gets a table row.
+/// A request's final counters captured when its completion and a successor
+/// share one poll, so the finished request still gets an accurate table row.
 #[derive(Debug, Clone, Default)]
 pub struct ClosingRequest {
     pub prompt: usize,
     pub cached: usize,
     pub gen: usize,
+    /// Strata's prompt-processing duration, separate from polling intervals.
+    pub prefill_secs: Option<f64>,
     /// Server-measured TTFT (mean over the window's completions).
     pub ttft_secs: f64,
     /// Sum of per-request inter-token latencies (see LiveStats).
@@ -420,6 +428,8 @@ pub fn parse_slots(body: &str) -> Option<LiveStats> {
         ctx_max: u("n_ctx"),
         prompt_tokens: u("n_prompt_tokens"),
         prompt_processed: u("n_prompt_tokens_processed"),
+        prefill_tps: None,
+        prefill_secs: None,
         decoded,
         decoded_present,
         cache_tokens: u("n_prompt_tokens_cache"),
@@ -528,6 +538,8 @@ mod tests {
         assert_eq!(s.ctx_max, 98304);
         assert_eq!(s.prompt_tokens, 2537);
         assert_eq!(s.prompt_processed, 900);
+        assert!(s.prefill_tps.is_none());
+        assert!(s.prefill_secs.is_none());
         assert_eq!(s.decoded, 12);
         assert!(s.decoded_present);
         assert_eq!(s.cache_tokens, 100);
@@ -536,6 +548,49 @@ mod tests {
         assert_eq!(s.slots_busy, 0);
         assert_eq!(s.spec_types, "none,draft-mtp");
         assert!((s.cache_hit_frac() - 100.0 / 2537.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn llama_slots_keep_poll_based_prefill_and_decode_rates() {
+        use crate::perf::PerfTracker;
+
+        let mut perf = PerfTracker::new();
+        let now = std::time::Instant::now();
+        for (i, (busy, prompt, processed, decoded)) in [
+            (false, 0, 0, 0),
+            (true, 1000, 200, 0),
+            (true, 1000, 600, 0),
+            (true, 1000, 1000, 0),
+            (true, 1000, 1000, 10),
+            (true, 1000, 1000, 20),
+            (false, 1000, 0, 20),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let stats = parse_slots(&format!(
+                r#"[{{"id_task":1,"is_processing":{busy},"n_prompt_tokens":{prompt},
+                    "n_prompt_tokens_processed":{processed},"next_token":[{{"n_decoded":{decoded}}}]}}]"#
+            ))
+            .unwrap();
+            assert!(stats.prefill_tps.is_none());
+            assert!(stats.prefill_secs.is_none());
+            perf.observe(&stats, now + Duration::from_millis(200 * i as u64));
+            if i == 2 {
+                assert_eq!(perf.prefill_tps, 1500.0);
+            }
+            if i == 5 {
+                assert_eq!(perf.decode_tps, 20.0);
+            }
+        }
+        let request = perf.history.back().unwrap();
+        assert_eq!(request.prefill_tokens, 1000);
+        assert_eq!(request.decoded, 20);
+        assert!((request.avg_prefill_tps() - 1000.0 / 0.6).abs() < 0.01);
+        assert_eq!(request.avg_decode_tps(), 50.0);
+        assert!(request.measured_prefill_tps.is_none());
+        assert_eq!(perf.session_prefilled, 1000);
+        assert_eq!(perf.session_decoded, 20);
     }
 
     #[test]
