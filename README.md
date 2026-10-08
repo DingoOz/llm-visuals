@@ -355,9 +355,11 @@ its `*.safetensors` shards — file sizes are exact, the per-token projection
 rests on the config's expert counts, so every number derived from it is
 labelled `est`. The directory is found through the HF hub cache when the
 server names a repo (`RadixArk/Model-NVFP4`) or an alias of a cached repo
-instead of a host path. A step is one verification pass under
-MTP / speculative decoding (from `/metrics`), one token otherwise, and one
-micro-batch (`-ub`, default 512) during prefill. The verdict is a rule
+instead of a host path: the snapshot `refs/main` points at, and for an alias
+only when it is the start of exactly one cached model's name — two quants
+under one alias are left unresolved rather than guessed. A step is one
+verification pass under MTP / speculative decoding (from `/metrics`), one
+token otherwise, and one micro-batch (`-ub`, default 512) during prefill. The verdict is a rule
 chain: disk activity beats everything (weights are paging), then a PCIe link
 past a third of its cap, then a memory controller past 75 %, then CPU-side
 layers with an idle GPU, then a busy GPU (compute bound); otherwise no hop is

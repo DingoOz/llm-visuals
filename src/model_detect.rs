@@ -1558,23 +1558,48 @@ fn hf_hub_roots() -> Vec<PathBuf> {
     out
 }
 
-/// The newest snapshot of a hub repo that holds a model config.
+/// The snapshot of a hub repo to read: the one `refs/main` names, else the
+/// most recently written. Commit hashes do not sort by age, so the directory
+/// order says nothing. Only a snapshot that holds a model config counts.
 fn hub_snapshot(repo: &Path) -> Option<PathBuf> {
-    let mut snaps: Vec<PathBuf> = std::fs::read_dir(repo.join("snapshots"))
+    let snapshots = repo.join("snapshots");
+    let usable = |p: &Path| {
+        p.is_dir() && (p.join("config.json").exists() || p.join("tokenizer.json").exists())
+    };
+    if let Ok(rev) = std::fs::read_to_string(repo.join("refs").join("main")) {
+        let rev = rev.trim();
+        if !rev.is_empty() && rev.chars().all(|c| c.is_ascii_alphanumeric()) {
+            let snap = snapshots.join(rev);
+            if usable(&snap) {
+                return Some(snap);
+            }
+        }
+    }
+    std::fs::read_dir(&snapshots)
         .ok()?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| {
-            p.is_dir() && (p.join("config.json").exists() || p.join("tokenizer.json").exists())
-        })
-        .collect();
-    snaps.sort();
-    snaps.pop()
+        .filter(|p| usable(p))
+        .max_by_key(|p| (p.metadata().and_then(|m| m.modified()).ok(), p.clone()))
+}
+
+/// How well a server's name for its model fits a cached repo's name (both
+/// lower case): the needle's length, and whether it is the whole name.
+/// `None` unless the needle is the name or its start up to a separator, so
+/// `qwen4` is not an alias of `qwen42-test`.
+fn alias_fit(needle: &str, repo_name: &str) -> Option<(usize, bool)> {
+    let rest = repo_name.strip_prefix(needle)?;
+    (rest.is_empty() || rest.starts_with(['-', '_'])).then_some((needle.len(), rest.is_empty()))
 }
 
 /// A cached repo snapshot for a repo id (`org/name`) or a server alias:
 /// `qwen3.8-flash-next` finds `models--RadixArk--Qwen3.8-Flash-Next-NVFP4`
-/// by the case-insensitive prefix of its repo name. Exact ids win.
+/// by the case-insensitive start of its repo name. Exact ids win.
+///
+/// An alias has to fit exactly one cached model. Two quants of one model
+/// share a prefix and the alias cannot say which is loaded; the other one's
+/// tensor table would be another model's numbers on screen, so an ambiguous
+/// alias finds nothing and the pipeline says the table is unknown.
 fn hf_hub_snapshot(hub: &Path, names: &[&str]) -> Option<PathBuf> {
     for name in names {
         if name.contains('/') {
@@ -1590,25 +1615,29 @@ fn hf_hub_snapshot(hub: &Path, names: &[&str]) -> Option<PathBuf> {
         .map(|n| n.rsplit('/').next().unwrap_or(n).to_lowercase())
         .filter(|s| s.len() > 3)
         .collect();
-    let mut hits: Vec<(usize, String, PathBuf)> = Vec::new();
+    let mut hits: Vec<((usize, bool), PathBuf)> = Vec::new();
     for e in std::fs::read_dir(hub).ok()?.flatten() {
         let path = e.path();
-        let Some(stem) = path.file_name().and_then(|n| n.to_str()) else {
+        // The cache also holds `datasets--` and `spaces--` repos.
+        let Some(repo) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_prefix("models--"))
+        else {
             continue;
         };
-        let stem = stem.to_lowercase();
-        let tail = stem.rsplit("--").next().unwrap_or(&stem);
-        for n in &needles {
-            if tail.starts_with(n) || n.starts_with(tail) {
-                hits.push((n.len(), stem.clone(), path));
-                break;
-            }
+        let name = repo.rsplit("--").next().unwrap_or(repo).to_lowercase();
+        if let Some(fit) = needles.iter().filter_map(|n| alias_fit(n, &name)).max() {
+            hits.push((fit, path));
         }
     }
-    hits.sort();
-    hits.into_iter()
-        .rev()
-        .find_map(|(_, _, p)| hub_snapshot(&p))
+    let best = hits.iter().map(|(fit, _)| *fit).max()?;
+    let mut fitting = hits.into_iter().filter(|(fit, _)| *fit == best);
+    let (_, repo) = fitting.next()?;
+    if fitting.next().is_some() {
+        return None;
+    }
+    hub_snapshot(&repo)
 }
 
 /// Look for local weights matching target_path or model_name on the host filesystem.
@@ -2023,6 +2052,66 @@ mod tests {
         // A server that names the model by an alias still finds the cached repo.
         assert!(hf_hub_snapshot(&hub, &["qwen42-test"]).is_some());
         assert!(hf_hub_snapshot(&hub, &["something-else"]).is_none());
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    fn add_repo(hub: &Path, dir: &str, snapshots: &[&str]) -> PathBuf {
+        let repo = hub.join(dir);
+        for snap in snapshots {
+            let snap = repo.join("snapshots").join(snap);
+            std::fs::create_dir_all(&snap).unwrap();
+            std::fs::write(snap.join("config.json"), b"{}").unwrap();
+        }
+        repo
+    }
+
+    #[test]
+    fn hub_alias_must_name_one_cached_model() {
+        let hub = fake_hub("alias");
+        let large = hub.join("models--Org--Qwen42-Test-Large");
+        // An alias stops at a separator: `qwen4` is not a name for Qwen42,
+        // and a repo whose name is only the start of the alias is another
+        // model (the base of the quant being served).
+        assert!(hf_hub_snapshot(&hub, &["qwen4"]).is_none());
+        assert!(hf_hub_snapshot(&hub, &["qwen42-test-large-awq"]).is_none());
+        // Datasets share the cache directory and are never weights.
+        add_repo(&hub, "datasets--Org--Corpus-Test", &["d1"]);
+        assert!(hf_hub_snapshot(&hub, &["corpus-test"]).is_none());
+        // Two quants of one model: the alias cannot say which is loaded, and
+        // the wrong one's tensor table would be wrong numbers on screen.
+        add_repo(&hub, "models--Org--Qwen42-Test-Small", &["s1"]);
+        assert!(hf_hub_snapshot(&hub, &["qwen42-test"]).is_none());
+        // The whole name still picks its own repo, whoever else shares a prefix.
+        add_repo(&hub, "models--Org--Qwen42-Test", &["b1"]);
+        assert_eq!(
+            hf_hub_snapshot(&hub, &["qwen42-test"]),
+            Some(
+                hub.join("models--Org--Qwen42-Test")
+                    .join("snapshots")
+                    .join("b1")
+            )
+        );
+        assert_eq!(
+            hf_hub_snapshot(&hub, &["/model", "Qwen42-Test-Large"]),
+            Some(large.join("snapshots").join("abc123"))
+        );
+        let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn hub_snapshot_follows_the_main_ref() {
+        let hub = fake_hub("refs");
+        // Commit hashes do not sort by age: `ffff` is the stale revision here.
+        let repo = add_repo(&hub, "models--Org--Two-Revisions", &["ffff", "0a1b"]);
+        std::fs::create_dir_all(repo.join("refs")).unwrap();
+        std::fs::write(repo.join("refs").join("main"), "0a1b\n").unwrap();
+        assert_eq!(
+            hub_snapshot(&repo),
+            Some(repo.join("snapshots").join("0a1b"))
+        );
+        // A ref to a snapshot that was never downloaded falls back to one that was.
+        std::fs::write(repo.join("refs").join("main"), "dead").unwrap();
+        assert!(hub_snapshot(&repo).is_some());
         let _ = std::fs::remove_dir_all(&hub);
     }
 
