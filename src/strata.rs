@@ -236,6 +236,9 @@ pub fn live_stats(m: &StrataMetrics) -> LiveStats {
 #[derive(Default)]
 pub struct StrataAdapter {
     previous: Option<StrataMetrics>,
+    /// The request in flight has had the engine's live prefill rate on the
+    /// meter, so its closing sample has nothing new to show there.
+    live_rate_shown: bool,
 }
 
 impl StrataAdapter {
@@ -245,7 +248,17 @@ impl StrataAdapter {
             .previous
             .as_ref()
             .is_some_and(|previous| m.requests_done > previous.requests_done);
-        if !stats.processing && !completed {
+        // The closing sample carries the completed rate for a prefill no
+        // poll saw in time: one that ended between polls, or an engine with
+        // no live rate. A prefill that was on the meter as it happened ended
+        // a whole decode ago; showing its rate again would draw a second
+        // burst at a moment the engine is reading nothing.
+        let shown = std::mem::take(&mut self.live_rate_shown);
+        if stats.processing {
+            self.live_rate_shown = (shown && !completed)
+                || (m.state == "reading" && m.prefill_tok_s_mean.is_some_and(|rate| rate > 0.0));
+        }
+        if !stats.processing && (!completed || shown) {
             stats.prefill_tps = Some(0.0);
         }
         if completed && stats.processing {
@@ -409,6 +422,42 @@ mod tests {
         assert_eq!(perf.prefill_hist.back(), Some(&0.0));
         assert_eq!(perf.session_prefilled, 200);
         assert_eq!(perf.history.len(), 1);
+    }
+
+    #[test]
+    fn a_rate_shown_live_is_not_replayed_when_the_request_ends() {
+        let reading = |read: usize| {
+            format!(
+                r#"{{"engine":{{}},"live":{{"state":"reading","prompt_tokens":5000,
+                    "prompt_read":{read},"prefill_tok_s_mean":1400.0}},"totals":{{"requests":0}}}}"#
+            )
+        };
+        let perf = replay(&[
+            r#"{"engine":{},"live":{"state":"idle"},"totals":{"requests":0}}"#,
+            &reading(4500),
+            &reading(5000),
+            r#"{"engine":{},"live":{"state":"generating","prompt_tokens":5000,
+                "generated":30,"prefill_tok_s_mean":1400.0},"totals":{"requests":0}}"#,
+            r#"{"engine":{},"live":{"state":"generating","prompt_tokens":5000,
+                "generated":60,"prefill_tok_s_mean":1400.0},"totals":{"requests":0}}"#,
+            r#"{"engine":{},"live":{"state":"idle"},"totals":{"requests":1},
+                "requests":[{"prompt_tokens":5000,"reused":4000,"prompt_read":1000,
+                             "output_tokens":60,"prompt_ms":700.0,"decode_ms":2000.0}]}"#,
+        ]);
+        // The meter held 1400 tok/s while the prompt was read. Decoding has
+        // since run for two polls; the closing sample must not light the
+        // prefill meter again for work that ended back then.
+        let shown: Vec<f32> = perf.prefill_hist.iter().copied().collect();
+        assert_eq!(shown, [1400.0, 1400.0, 0.0, 0.0, 0.0]);
+        assert_eq!(perf.peak_prefill_tps, 1400.0);
+        // The request's own row still gets the engine's final figure.
+        let request = perf.history.back().unwrap();
+        assert_eq!(
+            (request.prefill_tokens, request.cached_tokens),
+            (1000, 4000)
+        );
+        assert!((request.avg_prefill_tps() - 1000.0 / 0.7).abs() < 0.01);
+        assert_eq!(perf.session_prefilled, 1000);
     }
 
     #[test]

@@ -534,7 +534,9 @@ live prefill rate uses the engine's `live.prefill_tok_s_mean`, not progress
 divided by a poll interval (progress includes reused prefix positions).
 On engines without that field, the rate stays zero until completion; the
 request table and completion sample use only new tokens divided by
-`prompt_ms`, including partial cancelled reads. Back-to-back requests retain
+`prompt_ms`, including partial cancelled reads. The completion sample moves
+the meter only for a prefill it never showed live, so a request draws one
+prefill burst, not a second one after its decode. Back-to-back requests retain
 their own timings even when no idle poll separates them. A
 batching engine (`live.parallel`) is followed by its newest request. The MTP
 depth is `engine.mtp_max`. From Strata 0.1.35 the acceptance gauge comes
