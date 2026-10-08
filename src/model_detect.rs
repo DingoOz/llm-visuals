@@ -711,6 +711,11 @@ pub fn detect_models() -> Vec<DetectedModel> {
                         m.gguf = Some(info);
                     }
                 }
+                // The shard headers give the pipeline the same weight
+                // layout a GGUF tensor table would, labelled est.
+                if m.tensors.is_none() {
+                    m.tensors = crate::safetensors::read_summary(&resolved).ok();
+                }
             } else if resolved.is_file() {
                 load_gguf_metadata(m, resolved);
             }
@@ -1541,6 +1546,71 @@ pub fn parse_v1_models_json(body: &str) -> Option<(String, Option<String>, Optio
     Some((id, root, max_len, owned_by))
 }
 
+/// Hugging Face hub cache roots to search for a repo snapshot.
+fn hf_hub_roots() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(home_env) = std::env::var("HF_HOME") {
+        out.push(PathBuf::from(home_env).join("hub"));
+    }
+    if let Some(home) = crate::settings::home() {
+        out.push(home.join(".cache").join("huggingface").join("hub"));
+    }
+    out
+}
+
+/// The newest snapshot of a hub repo that holds a model config.
+fn hub_snapshot(repo: &Path) -> Option<PathBuf> {
+    let mut snaps: Vec<PathBuf> = std::fs::read_dir(repo.join("snapshots"))
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_dir() && (p.join("config.json").exists() || p.join("tokenizer.json").exists())
+        })
+        .collect();
+    snaps.sort();
+    snaps.pop()
+}
+
+/// A cached repo snapshot for a repo id (`org/name`) or a server alias:
+/// `qwen3.8-flash-next` finds `models--RadixArk--Qwen3.8-Flash-Next-NVFP4`
+/// by the case-insensitive prefix of its repo name. Exact ids win.
+fn hf_hub_snapshot(hub: &Path, names: &[&str]) -> Option<PathBuf> {
+    for name in names {
+        if name.contains('/') {
+            if let Some(snap) =
+                hub_snapshot(&hub.join(format!("models--{}", name.replace('/', "--"))))
+            {
+                return Some(snap);
+            }
+        }
+    }
+    let needles: Vec<String> = names
+        .iter()
+        .map(|n| n.rsplit('/').next().unwrap_or(n).to_lowercase())
+        .filter(|s| s.len() > 3)
+        .collect();
+    let mut hits: Vec<(usize, String, PathBuf)> = Vec::new();
+    for e in std::fs::read_dir(hub).ok()?.flatten() {
+        let path = e.path();
+        let Some(stem) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        let stem = stem.to_lowercase();
+        let tail = stem.rsplit("--").next().unwrap_or(&stem);
+        for n in &needles {
+            if tail.starts_with(n) || n.starts_with(tail) {
+                hits.push((n.len(), stem.clone(), path));
+                break;
+            }
+        }
+    }
+    hits.sort();
+    hits.into_iter()
+        .rev()
+        .find_map(|(_, _, p)| hub_snapshot(&p))
+}
+
 /// Look for local weights matching target_path or model_name on the host filesystem.
 pub fn resolve_local_model_dir(target_path: &Path, model_name: &str) -> Option<PathBuf> {
     if target_path.is_dir() && target_path.join("config.json").exists() {
@@ -1577,6 +1647,11 @@ pub fn resolve_local_model_dir(target_path: &Path, model_name: &str) -> Option<P
             {
                 return Some(candidate);
             }
+        }
+    }
+    for hub in hf_hub_roots() {
+        if let Some(snap) = hf_hub_snapshot(&hub, &names_to_try) {
+            return Some(snap);
         }
     }
     None
@@ -1824,6 +1899,9 @@ pub async fn probe_endpoint(
                 }
                 gguf_info = Some(info);
             }
+            if tensor_summary.is_none() {
+                tensor_summary = crate::safetensors::read_summary(&resolved).ok();
+            }
             resolved_path = Some(resolved);
         }
     }
@@ -1919,6 +1997,34 @@ fn extra_probe_ips(ips: &[String]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fake_hub(tag: &str) -> PathBuf {
+        let hub = std::env::temp_dir().join(format!("lv-hub-{tag}-{}", std::process::id()));
+        let snap = hub
+            .join("models--Org--Qwen42-Test-Large")
+            .join("snapshots")
+            .join("abc123");
+        std::fs::create_dir_all(&snap).unwrap();
+        std::fs::write(snap.join("config.json"), b"{}").unwrap();
+        hub
+    }
+
+    #[test]
+    fn hub_snapshot_finds_repo_ids_and_aliases() {
+        let hub = fake_hub("id");
+        assert_eq!(
+            hf_hub_snapshot(&hub, &["Org/Qwen42-Test-Large"]),
+            Some(
+                hub.join("models--Org--Qwen42-Test-Large")
+                    .join("snapshots")
+                    .join("abc123")
+            )
+        );
+        // A server that names the model by an alias still finds the cached repo.
+        assert!(hf_hub_snapshot(&hub, &["qwen42-test"]).is_some());
+        assert!(hf_hub_snapshot(&hub, &["something-else"]).is_none());
+        let _ = std::fs::remove_dir_all(&hub);
+    }
 
     #[test]
     fn gpu_affinity_from_environ() {

@@ -14,6 +14,7 @@ mod observe;
 mod perf;
 mod pipeline;
 mod render;
+mod safetensors;
 mod settings;
 mod sglang;
 mod strata;
@@ -943,6 +944,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if gpu_updated {
+            // Unified-memory parts (GB10 / DGX Spark) have no device memory:
+            // build their VRAM numbers from the servers' own occupancy report
+            // over system RAM before the perf tracker sees the sample, so the
+            // bandwidth pool meter fills too. Re-applied on every drain
+            // because gpu_rx replaces the sample wholesale.
+            gpu::apply_unified_memory(
+                &mut latest_gpu,
+                sys_ram_total_mb.unwrap_or(0),
+                server_reported_gb(slots.iter().map(|s| &s.live)),
+            );
             // The cards are shared, so every model sees the same samples.
             for slot in &mut slots {
                 slot.perf.observe_gpu(&latest_gpu, now);
@@ -1062,15 +1073,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let frame_dt = (now - last_frame).as_secs_f32().clamp(0.0, 1.0);
         last_frame = now;
-        // Unified-memory parts (GB10 / DGX Spark) have no device memory to
-        // show: build their VRAM bar from the servers' own occupancy report
-        // over system RAM. Re-applied every frame because gpu_rx replaces
-        // the sample wholesale on every drain.
-        gpu::apply_unified_memory(
-            &mut latest_gpu,
-            sys_ram_total_mb.unwrap_or(0),
-            server_reported_gb(slots.iter().map(|s| &s.live)),
-        );
         for slot in &mut slots {
             if slot.live.ctx_max == 0 {
                 slot.live.ctx_max = slot.ctx_max;
