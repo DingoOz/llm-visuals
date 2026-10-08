@@ -1866,6 +1866,18 @@ pub async fn probe_endpoint(
         }
     }
 
+    // A key guards /v1/* but not /metrics, so the scrape above still finds
+    // a keyed server; /v1/status then names the model the 401'd /v1/models
+    // could not.
+    if engine == "strata" && model_name.is_none() {
+        if let Some(st) = crate::strata::poll_status(host, port, auth).await {
+            model_name = st.model;
+            if ctx_max.is_none() {
+                ctx_max = (st.max_context > 0).then_some(st.max_context);
+            }
+        }
+    }
+
     if model_name.is_none() && !saw_vllm_metrics {
         let mut got_props = false;
         if let Ok(props) = http_get(host, port, "/props", auth).await {
