@@ -3275,7 +3275,13 @@ impl Renderer {
 
     fn render_pipeline(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
         let layout = &d.perf.bw.layout;
-        let title = " ◆ MEMORY PIPELINE  disk → RAM → PCIe → VRAM → prefill → decode ";
+        // The header names the same hops the stage boxes below do.
+        let unified = !d.gpus.is_empty() && d.gpus.iter().all(|g| g.unified);
+        let title = if unified {
+            " ◆ MEMORY PIPELINE  disk → RAM → C2C → UNIFIED → prefill → decode "
+        } else {
+            " ◆ MEMORY PIPELINE  disk → RAM → PCIe → VRAM → prefill → decode "
+        };
         let est = d
             .detected
             .and_then(|m| m.tensors.as_ref())
@@ -3298,7 +3304,7 @@ impl Renderer {
                 layout.active_bytes as f32 / 1e9,
                 if layout.cpu_bytes > layout.total_bytes / 50 {
                     format!("~{:.1} GB on CPU ", layout.cpu_bytes as f32 / 1e9)
-                } else if d.gpus.iter().all(|g| g.unified) {
+                } else if unified {
                     "all in the unified pool ".into()
                 } else {
                     "all in VRAM ".into()

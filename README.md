@@ -340,7 +340,7 @@ verdict names RAM as the bound at 2.5 tok/s.</sub>
 | Stage | Meter | Source |
 |---|---|---|
 | DISK | MB/s read from every whole block device | `/proc/diskstats`, plus the server's own reads and major page faults from `/proc/<pid>/io` and `/proc/<pid>/stat` |
-| RAM | GB/s of weights the CPU streams out of system RAM, *estimate* | CPU-side bytes × active fraction × steps/s; CPU-side bytes = tensor-table size minus what the cards hold. Tensor table = the GGUF tensor table, or the `*.safetensors` shard headers (header bytes only, labelled `est`) for safetensors servers |
+| RAM | GB/s of weights the CPU streams out of system RAM, *estimate* | CPU-side bytes × active fraction × steps/s; CPU-side bytes = tensor-table size minus what the cards hold. Tensor table = the GGUF tensor table, or the `*.safetensors` shard headers (header bytes only, labelled `est`) for safetensors servers. A safetensors server has no partial offload, so with a GPU present none of its weights count as CPU-side |
 | PCIe | host→device MB/s per GPU, scaled to the link (gen × lanes) | `nvidia-smi dmon -s t` (NVIDIA; unavailable for AMD). On a unified part the stage is labelled `C2C` and reads `n/a`: the traffic is NVLink-C2C and the driver exposes no counter for it |
 | VRAM | memory-controller busy % per GPU, plus the estimated GB/s of weights streamed | NVIDIA `utilization.memory` or AMD `mem_busy_percent`; bytes per step from the tensor table. On a unified part the stage is labelled `UNIFIED` and shows pool fill (server-reported occupancy over system RAM) instead — there is no memory controller to watch |
 | PREFILL | prompt tokens/s | `/slots` |

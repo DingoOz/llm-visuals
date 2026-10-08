@@ -47,9 +47,15 @@ pub fn weight_layout(detected: Option<&DetectedModel>, gpus: &[GpuStats]) -> Wei
     // A unified part has no VRAM that weights could fail to fit in: the
     // pool is the GPU, and whatever the server did not report as resident
     // (file-offloaded lookup tables) is not a CPU-side layer either.
+    //
+    // Nor does a safetensors server (vLLM, SGLang) have CPU-side layers: it
+    // loads every weight onto its cards or does not start. The clamp below
+    // is llama.cpp's partial offload; it shares the file across every card
+    // on the host, so a server pinned to one card of two would be told that
+    // the other card's share is in RAM, and the verdict would blame RAM.
     let cpu_bytes = if m.n_gpu_layers == Some(0) || gpus.is_empty() {
         total
-    } else if gpus.iter().all(|g| g.unified) {
+    } else if t.estimated || gpus.iter().all(|g| g.unified) {
         0
     } else {
         let split_sum: f32 = m.tensor_split.iter().copied().sum::<f32>().max(1.0);
@@ -407,5 +413,32 @@ mod tests {
         assert_eq!(l.cpu_bytes, 25_000_000_000 - on_gpu);
         assert_eq!(l.active_bytes, 24_000_000_000);
         assert_eq!(weight_layout(None, &gpus).known, false);
+    }
+
+    #[test]
+    fn safetensors_layout_is_never_cpu_side_on_a_gpu() {
+        let mut m = crate::demo::demo_models(4096, 1).remove(0);
+        m.tensor_split = vec![];
+        m.n_gpu_layers = None;
+        m.tensors = Some(crate::gguf::TensorSummary {
+            total_bytes: 20_000_000_000,
+            n_tensors: 1,
+            estimated: true,
+            ..Default::default()
+        });
+        // One server pinned to card 0 of two: card 1 belongs to someone else
+        // and holds none of these weights, which does not put them in RAM.
+        let gpus = vec![
+            gpu(0.0, 0.0, 22_000),
+            GpuStats {
+                index: 1,
+                ..gpu(0.0, 0.0, 400)
+            },
+        ];
+        let l = weight_layout(Some(&m), &gpus);
+        assert!(l.known);
+        assert_eq!(l.cpu_bytes, 0);
+        // With no card at all the weights can only be in RAM.
+        assert_eq!(weight_layout(Some(&m), &[]).cpu_bytes, 20_000_000_000);
     }
 }
