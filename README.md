@@ -535,7 +535,11 @@ The native `strata --serve` child holds the GPU memory and is folded into the
 server process.
 
 Everything live comes from Strata's JSON `GET /metrics`, polled no faster
-than every 400 ms. Prefill progress and generated tokens come from `live`;
+than every 400 ms. From Strata 0.1.40.2 that endpoint answers a client that
+accepts `text/plain` in Prometheus text under vLLM's metric names, so the
+poll asks for `application/json` alone; a server reached by `--endpoint` is
+recognised by the `strata:` samples in that text and then read as JSON
+(without that it would be taken for vLLM). Prefill progress and generated tokens come from `live`;
 the prefix reuse and the server's own prefill and decode times are only
 known once a request ends, so while one runs cache hit shows "—". A
 live prefill rate uses the engine's `live.prefill_tok_s_mean`, not progress

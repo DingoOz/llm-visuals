@@ -1843,7 +1843,24 @@ pub async fn probe_endpoint(
     let mut vision: Option<Vision> = None;
     let mut saw_vllm_metrics = false;
     if let Ok(body) = http_get(host, port, "/metrics", auth).await {
-        if body.contains("vllm:") {
+        // Strata 0.1.40.2+ answers this request in Prometheus text under
+        // vLLM's metric names, so it is recognised before the `vllm:` test
+        // and asked again for the JSON document its adapter reads. Older
+        // servers send that document whatever is asked.
+        let strata = if crate::strata::is_prometheus_text(&body) {
+            crate::strata::poll_metrics(host, port, auth).await
+        } else {
+            crate::strata::parse_metrics(&body)
+        };
+        if let Some(m) = strata {
+            engine = "strata".to_string();
+            if model_name.is_none() {
+                model_name = m.model;
+            }
+            if m.max_context > 0 {
+                ctx_max = Some(m.max_context);
+            }
+        } else if body.contains("vllm:") {
             saw_vllm_metrics = true;
             engine = "vllm".to_string();
             if let Some(c) = crate::vllm::parse_vllm_metrics(&body) {
@@ -1855,14 +1872,6 @@ pub async fn probe_endpoint(
             engine = "llama.cpp".to_string();
         } else if body.contains("sglang:") {
             engine = "sglang".to_string();
-        } else if let Some(m) = crate::strata::parse_metrics(&body) {
-            engine = "strata".to_string();
-            if model_name.is_none() {
-                model_name = m.model;
-            }
-            if m.max_context > 0 {
-                ctx_max = Some(m.max_context);
-            }
         }
     }
 
