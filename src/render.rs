@@ -3079,63 +3079,71 @@ impl Renderer {
         });
 
         // ---- PCIe ---------------------------------------------------------
-        let mut channels = Vec::new();
-        let mut facts = Vec::new();
-        let mut total_rx = 0.0f32;
-        for g in d.gpus {
-            let i = g.index as usize;
-            if let Some(m) = bw.pcie_rx.get(i) {
-                total_rx += m.value;
-                channels.push(Channel {
-                    label: format!("G{i}"),
-                    meter: m,
-                    text: fmt_compact(m.value),
-                });
-                let cap = m
-                    .full_scale
-                    .map(|c| format!("{:.1}G/s", c / 1000.0))
-                    .unwrap_or_else(|| "?".into());
-                facts.push(fact(
-                    &format!("G{i}"),
-                    format!("x{} g{} {cap}", g.pcie_width, g.pcie_gen),
-                    pal::TEXT,
-                ));
+        // A unified part (GB10 / DGX Spark) has no PCIe link between its
+        // accelerator and memory — traffic crosses NVLink-C2C, for which the
+        // driver publishes no counter. Say so instead of drawing a live
+        // meter that is pinned at zero.
+        let unified = !d.gpus.is_empty() && d.gpus.iter().all(|g| g.unified);
+        if unified {
+            stages.push(Stage {
+                id: StageId::Pcie,
+                title: "C2C",
+                accent: pal::BLUE,
+                value: "n/a".into(),
+                unit: "",
+                tag: "",
+                channels: Vec::new(),
+                facts: vec![dim("cpu ↔ accelerator link".into())],
+                missing: Some("no bandwidth counter\non a unified part".into()),
+            });
+        } else {
+            let mut channels = Vec::new();
+            let mut facts = Vec::new();
+            let mut total_rx = 0.0f32;
+            for g in d.gpus {
+                let i = g.index as usize;
+                if let Some(m) = bw.pcie_rx.get(i) {
+                    total_rx += m.value;
+                    channels.push(Channel {
+                        label: format!("G{i}"),
+                        meter: m,
+                        text: fmt_compact(m.value),
+                    });
+                    let cap = m
+                        .full_scale
+                        .map(|c| format!("{:.1}G/s", c / 1000.0))
+                        .unwrap_or_else(|| "?".into());
+                    facts.push(fact(
+                        &format!("G{i}"),
+                        format!("x{} g{} {cap}", g.pcie_width, g.pcie_gen),
+                        pal::TEXT,
+                    ));
+                }
             }
+            stages.push(Stage {
+                id: StageId::Pcie,
+                title: "PCIe",
+                accent: pal::BLUE,
+                value: fmt_compact(total_rx),
+                unit: "MB/s",
+                tag: "",
+                channels,
+                facts,
+                missing: if !bw.host_seen {
+                    None
+                } else if d.gpus.is_empty() {
+                    Some("no GPU".into())
+                } else if !host.pcie_ok {
+                    Some("PCIe throughput\nunavailable".into())
+                } else {
+                    None
+                },
+            });
         }
-        stages.push(Stage {
-            id: StageId::Pcie,
-            title: "PCIe",
-            accent: pal::BLUE,
-            value: fmt_compact(total_rx),
-            unit: "MB/s",
-            tag: "",
-            channels,
-            facts,
-            missing: if !bw.host_seen {
-                None
-            } else if d.gpus.is_empty() {
-                Some("no GPU".into())
-            } else if !host.pcie_ok {
-                Some("PCIe throughput\nunavailable".into())
-            } else {
-                None
-            },
-        });
 
         // ---- VRAM ---------------------------------------------------------
         let mut channels = Vec::new();
         let mut busiest = 0.0f32;
-        for g in d.gpus {
-            let i = g.index as usize;
-            if let Some(m) = bw.vram_busy.get(i) {
-                busiest = busiest.max(m.value);
-                channels.push(Channel {
-                    label: format!("G{i}"),
-                    meter: m,
-                    text: format!("{:.0}%", m.value),
-                });
-            }
-        }
         let mut facts = vec![fact(
             "weights",
             format!("{:.1} GB/s", bw.vram.value),
@@ -3144,22 +3152,73 @@ impl Renderer {
         if layout.known {
             facts.push(fact("per step", gb(layout.per_step().1 as u64), pal::TEXT));
         }
-        facts.push(dim("mem ctrl busy %".into()));
-        stages.push(Stage {
-            id: StageId::Vram,
-            title: "VRAM",
-            accent: pal::TEAL,
-            value: format!("{busiest:.0}"),
-            unit: "%",
-            tag: "busy",
-            channels,
-            facts,
-            missing: if d.gpus.is_empty() {
-                Some("no GPU".into())
-            } else {
-                None
-            },
-        });
+        if unified {
+            // No memory controller to meter: show the shared pool filling
+            // instead — the servers' own weight + KV + graph report over
+            // system RAM, the same numbers as the UNIFIED bar in the GPU panel.
+            for g in d.gpus {
+                let i = g.index as usize;
+                if let Some(m) = bw.vram_pool.get(i) {
+                    busiest = busiest.max(m.value);
+                    channels.push(Channel {
+                        label: format!("G{i}"),
+                        meter: m,
+                        text: format!("{:.0}%", m.value),
+                    });
+                }
+            }
+            if let Some(g) = d.gpus.iter().find(|g| g.unified && g.mem_total_mb > 0) {
+                facts.push(fact(
+                    "pool",
+                    format!(
+                        "{:.1}/{:.1} GiB",
+                        g.mem_used_mb as f64 / 1024.0,
+                        g.mem_total_mb as f64 / 1024.0
+                    ),
+                    pal::TEXT,
+                ));
+            }
+            facts.push(dim("unified pool fill %".into()));
+            stages.push(Stage {
+                id: StageId::Vram,
+                title: "UNIFIED",
+                accent: pal::TEAL,
+                value: format!("{busiest:.0}"),
+                unit: "%",
+                tag: "pool",
+                channels,
+                facts,
+                missing: None,
+            });
+        } else {
+            for g in d.gpus {
+                let i = g.index as usize;
+                if let Some(m) = bw.vram_busy.get(i) {
+                    busiest = busiest.max(m.value);
+                    channels.push(Channel {
+                        label: format!("G{i}"),
+                        meter: m,
+                        text: format!("{:.0}%", m.value),
+                    });
+                }
+            }
+            facts.push(dim("mem ctrl busy %".into()));
+            stages.push(Stage {
+                id: StageId::Vram,
+                title: "VRAM",
+                accent: pal::TEAL,
+                value: format!("{busiest:.0}"),
+                unit: "%",
+                tag: "busy",
+                channels,
+                facts,
+                missing: if d.gpus.is_empty() {
+                    Some("no GPU".into())
+                } else {
+                    None
+                },
+            });
+        }
 
         // ---- prefill ------------------------------------------------------
         let p = d.perf;
@@ -3216,24 +3275,43 @@ impl Renderer {
 
     fn render_pipeline(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
         let layout = &d.perf.bw.layout;
-        let title = " ◆ MEMORY PIPELINE  disk → RAM → PCIe → VRAM → prefill → decode ";
+        // The header names the same hops the stage boxes below do.
+        let unified = !d.gpus.is_empty() && d.gpus.iter().all(|g| g.unified);
+        let title = if unified {
+            " ◆ MEMORY PIPELINE  disk → RAM → C2C → UNIFIED → prefill → decode "
+        } else {
+            " ◆ MEMORY PIPELINE  disk → RAM → PCIe → VRAM → prefill → decode "
+        };
+        let est = d
+            .detected
+            .and_then(|m| m.tensors.as_ref())
+            .is_some_and(|t| t.estimated);
         let right_txt = if layout.known {
             format!(
-                " {} tensors · {:.1} GB · {:.1} GB per step · {}",
-                d.detected
-                    .and_then(|m| m.tensors.as_ref())
-                    .map(|t| t.n_tensors)
-                    .unwrap_or(0),
+                "{} {:.1} GB · {:.1} GB per step · {}",
+                if est {
+                    " est from safetensors:".to_string()
+                } else {
+                    format!(
+                        " {} tensors ·",
+                        d.detected
+                            .and_then(|m| m.tensors.as_ref())
+                            .map(|t| t.n_tensors)
+                            .unwrap_or(0)
+                    )
+                },
                 layout.total_bytes as f32 / 1e9,
                 layout.active_bytes as f32 / 1e9,
                 if layout.cpu_bytes > layout.total_bytes / 50 {
                     format!("~{:.1} GB on CPU ", layout.cpu_bytes as f32 / 1e9)
+                } else if unified {
+                    "all in the unified pool ".into()
                 } else {
                     "all in VRAM ".into()
                 }
             )
         } else {
-            " no GGUF tensor table: RAM / VRAM streams unknown ".into()
+            " no tensor table: RAM / VRAM streams unknown ".into()
         };
         let right = Line::from(Span::styled(
             right_txt,
@@ -3497,8 +3575,20 @@ impl Renderer {
             None => pal::TEXT_DIM,
         };
         let title = " ◆ BOTTLENECK ";
+        let layout = &d.perf.bw.layout;
+        let note_text = if !layout.known {
+            " RAM / VRAM streams need a GGUF or safetensors tensor table "
+        } else if d
+            .detected
+            .and_then(|m| m.tensors.as_ref())
+            .is_some_and(|t| t.estimated)
+        {
+            " RAM / VRAM streams = bytes per step × steps per s, est from the safetensors shards "
+        } else {
+            " RAM / VRAM streams = bytes per step × steps per s from the GGUF tensor table "
+        };
         let note = Line::from(Span::styled(
-            " RAM / VRAM streams = bytes per step × steps per s from the GGUF tensor table ",
+            note_text,
             Style::default().fg(pal::c(pal::TEXT_MUTED)),
         ))
         .right_aligned();

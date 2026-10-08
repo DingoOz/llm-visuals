@@ -380,6 +380,10 @@ pub struct BandwidthStats {
     pub pcie_tx: Vec<f32>,
     /// nvidia-smi memory-controller busy %, per GPU index.
     pub vram_busy: Vec<Meter>,
+    /// Unified-memory pool fill % (server-reported occupancy over system
+    /// RAM), per GPU index. The stage the busy meter cannot cover on a part
+    /// without device memory: it always reads 0 there.
+    pub vram_pool: Vec<Meter>,
     /// Estimated weight stream out of VRAM across all GPUs, GB/s.
     pub vram: Meter,
     pub prefill: Meter,
@@ -436,6 +440,7 @@ impl BandwidthStats {
             pcie_rx: Vec::new(),
             pcie_tx: Vec::new(),
             vram_busy: Vec::new(),
+            vram_pool: Vec::new(),
             vram: Meter::auto(100.0),
             prefill: Meter::auto(100.0),
             decode: Meter::auto(10.0),
@@ -449,6 +454,7 @@ impl BandwidthStats {
             self.pcie_rx.push(Meter::auto(1000.0));
             self.pcie_tx.push(0.0);
             self.vram_busy.push(Meter::fixed(100.0));
+            self.vram_pool.push(Meter::fixed(100.0));
         }
         for g in gpus {
             let i = g.index as usize;
@@ -821,6 +827,13 @@ impl PerfTracker {
         for g in gpus {
             let i = g.index as usize;
             self.bw.vram_busy[i].update(g.utilization_mem, now, dt);
+            // A unified part has no memory controller to watch; its VRAM
+            // stage shows how full the shared pool is instead. Occupancy is
+            // the server's own report (weight + KV + graph) over system RAM.
+            if g.unified && g.mem_total_mb > 0 {
+                let fill = g.mem_used_mb as f32 * 100.0 / g.mem_total_mb as f32;
+                self.bw.vram_pool[i].update(fill.min(100.0), now, dt);
+            }
             push(&mut self.util_hist[i], g.utilization_gpu);
             push(&mut self.power_hist[i], g.power_watts);
             push(&mut self.temp_hist[i], g.temperature.unwrap_or(0.0));
@@ -1258,6 +1271,42 @@ mod tests {
             steps
         );
         assert!((p.bw.vram.value - 1.5 * steps).abs() < 1e-3);
+    }
+
+    #[test]
+    fn unified_pool_fill_drives_the_pool_meter() {
+        let mut p = PerfTracker::new();
+        let t0 = Instant::now();
+        let g = || GpuStats {
+            index: 0,
+            unified: true,
+            mem_total_mb: 120_000,
+            mem_used_mb: 60_000,
+            utilization_mem: 0.0,
+            ..Default::default()
+        };
+        p.observe_gpu(&[g()], t0);
+        assert!(
+            p.bw.vram_busy[0].value < 1.0,
+            "no controller on a unified part"
+        );
+        assert!(
+            (p.bw.vram_pool[0].value - 50.0).abs() < 0.1,
+            "{}",
+            p.bw.vram_pool[0].value
+        );
+        // A discrete card leaves the pool meter at zero.
+        let d = GpuStats {
+            index: 1,
+            unified: false,
+            mem_total_mb: 24_000,
+            mem_used_mb: 20_000,
+            utilization_mem: 80.0,
+            ..Default::default()
+        };
+        p.observe_gpu(&[g(), d], t0 + Duration::from_millis(200));
+        assert!(p.bw.vram_pool[1].value < 1.0);
+        assert!((p.bw.vram_busy[1].value - 80.0).abs() < 0.1);
     }
 
     #[test]

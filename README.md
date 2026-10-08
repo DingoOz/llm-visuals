@@ -340,18 +340,26 @@ verdict names RAM as the bound at 2.5 tok/s.</sub>
 | Stage | Meter | Source |
 |---|---|---|
 | DISK | MB/s read from every whole block device | `/proc/diskstats`, plus the server's own reads and major page faults from `/proc/<pid>/io` and `/proc/<pid>/stat` |
-| RAM | GB/s of weights the CPU streams out of system RAM, *estimate* | CPU-side bytes × active fraction × steps/s; CPU-side bytes = GGUF size minus what the cards hold |
-| PCIe | host→device MB/s per GPU, scaled to the link (gen × lanes) | `nvidia-smi dmon -s t` (NVIDIA; unavailable for AMD) |
-| VRAM | memory-controller busy % per GPU, plus the estimated GB/s of weights streamed | NVIDIA `utilization.memory` or AMD `mem_busy_percent`; bytes per step from the GGUF tensor table |
+| RAM | GB/s of weights the CPU streams out of system RAM, *estimate* | CPU-side bytes × active fraction × steps/s; CPU-side bytes = tensor-table size minus what the cards hold. Tensor table = the GGUF tensor table, or the `*.safetensors` shard headers (header bytes only, labelled `est`) for safetensors servers. A safetensors server has no partial offload, so with a GPU present none of its weights count as CPU-side |
+| PCIe | host→device MB/s per GPU, scaled to the link (gen × lanes) | `nvidia-smi dmon -s t` (NVIDIA; unavailable for AMD). On a unified part the stage is labelled `C2C` and reads `n/a`: the traffic is NVLink-C2C and the driver exposes no counter for it |
+| VRAM | memory-controller busy % per GPU, plus the estimated GB/s of weights streamed | NVIDIA `utilization.memory` or AMD `mem_busy_percent`; bytes per step from the tensor table. On a unified part the stage is labelled `UNIFIED` and shows pool fill (server-reported occupancy over system RAM) instead — there is no memory controller to watch |
 | PREFILL | prompt tokens/s | `/slots` |
 | DECODE | generated tokens/s | `/slots` |
 
-"Bytes per step" is read straight from the GGUF tensor table: every tensor
-except the embedding lookup, with `ffn_*_exps` tensors scaled by
+"Bytes per step" is read from the tensor table: every tensor except the
+embedding lookup, with `ffn_*_exps` tensors scaled by
 `expert_used_count / expert_count`, so a 35B-A3B MoE reads ~2.7 GB per token
-while a dense 27B Q6 reads ~24 GB. A step is one verification pass under
-MTP / speculative decoding (from `/metrics`), one token otherwise, and one
-micro-batch (`-ub`, default 512) during prefill. The verdict is a rule
+while a dense 27B Q6 reads ~24 GB. A GGUF server reports the table itself; a
+safetensors server (SGLang, vLLM) gets the same summary from the headers of
+its `*.safetensors` shards — file sizes are exact, the per-token projection
+rests on the config's expert counts, so every number derived from it is
+labelled `est`. The directory is found through the HF hub cache when the
+server names a repo (`RadixArk/Model-NVFP4`) or an alias of a cached repo
+instead of a host path: the snapshot `refs/main` points at, and for an alias
+only when it is the start of exactly one cached model's name — two quants
+under one alias are left unresolved rather than guessed. A step is one
+verification pass under MTP / speculative decoding (from `/metrics`), one
+token otherwise, and one micro-batch (`-ub`, default 512) during prefill. The verdict is a rule
 chain: disk activity beats everything (weights are paging), then a PCIe link
 past a third of its cap, then a memory controller past 75 %, then CPU-side
 layers with an idle GPU, then a busy GPU (compute bound); otherwise no hop is
@@ -651,9 +659,15 @@ read as absent, not as errors. The two bars show the same pool at different
 units and different scopes: `UNIFIED` is GiB like every VRAM bar and counts
 only what the servers report as model occupancy; the `RAM` row is decimal GB
 (`/ 1e9`) and counts the whole system (`MemTotal − MemAvailable`). The same
-119.6 GiB pool is 128.5 G and 119 GiB to btop. The `b` memory pipeline's PCIe
-and VRAM stages have no hardware to measure on a unified part — do not blame
-them for a decode bottleneck.
+119.6 GiB pool is 128.5 G and 119 GiB to btop. The `b` memory pipeline says the
+same thing in its own labels: the PCIe hop becomes `C2C` reading `n/a` (no
+bandwidth counter exists on a unified part) and the VRAM hop becomes `UNIFIED`
+showing pool fill. Neither absent sensor may decide the bottleneck verdict —
+on a unified part a saturated-looking bus is not reportable, so the verdict
+says "GPU compute bound … no memory-controller or C2C counter exists here".
+The RAM / VRAM stream estimates still work there: SGLang names a HF repo, the
+weights are found in `~/.cache/huggingface/hub`, and the shard headers give the
+same tensor table a GGUF file would (labelled `est`).
 
 **AMD GPU panel is unavailable.** AMD telemetry requires Linux with the
 `amdgpu` driver and readable DRM sysfs/hwmon files under `/sys/class/drm`.
