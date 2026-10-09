@@ -15,7 +15,7 @@
 //! closed. MTP draft counts (Strata 0.1.35+) likewise move only when a
 //! request ends.
 
-use crate::observe::{http_get, HttpAuth, LiveStats, SpecMetrics};
+use crate::observe::{http_get_json, HttpAuth, LiveStats, SpecMetrics};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
@@ -47,6 +47,9 @@ pub struct StrataMetrics {
     pub prompt_tokens: usize,
     /// Prefill position reached while reading; a reused prefix counts as read.
     pub prompt_read: Option<usize>,
+    /// The engine's mean rate over the prompt tokens read so far
+    /// (`live.prefill_tok_s_mean`). None on servers without it.
+    pub prefill_tps: Option<f32>,
     pub generated: usize,
     /// Finished requests since the server started.
     pub requests_done: u64,
@@ -121,6 +124,9 @@ pub fn parse_metrics(body: &str) -> Option<StrataMetrics> {
         queued: usize_at(live, "queued").unwrap_or(0),
         prompt_tokens: usize_at(live, "prompt_tokens").unwrap_or(0),
         prompt_read: usize_at(live, "prompt_read"),
+        prefill_tps: f64_at(live, "prefill_tok_s_mean")
+            .filter(|r| *r > 0.0)
+            .map(|r| r as f32),
         generated: usize_at(live, "generated").unwrap_or(0),
         requests_done: total("requests").unwrap_or(0),
         last,
@@ -138,7 +144,9 @@ fn usize_at(v: &Value, k: &str) -> Option<usize> {
 }
 
 pub async fn poll_metrics(host: &str, port: u16, auth: &HttpAuth) -> Option<StrataMetrics> {
-    let body = http_get(host, port, "/metrics", auth).await.ok()?;
+    // JSON only: a client that accepts `text/plain` is taken for a
+    // Prometheus scraper and gets the text format.
+    let body = http_get_json(host, port, "/metrics", auth).await.ok()?;
     parse_metrics(&body)
 }
 
@@ -172,6 +180,12 @@ pub fn live_stats(m: &StrataMetrics) -> LiveStats {
         } else {
             m.prompt_tokens
         };
+        // `prompt_read` moves once per prefill chunk, seconds apart on a
+        // long prompt. Until this request's first chunk the mean is still
+        // the previous request's.
+        if m.state == "reading" && m.prompt_read.is_some() {
+            s.prefill_tps = m.prefill_tps;
+        }
         s.decoded = m.generated;
         // The reused prefix is reported only when the request ends.
         s.cache_unknown = true;
@@ -331,6 +345,25 @@ mod tests {
         assert_eq!(s.decoded, 50);
         assert!((s.ttft_secs - 1.5).abs() < 1e-9);
         assert!((s.itl_sum - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn prefill_rate_is_the_servers_once_this_prompt_has_progress() {
+        let live = |rest: &str| {
+            let m = parse_metrics(&format!(
+                r#"{{"engine":{{}},"live":{{"prompt_tokens":121050,"prefill_tok_s_mean":1109.1,{rest}}}}}"#
+            ))
+            .unwrap();
+            live_stats(&m)
+        };
+        // Before the first chunk the mean belongs to the previous request.
+        let queued = live(r#""state":"reading","prompt_read":null"#);
+        assert_eq!(queued.prefill_tps, None);
+        let reading = live(r#""state":"reading","prompt_read":90112"#);
+        assert_eq!(reading.prompt_processed, 90112);
+        assert_eq!(reading.prefill_tps, Some(1109.1));
+        let generating = live(r#""state":"generating","generated":10"#);
+        assert_eq!(generating.prefill_tps, None);
     }
 
     #[test]

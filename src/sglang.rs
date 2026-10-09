@@ -371,6 +371,7 @@ impl SglangAdapter {
             prompt_tokens,
             prompt_processed,
             decoded,
+            prefill_tps: None,
             decoded_present: true,
             cache_tokens,
             processing: running,

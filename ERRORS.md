@@ -2,7 +2,7 @@
 
 ## Summary
 
-26 entries (as of 2026-10-06). Recurring themes:
+28 entries (as of 2026-10-08). Recurring themes:
 
 - **Optional or missing telemetry treated as a real value** (Logic, most common): a missing counter read as 0, record close gated on optional TTFT, unknown ctx rendered as full, model ownership derived from an unknown weight estimate. Rule of thumb: keep "unknown" distinct from zero and never gate state or ownership on an optional measurement.
 - **Under-discriminating matches when resolving processes/devices**: docker-proxy matched by IP only, comm-name gating, xe fans keyed by a constant path component, env GPU masks merged with host indices. Match on every discriminating field and prefer authoritative (driver/host) sources over inferred ones.
@@ -272,3 +272,23 @@
 - **Root cause:** With Strata's batch slots, an older request finishing bumps the finished count while the newest is still running, so its id changed mid-flight and the request log split it in two.
 - **Fix applied:** The id is finished + in flight (`live.running`), the newest request's ordinal, which is unchanged when an older one ends; slot counts come from `live.parallel` / `live.running`.
 - **Prevention rule:** A synthetic id must be invariant under every event except that request's own start; test it with a concurrent request finishing.
+
+### Shared Accept header selected a different /metrics format — 2026-10-08
+
+- **Severity:** High
+- **Category:** API Misuse
+- **File(s):** `src/observe.rs`, `src/strata.rs`, `src/model_detect.rs`
+- **Pattern:** One `Accept: application/json, text/plain, */*` header on every poll, sent to a server that picks its response format from it.
+- **Root cause:** From Strata 0.1.40.2 `GET /metrics` answers a client that accepts `text/plain` with Prometheus text under vLLM's metric names. The JSON parser returned `None` on every poll, so the model was attached but showed no request, context or token rate; an explicit `--endpoint` was classified as vLLM.
+- **Fix applied:** `http_get_json` sends `Accept: application/json` for Strata's `/metrics`; the endpoint probe asks for the JSON document before trusting `vllm:` names. A mock server that negotiates on `Accept` covers both.
+- **Prevention rule:** Ask each endpoint for the one format its parser reads, and test adapters against a server that negotiates content, not only against a captured body.
+
+### Rate window shorter than the counter's update interval — 2026-10-08
+
+- **Severity:** Medium
+- **Category:** Logic
+- **File(s):** `src/perf.rs`, `src/strata.rs`
+- **Pattern:** A 1 s sliding-window rate over a progress counter that the server advances once per chunk, seconds apart.
+- **Root cause:** Strata's `live.prompt_read` moves 8192 tokens every ~8 s on a long prompt: prefill read ~20k tok/s for a second after each chunk and 0 the rest of the time, and the peak recorded the spike.
+- **Fix applied:** While the prompt is read, `LiveStats::prefill_tps` carries the engine's own `live.prefill_tok_s_mean` and the tracker shows it in place of the window; ignored until the request's first chunk, when the mean is still the previous request's.
+- **Prevention rule:** Check how often a counter moves before windowing it; when the server measures the rate itself, show that. Replay a capture of a long request through the tracker.

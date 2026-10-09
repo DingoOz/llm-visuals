@@ -427,7 +427,7 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | Metric | Source |
 |---|---|
 | decode tok/s | llama.cpp: delta of `n_decoded` from `GET /slots`. When that field is absent, delta of `llamacpp:tokens_predicted_total` from `GET /metrics`, anchored at the start of the request. vLLM: `/metrics` generation counter. SGLang: `decode_moments[5]` from `GET /v1/loads`. Strata: `live.generated` from `GET /metrics`. 1 s sliding window. Polls go to the server's `--host` (loopback when it bound `0.0.0.0`) |
-| prefill tok/s | llama.cpp: `n_prompt_tokens_processed`. vLLM: prompt-token counter. SGLang: `total_prefill_uncached_tokens`, or `sglang:realtime_tokens_total{mode="prefill_compute"}` with `--enable-metrics`. Strata: `live.prompt_read` from `GET /metrics` |
+| prefill tok/s | llama.cpp: `n_prompt_tokens_processed`. vLLM: prompt-token counter. SGLang: `total_prefill_uncached_tokens`, or `sglang:realtime_tokens_total{mode="prefill_compute"}` with `--enable-metrics`. Strata: `live.prefill_tok_s_mean`, the engine's mean over the prompt tokens read so far (`live.prompt_read` advances once per chunk, seconds apart) |
 | time to first token | slot turning busy → first decoded token, quantised to the poll interval. Strata: the finished request's `prompt_ms`, the server's time reading the new prompt tokens (time spent queued is not in it) |
 | tok/J | decode tok/s ÷ summed GPU power draw |
 | cache hit | llama.cpp: `n_prompt_tokens_cache / n_prompt_tokens`. SGLang without `--enable-metrics` is unknown (shown as "—"). Strata: the finished request's `reused`, unknown ("—") while it runs |
@@ -527,7 +527,9 @@ The native `strata --serve` child holds the GPU memory and is folded into the
 server process.
 
 Everything live comes from Strata's JSON `GET /metrics`, polled no faster
-than every 400 ms. Prefill progress and generated tokens come from `live`;
+than every 400 ms and requested with `Accept: application/json` alone: from
+0.1.40.2 a client that accepts `text/plain` gets Prometheus text instead.
+Prefill progress and generated tokens come from `live`;
 the prefix reuse and the server's own prefill and decode times are only
 known once a request ends, so while one runs cache hit shows "—". A
 batching engine (`live.parallel`) is followed by its newest request. The MTP

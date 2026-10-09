@@ -709,6 +709,13 @@ impl PerfTracker {
         }
         self.decode_tps = self.decode_win.rate(now);
         self.prefill_tps = self.prefill_win.rate(now);
+        // Progress that lands in chunks seconds apart (Strata) leaves the
+        // window empty between two of them; the server's own rate holds.
+        if self.phase == Phase::Prefill {
+            if let Some(rate) = s.prefill_tps {
+                self.prefill_tps = rate;
+            }
+        }
         // vLLM reports token deltas only at completion, so the windowed
         // prefill rate would divide the whole prompt by one poll
         // interval. When a request closes in this window, use its
@@ -917,6 +924,38 @@ mod tests {
     /// vLLM-shaped slot: counters jump only at completion; the
     /// optional `closing` view is what the adapter hands over when a
     /// completion and a successor's admission share one poll.
+    #[test]
+    fn chunked_prefill_holds_the_server_rate() {
+        // Strata on a 121k prompt: `prompt_read` moves 8192 tokens every
+        // ~8 s, polled at 400 ms.
+        let mut p = PerfTracker::new();
+        let t0 = Instant::now();
+        let step = Duration::from_millis(400);
+        let reading = |read: usize| LiveStats {
+            prefill_tps: Some(1100.0),
+            ..slot(4, true, 121_050, read, 0)
+        };
+        p.observe(&slot(3, false, 0, 0, 0), t0);
+        let mut t = t0;
+        for chunk in 1..=3usize {
+            for _ in 0..20 {
+                t += step;
+                p.observe(&reading(chunk * 8192), t);
+                assert_eq!(p.phase, Phase::Prefill);
+                assert!((p.prefill_tps - 1100.0).abs() < 1.0, "{}", p.prefill_tps);
+            }
+        }
+        assert!((p.peak_prefill_tps - 1100.0).abs() < 1.0);
+        // Generating: the window again, which empties within a second.
+        for i in 1..=4 {
+            t += step;
+            p.observe(&slot(4, true, 121_050, 121_050, i * 17), t);
+        }
+        assert_eq!(p.phase, Phase::Decode);
+        assert_eq!(p.prefill_tps, 0.0);
+        assert!(p.decode_tps > 30.0, "{}", p.decode_tps);
+    }
+
     fn vllm_slot(
         id: i64,
         processing: bool,

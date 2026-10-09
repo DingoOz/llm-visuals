@@ -57,14 +57,19 @@ impl HttpAuth {
     }
 }
 
-fn http_request(host: &str, port: u16, path: &str, auth: &HttpAuth) -> String {
+/// What every poll accepts: JSON from `/slots`, Prometheus text from `/metrics`.
+const ACCEPT_ANY: &str = "application/json, text/plain, */*";
+/// For a `/metrics` that is JSON unless the client accepts text (Strata).
+const ACCEPT_JSON: &str = "application/json";
+
+fn http_request(host: &str, port: u16, path: &str, accept: &str, auth: &HttpAuth) -> String {
     let authority = if host.contains(':') && !host.starts_with('[') {
         format!("[{host}]:{port}")
     } else {
         format!("{host}:{port}")
     };
     format!(
-        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nAccept: application/json, text/plain, */*\r\n{}\r\n",
+        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nAccept: {accept}\r\n{}\r\n",
         auth.authorization_header()
     )
 }
@@ -77,6 +82,10 @@ pub struct LiveStats {
     /// Prompt tokens pushed through prefill so far in this request (0 when idle).
     pub prompt_processed: usize,
     pub decoded: usize,
+    /// Server-measured prefill rate while the prompt is read, for a server
+    /// whose progress counter moves in chunks seconds apart (Strata). The
+    /// 1 s rate window would read zero between two chunks.
+    pub prefill_tps: Option<f32>,
     /// False when this `/slots` sample omitted `n_decoded`. A missing field
     /// is not a real zero: recent llama.cpp dev builds leave it out while
     /// generating, and the poller then uses `tokens_predicted_total`.
@@ -419,6 +428,7 @@ pub fn parse_slots(body: &str) -> Option<LiveStats> {
         prompt_tokens: u("n_prompt_tokens"),
         prompt_processed: u("n_prompt_tokens_processed"),
         decoded,
+        prefill_tps: None,
         decoded_present,
         cache_tokens: u("n_prompt_tokens_cache"),
         processing,
@@ -467,12 +477,33 @@ pub async fn http_get(
     path: &str,
     auth: &HttpAuth,
 ) -> Result<String, HttpError> {
+    http_get_accept(host, port, path, ACCEPT_ANY, auth).await
+}
+
+/// `http_get` that accepts only JSON. Strata's `/metrics` answers a client
+/// that accepts `text/plain` with Prometheus text instead of its JSON.
+pub async fn http_get_json(
+    host: &str,
+    port: u16,
+    path: &str,
+    auth: &HttpAuth,
+) -> Result<String, HttpError> {
+    http_get_accept(host, port, path, ACCEPT_JSON, auth).await
+}
+
+async fn http_get_accept(
+    host: &str,
+    port: u16,
+    path: &str,
+    accept: &str,
+    auth: &HttpAuth,
+) -> Result<String, HttpError> {
     let connect = TcpStream::connect((host, port));
     let mut stream = tokio::time::timeout(Duration::from_millis(500), connect)
         .await
         .map_err(|_| HttpError::ConnectTimeout)?
         .map_err(HttpError::Connect)?;
-    let req = http_request(host, port, path, auth);
+    let req = http_request(host, port, path, accept, auth);
     stream
         .write_all(req.as_bytes())
         .await
@@ -498,21 +529,39 @@ mod tests {
     #[test]
     fn authenticated_request_uses_bearer_header() {
         let auth = HttpAuth(Some(Arc::from("test-secret")));
-        let request = http_request("127.0.0.1", 11434, "/metrics", &auth);
+        let request = http_request("127.0.0.1", 11434, "/metrics", ACCEPT_ANY, &auth);
         assert!(request.contains("Authorization: Bearer test-secret\r\n"));
         assert!(request.ends_with("\r\n\r\n"));
 
-        let request = http_request("127.0.0.1", 11434, "/metrics", &HttpAuth::default());
+        let request = http_request(
+            "127.0.0.1",
+            11434,
+            "/metrics",
+            ACCEPT_ANY,
+            &HttpAuth::default(),
+        );
         assert!(!request.contains("Authorization:"));
+
+        // Strata gives a client that accepts text its Prometheus format.
+        let json = http_request(
+            "127.0.0.1",
+            8095,
+            "/metrics",
+            ACCEPT_JSON,
+            &HttpAuth::default(),
+        );
+        assert!(json.contains("Accept: application/json\r\n"));
+        assert!(!json.contains("text/plain"));
 
         let detected = HttpAuth::from_token(Some("cmdline-key".into()));
         let file = HttpAuth::from_token(Some("file-key".into()));
-        let request = http_request("127.0.0.1", 8080, "/slots", &detected.or(&file));
+        let request = http_request("127.0.0.1", 8080, "/slots", ACCEPT_ANY, &detected.or(&file));
         assert!(request.contains("Authorization: Bearer cmdline-key\r\n"));
         let request = http_request(
             "127.0.0.1",
             8080,
             "/slots",
+            ACCEPT_ANY,
             &HttpAuth::from_token(None).or(&file),
         );
         assert!(request.contains("Authorization: Bearer file-key\r\n"));

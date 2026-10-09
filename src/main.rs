@@ -1389,6 +1389,68 @@ mod tests {
         (port, shutdown_tx)
     }
 
+    const STRATA_JSON: &str = r#"{"engine":{"model":"strata-test","max_context":8192},"live":{"state":"idle"},"totals":{"requests":3}}"#;
+    const STRATA_PROMETHEUS: &str =
+        "# TYPE vllm:num_requests_running gauge\nvllm:num_requests_running{model_name=\"strata-test\"} 0\n";
+
+    /// Strata's `/metrics`: JSON, or Prometheus text under vLLM's metric
+    /// names for a client that accepts `text/plain`.
+    async fn spawn_mock_strata() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let Ok(n) = stream.read(&mut buf).await else {
+                        return;
+                    };
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let (status, body) = if !req.starts_with("GET /metrics") {
+                        ("404 Not Found", "")
+                    } else if req.contains("text/plain") {
+                        ("200 OK", STRATA_PROMETHEUS)
+                    } else {
+                        ("200 OK", STRATA_JSON)
+                    };
+                    let resp = format!(
+                        "HTTP/1.0 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = stream.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn strata_metrics_are_asked_for_as_json() {
+        let port = spawn_mock_strata().await;
+        let auth = HttpAuth::default();
+        // The shared Accept header gets the scraper's text.
+        let text = observe::http_get("127.0.0.1", port, "/metrics", &auth)
+            .await
+            .unwrap();
+        assert!(strata::parse_metrics(&text).is_none());
+
+        let m = strata::poll_metrics("127.0.0.1", port, &auth)
+            .await
+            .expect("JSON metrics");
+        assert_eq!(m.requests_done, 3);
+
+        // An explicit endpoint is Strata, not the vLLM its text resembles.
+        let ep = format!("http://127.0.0.1:{port}");
+        let args =
+            Args::try_parse_from(["llm-visuals", "--endpoint", &ep, "--pid", "999999"]).unwrap();
+        let (models, err) = discover(&args, &auth).await;
+        assert!(err.is_none(), "Unexpected error: {err:?}");
+        let found = models.iter().find(|m| m.port == Some(port)).unwrap();
+        assert_eq!(found.engine, "strata");
+        assert_eq!(found.name, "strata-test");
+        assert_eq!(found.ctx_max, Some(8192));
+    }
+
     #[tokio::test]
     async fn discover_with_explicit_endpoint() {
         let (port, _shutdown) = spawn_mock_server(CANNED_VLLM_MODELS, CANNED_VLLM_METRICS).await;

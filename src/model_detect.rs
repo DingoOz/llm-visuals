@@ -1678,7 +1678,7 @@ pub async fn probe_endpoint(
     path_prefix: &str,
     auth: &crate::observe::HttpAuth,
 ) -> Option<DetectedModel> {
-    use crate::observe::http_get;
+    use crate::observe::{http_get, http_get_json};
 
     let models_path = if path_prefix.ends_with("/v1") {
         format!("{path_prefix}/models")
@@ -1739,7 +1739,25 @@ pub async fn probe_endpoint(
     let mut vision: Option<Vision> = None;
     let mut saw_vllm_metrics = false;
     if let Ok(body) = http_get(host, port, "/metrics", auth).await {
-        if body.contains("vllm:") {
+        // Strata serves this probe Prometheus text under vLLM's metric
+        // names; asked for JSON alone it gives its own document.
+        let strata = if body.contains("vllm:") {
+            http_get_json(host, port, "/metrics", auth)
+                .await
+                .ok()
+                .and_then(|json| crate::strata::parse_metrics(&json))
+        } else {
+            crate::strata::parse_metrics(&body)
+        };
+        if let Some(m) = strata {
+            engine = "strata".to_string();
+            if model_name.is_none() {
+                model_name = m.model;
+            }
+            if m.max_context > 0 {
+                ctx_max = Some(m.max_context);
+            }
+        } else if body.contains("vllm:") {
             saw_vllm_metrics = true;
             engine = "vllm".to_string();
             if let Some(c) = crate::vllm::parse_vllm_metrics(&body) {
@@ -1751,14 +1769,6 @@ pub async fn probe_endpoint(
             engine = "llama.cpp".to_string();
         } else if body.contains("sglang:") {
             engine = "sglang".to_string();
-        } else if let Some(m) = crate::strata::parse_metrics(&body) {
-            engine = "strata".to_string();
-            if model_name.is_none() {
-                model_name = m.model;
-            }
-            if m.max_context > 0 {
-                ctx_max = Some(m.max_context);
-            }
         }
     }
 
