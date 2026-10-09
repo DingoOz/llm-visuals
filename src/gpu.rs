@@ -345,11 +345,11 @@ impl GpuBackend {
 
 // ---------------- Apple Silicon (macmon / powermetrics) ----------------
 //
-// Ported from termmon's macOS collection: `macmon pipe` (vendored at
-// ~/bin/macmon or on PATH) is the sudoless source of GPU util, power, temp,
-// clock and fans; root-only `powermetrics` is the fallback for util/power;
-// chip name and core count come from `system_profiler` once, exactly like
-// termmon's `mac_gpu_metadata`. Apple Silicon has no device memory: the
+// Ported from termmon's macOS collection: `powermetrics` (root, or a live
+// sudo timestamp) is the preferred source of GPU util and power; `macmon
+// pipe` (on PATH) is the sudoless source of util, power, temp, clock and
+// fans; chip name and core count come from `system_profiler` once, exactly
+// like termmon's `mac_gpu_metadata`. Apple Silicon has no device memory: the
 // unified bar is filled from system RAM (see `apple_unified_memory`), the
 // same honest-labels path the GB10 / DGX Spark takes on NVIDIA.
 
