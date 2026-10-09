@@ -76,7 +76,8 @@ impl GpuStats {
             .trim_start_matches("GeForce ")
             .trim_start_matches("Tesla ")
             .trim_start_matches("Advanced Micro Devices, Inc. [AMD/ATI] ")
-            .trim_start_matches("AMD ");
+            .trim_start_matches("AMD ")
+            .trim_start_matches("Apple ");
         let n = n.split("-PCIE").next().unwrap_or(n);
         let n = n.split("-SXM").next().unwrap_or(n);
         n.trim().to_string()
@@ -87,8 +88,8 @@ impl GpuStats {
 pub type GpuSample = Result<Vec<GpuStats>, String>;
 
 /// Collects GPU stats every 200ms from whichever backend is detected:
-/// in-process NVML or nvidia-smi (NVIDIA), xpu-smi (Intel), or Linux amdgpu
-/// sysfs (AMD).
+/// in-process NVML or nvidia-smi (NVIDIA), xpu-smi (Intel), Linux amdgpu
+/// sysfs (AMD), or macmon / powermetrics (Apple Silicon).
 pub struct GpuMonitor {
     interval: Duration,
     backend: Arc<GpuBackend>,
@@ -99,6 +100,18 @@ pub enum GpuBackend {
     NvidiaSmi,
     Xpu,
     Amd(Vec<AmdDevice>),
+    /// Apple Silicon: privileged `powermetrics` when it is actually usable
+    /// (running as root, or passwordless `sudo -n`), else a long-lived
+    /// sudoless `macmon pipe` stream, else metadata-only.
+    Apple(AppleSource),
+}
+
+/// What the Apple backend polls, decided once at detection time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppleSource {
+    Powermetrics,
+    Macmon,
+    MetadataOnly,
 }
 
 pub struct AmdDevice {
@@ -293,6 +306,11 @@ impl GpuBackend {
             Self::NvidiaSmi
         } else if GpuMonitor::collect_xpu().is_ok_and(|gpus| !gpus.is_empty()) {
             Self::Xpu
+        } else if is_apple_silicon() {
+            // termmon's detection: arm64 Apple Silicon (hw.optional.arm64).
+            // Checked before AMD because Apple has no AMD GPUs and Apple
+            // Silicon machines are the only Macs still shipping.
+            Self::Apple(apple_source())
         } else {
             let devices = amd_devices();
             if devices.is_empty() {
@@ -310,6 +328,7 @@ impl GpuBackend {
             Self::NvidiaSmi => "smi",
             Self::Xpu => "xpu",
             Self::Amd(_) => "amd",
+            Self::Apple(_) => "apple",
         }
     }
 
@@ -319,6 +338,651 @@ impl GpuBackend {
             Self::NvidiaSmi => GpuMonitor::collect_nvidia(),
             Self::Xpu => GpuMonitor::collect_xpu(),
             Self::Amd(devices) => collect_amd(devices),
+            Self::Apple(source) => collect_apple(*source),
+        }
+    }
+}
+
+// ---------------- Apple Silicon (macmon / powermetrics) ----------------
+//
+// Ported from termmon's macOS collection: `macmon pipe` (vendored at
+// ~/bin/macmon or on PATH) is the sudoless source of GPU util, power, temp,
+// clock and fans; root-only `powermetrics` is the fallback for util/power;
+// chip name and core count come from `system_profiler` once, exactly like
+// termmon's `mac_gpu_metadata`. Apple Silicon has no device memory: the
+// unified bar is filled from system RAM (see `apple_unified_memory`), the
+// same honest-labels path the GB10 / DGX Spark takes on NVIDIA.
+
+#[cfg(target_os = "macos")]
+fn is_apple_silicon() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        #[cfg(target_arch = "aarch64")]
+        {
+            true
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            // x86_64 Macs (or aarch64 binaries under other kernels): termmon
+            // checks `hw.optional.arm64` via sysctl; ask sysctl the same way.
+            std::process::Command::new("/usr/sbin/sysctl")
+                .args(["-n", "hw.optional.arm64"])
+                .output()
+                .ok()
+                .and_then(|o| {
+                    if o.status.success() {
+                        Some(String::from_utf8_lossy(&o.stdout).trim() == "1")
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(false)
+        }
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_apple_silicon() -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn apple_source() -> AppleSource {
+    static CACHED: std::sync::OnceLock<AppleSource> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        // Sudo-first, mirroring NVIDIA's NVML→nvidia-smi priority:
+        // powermetrics answers with true GPU-busy % and a real GPU power
+        // ceiling, macmon (sudoless) with a time-active ratio and no
+        // ceiling. The probe asks once at startup (see
+        // `powermetrics_available`) and never prompts during polling; a
+        // sudo timestamp that expires mid-session demotes the backend to
+        // macmon at runtime (see `collect_apple`).
+        if powermetrics_available() {
+            AppleSource::Powermetrics
+        } else if which_macmon().is_some() {
+            AppleSource::Macmon
+        } else {
+            AppleSource::MetadataOnly
+        }
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apple_source() -> AppleSource {
+    AppleSource::MetadataOnly
+}
+
+fn which_macmon() -> Option<PathBuf> {
+    std::env::split_paths(std::env::var_os("PATH").as_deref()?)
+        .map(|d| d.join("macmon"))
+        .find(|p| p.is_file())
+}
+
+/// Can `powermetrics` actually run in this process's context? Already root
+/// qualifies directly; otherwise `sudo -n true` must answer without a
+/// password prompt. It checks the sudo timestamp only — the powermetrics
+/// binary itself is never executed, because a real sample takes seconds to
+/// produce (powermetrics initializes its kernel sampler first) and detection
+/// runs synchronously on the startup path. A password-requiring sudo fails
+/// instantly, which is exactly the no-sudo-capability case that should fall
+/// back to macmon. A timestamp that expires later demotes the backend to
+/// macmon at runtime (see `collect_apple`). Probed once per process.
+#[cfg(target_os = "macos")]
+fn powermetrics_available() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        if is_root() {
+            return true;
+        }
+        std::process::Command::new("sudo")
+            .args(["-n", "true"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
+}
+
+fn is_root() -> bool {
+    // The real uid, not $USER: setuid or `sudo -E` contexts disagree with env.
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        #[cfg(unix)]
+        {
+            std::process::id() != 0 && uid_zero()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    })
+}
+
+#[cfg(unix)]
+fn uid_zero() -> bool {
+    // std has no getuid; the `id -u` probe is cheap and only runs once.
+    std::process::Command::new("/usr/bin/id")
+        .args(["-u"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+        .unwrap_or(false)
+}
+
+/// One JSON line of `macmon pipe -s <poll_ms>`.
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+struct MacmonSample {
+    util: f32,
+    gpu_power: f32,
+    temp: f32,     // 0 when unsupported
+    freq_mhz: u32,
+    ram_total: u64,
+    ram_usage: u64,
+    fan_rpm: f64,  // busiest fan, 0 when none
+    fan_max: f64,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct MacmonLine {
+    #[serde(default)]
+    gpu_power: f64,
+    #[serde(default)]
+    sys_power: f64,
+    #[serde(default)]
+    cpu_power: f64,
+    #[serde(default)]
+    ecpu_power: f64,
+    #[serde(default)]
+    gpu_freq_mhz: f64,
+    #[serde(default)]
+    gpu_active_ratio: f64,
+    // ANE-normalized utilization (0..1): kept for documentation, not used —
+    // the panel shows gpu_active_ratio (time-active %), which never needs a
+    // "normalized" asterisk the way termmon's scaled reading does.
+    #[allow(dead_code)]
+    #[serde(default)]
+    gpu_scaled_ratio: f64,
+    #[serde(default)]
+    temp: MacmonTemp,
+    #[serde(default)]
+    memory: MacmonMemory,
+    #[serde(default)]
+    fans: Vec<MacmonFan>,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct MacmonTemp {
+    #[serde(default)]
+    gpu_temp_avg: f64,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct MacmonMemory {
+    #[serde(default)]
+    ram_total: u64,
+    #[serde(default)]
+    ram_usage: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct MacmonFan {
+    #[serde(default)]
+    rpm: f64,
+    #[serde(default)]
+    max_rpm: f64,
+}
+
+/// The panel-relevant fields of one macmon line (the JSON shape is a given,
+/// not something to abstract over).
+#[cfg(target_os = "macos")]
+fn extract_macmon(m: &MacmonLine) -> MacmonSample {
+    let fan = m
+        .fans
+        .iter()
+        .filter(|f| f.max_rpm > 0.0)
+        .max_by(|a, b| a.rpm.total_cmp(&b.rpm));
+    MacmonSample {
+        util: (m.gpu_active_ratio * 100.0).clamp(0.0, 100.0) as f32,
+        gpu_power: m.gpu_power as f32,
+        temp: m.temp.gpu_temp_avg as f32,
+        freq_mhz: m.gpu_freq_mhz as u32,
+        ram_total: m.memory.ram_total,
+        ram_usage: m.memory.ram_usage,
+        fan_rpm: fan.map_or(0.0, |f| f.rpm),
+        fan_max: fan.map_or(0.0, |f| f.max_rpm),
+    }
+}
+
+/// Shared macmon state: one long-lived `macmon pipe` child (spawn cost ~1.8s
+/// and macmon needs ~1s to fill its first sample, so a per-poll spawn could
+/// never keep up with the 200 ms cadence). A reader thread owns the child
+/// end-to-end: blocking reads off the main poll path, and if macmon dies the
+/// thread respawns it (capped) instead of poisoning the backend.
+#[cfg(target_os = "macos")]
+struct MacmonState {
+    latest: Option<String>,
+    last_error: Option<String>,
+    restarts: u32,
+    started: bool,
+}
+
+#[cfg(target_os = "macos")]
+static MACMON: std::sync::Mutex<MacmonState> = std::sync::Mutex::new(MacmonState {
+    latest: None,
+    last_error: None,
+    restarts: 0,
+    started: false,
+});
+
+/// Restarts the reader thread will attempt before giving up for good.
+#[cfg(target_os = "macos")]
+const MACMON_MAX_RESTARTS: u32 = 5;
+
+/// Spawn the macmon pipeline and drain it, publishing every complete line.
+#[cfg(target_os = "macos")]
+fn macmon_pump(poll_ms: u64) {
+    use std::io::BufRead;
+    let bin = match which_macmon() {
+        Some(b) => b,
+        None => {
+            let mut st = MACMON.lock().unwrap_or_else(|e| e.into_inner());
+            st.last_error = Some("macmon not found on PATH".into());
+            return;
+        }
+    };
+    loop {
+        let child = std::process::Command::new(&bin)
+            .args(["pipe", "-s", &poll_ms.max(250).to_string()])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                let mut st = MACMON.lock().unwrap_or_else(|e| e.into_inner());
+                st.last_error = Some(format!("Failed to run macmon: {e}"));
+                return;
+            }
+        };
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => {
+                let mut st = MACMON.lock().unwrap_or_else(|e| e.into_inner());
+                st.last_error = Some("macmon produced no stdout".into());
+                return;
+            }
+        };
+        let mut reader = std::io::BufReader::new(stdout);
+        // macmon flushes one JSON object per line, but a read can still land
+        // mid-object; fragments accumulate here until the line closes with
+        // '}', and the complete object is what gets published.
+        let mut buf = String::new();
+        loop {
+            let mut part = String::new();
+            match reader.read_line(&mut part) {
+                Ok(1..) => {
+                    buf.push_str(&part);
+                    if !buf.trim_end().ends_with('}') {
+                        continue; // fragmentated JSON tail: complete on next read
+                    }
+                    let line = buf.trim();
+                    // Raise the gauge ceiling (apple_power_max) before
+                    // any poll reads the line, so the first frame renders
+                    // its power gauge against a real draw.
+                    note_power_ceiling(macmon_cluster_watts(line));
+                    let mut st = MACMON.lock().unwrap_or_else(|e| e.into_inner());
+                    st.latest = Some(line.to_string());
+                    st.last_error = None;
+                    buf.clear();
+                }
+                Ok(0) | Err(_) => break, // stream ended: child died
+            }
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        let mut st = MACMON.lock().unwrap_or_else(|e| e.into_inner());
+        st.restarts += 1;
+        if st.restarts > MACMON_MAX_RESTARTS {
+            st.last_error =
+                Some("macmon stream keeps failing; reinstall macmon or run under sudo for powermetrics".into());
+            return;
+        }
+        st.last_error = Some("macmon stream ended; restarting".into());
+    }
+}
+
+/// Latest macmon sample. The reader thread is started once; a child that has
+/// not emitted yet returns `Ok(None)` so the panel keeps its last frame
+/// through macmon's ~1 s first-sample delay.
+#[cfg(target_os = "macos")]
+fn macmon_line(_poll_ms: u64) -> Result<Option<String>, String> {
+    let mut st = MACMON.lock().unwrap_or_else(|e| e.into_inner());
+    if !st.started {
+        st.started = true;
+        std::thread::spawn(move || macmon_pump(250));
+    }
+    match &st.latest {
+        // No sample yet is not an error: the panel keeps its last frame (and
+        // degrades to zeros before the first frame) while macmon warms up.
+        Some(line) => Ok(Some(line.clone())),
+        None => Ok(None),
+    }
+}
+
+/// Chip name and GPU core count, `system_profiler` once per process
+/// (termmon's `mac_gpu_metadata`); `hw.model` as fallback name.
+#[cfg(target_os = "macos")]
+fn apple_gpu_metadata() -> (String, u32) {
+    static CACHED: std::sync::OnceLock<(String, u32)> = std::sync::OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            let out = std::process::Command::new("/usr/sbin/system_profiler")
+                .args(["SPDisplaysDataType", "-json"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            let json: serde_json::Value =
+                serde_json::from_str(&out).unwrap_or(serde_json::Value::Null);
+            let entry = json
+                .get("SPDisplaysDataType")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first());
+            let name = entry
+                .and_then(|e| {
+                    e.get("sppci_model")
+                        .or_else(|| e.get("_name"))
+                        .and_then(|v| v.as_str())
+                })
+                .map(str::to_string);
+            let cores = entry
+                .and_then(|e| e.get("sppci_cores").and_then(|v| v.as_str()))
+                .and_then(|c| c.parse::<u32>().ok())
+                .unwrap_or(0);
+            let name = name.or_else(|| {
+                std::process::Command::new("/usr/sbin/sysctl")
+                    .args(["-n", "hw.model"])
+                    .output()
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            });
+            (name.unwrap_or_else(|| "Apple GPU".to_string()), cores)
+        })
+        .clone()
+}
+
+/// How to invoke powermetrics from this process: directly when already
+/// root, else through `sudo -n` (non-prompting: an expired sudo timestamp
+/// fails instantly — never a password hang — and `collect_apple` demotes
+/// the backend to macmon).
+#[cfg(target_os = "macos")]
+fn powermetrics_cmd() -> (&'static str, Vec<&'static str>) {
+    if is_root() {
+        ("/usr/bin/powermetrics", vec![])
+    } else {
+        ("sudo", vec!["-n", "/usr/bin/powermetrics"])
+    }
+}
+
+/// Whole-package power ceiling for the power gauge: the largest GPU-cluster
+/// draw seen from either source — the privileged powermetrics composition,
+/// or macmon's `sys_power - cpu_power - ecpu_power` (both GPU + ANE + RAM,
+/// the same cluster), so the gauge reads "share of the observed GPU cluster
+/// budget" either way and survives a mid-session powermetrics→macmon
+/// demotion. The CPU cluster is excluded so an idle GPU is not divided by
+/// CPU load. 0 until either source answers: watts-only.
+#[cfg(target_os = "macos")]
+fn apple_power_max(_source: AppleSource) -> f32 {
+    SYS_POWER_HWM.load(std::sync::atomic::Ordering::Relaxed) as f32
+}
+
+/// macmon's GPU-cluster draw of one JSON line: package minus the CPU
+/// clusters (GPU + ANE + RAM), the sudoless power-gauge ceiling input.
+#[cfg(target_os = "macos")]
+fn macmon_cluster_watts(line: &str) -> f32 {
+    serde_json::from_str::<MacmonLine>(line)
+        .map(|m| (m.sys_power - m.cpu_power - m.ecpu_power).max(0.0) as f32)
+        .unwrap_or(0.0)
+}
+
+/// Raise the ceiling high-water mark. macmon's pump thread calls this before
+/// publishing each line, so any poll that reads a line already sees the
+/// ceiling it implies; powermetrics feeds the same cluster from its own
+/// samplers, so a later sudo-timestamp expiry degrades to the last value
+/// instead of to 0.
+#[cfg(target_os = "macos")]
+fn note_power_ceiling(cluster: f32) {
+    if cluster > 0.0 {
+        // Whole watts, saturating: the gauge reads a ceiling, not a meter.
+        let watts = (cluster.round() as i64).clamp(0, i32::from(i16::MAX) as i64) as i32;
+        SYS_POWER_HWM.fetch_max(watts, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(target_os = "macos")]
+static SYS_POWER_HWM: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+fn parse_watts(v: &str) -> Option<f32> {
+    let v = v.trim();
+    let watts = if let Some(v) = v.strip_suffix("mW") {
+        v.trim().parse::<f32>().ok()? / 1000.0
+    } else if let Some(v) = v.strip_suffix("W") {
+        v.trim().parse::<f32>().ok()?
+    } else {
+        return None;
+    };
+    (watts > 0.0).then_some(watts)
+}
+
+/// Power lines of `powermetrics --samplers gpu_power` (and the gpu/ane/ram
+/// cluster of `cpu_power` when sampled together): GPU busy % plus GPU, ANE
+/// and RAM watts. Utilization takes "GPU active percentage" when present
+/// (per-interval), else "GPU active residency" (termmon accepts either).
+fn parse_powermetrics_powers(txt: &str) -> (f32, f32, f32, f32) {
+    fn watt_line(txt: &str, key: &str) -> f32 {
+        txt.lines()
+            .find_map(|l| {
+                l.trim_start()
+                    .strip_prefix(key)
+                    .and_then(|v| v.split(':').nth(1))
+                    .and_then(parse_watts)
+            })
+            .unwrap_or(0.0)
+    }
+    let util = {
+        let mut util = 0.0f32;
+        for (key, first) in [("GPU active percentage", true), ("GPU active residency", false)] {
+            if first || util <= 0.0 {
+                if let Some(v) = txt.lines().find_map(|l| {
+                    l.trim_start()
+                        .strip_prefix(key)
+                        .and_then(|v| v.split(':').nth(1))
+                }) {
+                    // powermetrics prints "87.5 %" with a space before the unit.
+                    util = v
+                        .split_whitespace()
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(0.0);
+                }
+            }
+        }
+        util
+    };
+    (
+        util,
+        watt_line(txt, "GPU power"),
+        watt_line(txt, "ANE power"),
+        watt_line(txt, "RAM power"),
+    )
+}
+
+/// Root-only `powermetrics` source: synchronous, one sample per poll, true
+/// GPU busy % and GPU watts; the ANE/RAM watts from the same sample compose
+/// the power-gauge ceiling (HWM). powermetrics has no GPU temperature, clock
+/// or fan samplers, so those fields degrade as always.
+#[cfg(target_os = "macos")]
+fn collect_powermetrics() -> Result<Vec<GpuStats>, String> {
+    let (bin, pre) = powermetrics_cmd();
+    let out = std::process::Command::new(bin)
+        .args(pre)
+        .args(["--samplers", "gpu_power,cpu_power", "-n", "1", "-i", "250"])
+        .output()
+        .map_err(|e| format!("Failed to run powermetrics: {e}"))?;
+    if !out.status.success() {
+        let msg = [out.stderr.as_slice(), out.stdout.as_slice()]
+            .iter()
+            .flat_map(|b| {
+                String::from_utf8_lossy(b)
+                    .lines()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or_else(|| "powermetrics exited with an error".into());
+        return Err(msg);
+    }
+    let txt = String::from_utf8_lossy(&out.stdout);
+    let (util, gpu_w, ane_w, ram_w) = parse_powermetrics_powers(&txt);
+    note_power_ceiling(gpu_w + ane_w + ram_w);
+    let (name, cores) = apple_gpu_metadata();
+    let sample = MacmonSample {
+        util,
+        gpu_power: gpu_w,
+        temp: 0.0,
+        freq_mhz: 0,
+        ram_total: 0,
+        ram_usage: 0,
+        fan_rpm: 0.0,
+        fan_max: 0.0,
+    };
+    Ok(vec![apple_stats(&name, cores, sample, AppleSource::Powermetrics)])
+}
+
+/// Build one Apple GPU stats row. No device memory (`unified` left false —
+/// `apple_unified_memory` marks the macmon RAM pool), no PCIe counters (the
+/// panel hides the link tag and shows C2C "n/a" for unified parts).
+#[cfg(target_os = "macos")]
+fn apple_stats(name: &str, cores: u32, m: MacmonSample, source: AppleSource) -> GpuStats {
+    let mem_total_mb = m.ram_total / 1024 / 1024;
+    let mem_used_mb = m.ram_usage / 1024 / 1024;
+    let fan_pct = if m.fan_max > 0.0 {
+        Some((m.fan_rpm / m.fan_max * 100.0).clamp(0.0, 100.0) as f32)
+    } else {
+        None
+    };
+    GpuStats {
+        index: 0,
+        name: if cores > 0 {
+            format!("{name} ({cores}C)")
+        } else {
+            name.to_string()
+        },
+        utilization_gpu: m.util,
+        utilization_mem: 0.0,
+        mem_total_mb,
+        mem_used_mb,
+        mem_free_mb: mem_total_mb.saturating_sub(mem_used_mb),
+        power_watts: m.gpu_power,
+        power_max_watts: apple_power_max(source),
+        temperature: (m.temp > 0.0).then_some(m.temp),
+        clock_sm_mhz: m.freq_mhz,
+        clock_sm_max_mhz: 0,
+        clock_mem_mhz: 0,
+        fan_pct,
+        fan_rpm: if m.fan_rpm > 0.0 || m.fan_max > 0.0 {
+            Some(m.fan_rpm as u32)
+        } else {
+            None
+        },
+        util_estimated: false,
+        unified: false,
+        pcie_gen: 0,
+        pcie_width: 0,
+    }
+}
+
+/// One `macmon pipe` JSON line into GPU stats. `name`/`cores` come from
+/// `system_profiler` once (termmon's metadata path); mem_* carry macmon's
+/// system-RAM answer, marked unified later by `apple_unified_memory`.
+/// Raises the sudoless ceiling HWM (apple_power_max) before building the
+/// row, so the frame a line first appears in already gauges against it.
+#[cfg(target_os = "macos")]
+fn parse_macmon_line(line: &str, name: &str, cores: u32) -> Result<GpuStats, String> {
+    let m: MacmonLine =
+        serde_json::from_str(line).map_err(|e| format!("macmon JSON unparsable: {e}"))?;
+    let sample = extract_macmon(&m);
+    note_power_ceiling(macmon_cluster_watts(line));
+    Ok(apple_stats(name, cores, sample, AppleSource::Macmon))
+}
+
+/// One Apple poll. powermetrics is preferred at detection, but the sudo
+/// timestamp expires after a few idle minutes; when a poll starts failing
+/// and macmon exists, the backend demotes to it for the rest of the session
+/// (the detection cache is not re-probed — the demotion is one-way).
+#[cfg(target_os = "macos")]
+fn collect_apple(source: AppleSource) -> Result<Vec<GpuStats>, String> {
+    let (name, cores) = apple_gpu_metadata();
+    match source {
+        AppleSource::Macmon => collect_macmon(&name, cores),
+        AppleSource::Powermetrics => collect_powermetrics().inspect(|_| {
+            POWERMETRICS_FAILURES.store(0, std::sync::atomic::Ordering::Relaxed);
+        }).or_else(|e| {
+            if which_macmon().is_some() {
+                collect_macmon(&name, cores)
+            } else {
+                // No fallback: powermetrics under a managed sudo policy can
+                // flap (timestamp expiry between polls); a transient failure
+                // keeps the panel's last frame instead of blanking it.
+                if POWERMETRICS_FAILURES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    < POWERMETRICS_MAX_TRANSIENT
+                {
+                    Ok(Vec::new())
+                } else {
+                    Err(e)
+                }
+            }
+        }),
+        AppleSource::MetadataOnly => Err(
+            "no sudoless Apple GPU telemetry: install macmon (brew install macmon) \
+             or run llm-visuals under sudo for powermetrics"
+                .into(),
+        ),
+    }
+}
+
+/// Consecutive powermetrics failures tolerated (with macmon absent) before
+/// the error is surfaced; reset by every successful sample.
+#[cfg(target_os = "macos")]
+const POWERMETRICS_MAX_TRANSIENT: u8 = 5;
+#[cfg(target_os = "macos")]
+static POWERMETRICS_FAILURES: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(target_os = "macos")]
+fn collect_macmon(name: &str, cores: u32) -> Result<Vec<GpuStats>, String> {
+    let Some(line) = macmon_line(250)? else {
+        return Ok(Vec::new()); // first sample warming up: keep last frame
+    };
+    Ok(vec![parse_macmon_line(&line, name, cores)?])
+}
+
+/// Apple Silicon answers `mem_*` with system RAM (no device memory exists);
+/// mark the pool as unified so the panel labels it UNIFIED and the bandwidth
+/// screen switches to the pool-fill meter. With a live server,
+/// `apply_unified_memory` (via `is_unified_part`) overwrites the macmon RAM
+/// usage with the server's own weight + KV + graph occupancy; without one
+/// the bar shows macmon's system-wide RAM usage.
+pub fn apple_unified_memory(gpus: &mut [GpuStats]) {
+    for g in gpus.iter_mut() {
+        if g.mem_total_mb > 0 {
+            g.unified = true;
+            g.mem_free_mb = g.mem_total_mb.saturating_sub(g.mem_used_mb);
         }
     }
 }
@@ -609,6 +1273,9 @@ pub fn apply_unified_memory(gpus: &mut [GpuStats], system_ram_mb: u64, model_gb:
 /// parts here by the name the driver reports.
 pub fn is_unified_part(name: &str) -> bool {
     name.contains("GB10")
+        // Apple Silicon parts come from the Apple backend's own names
+        // ("Apple M5 Max (40C)"); never a discrete card on another backend.
+        || (cfg!(target_os = "macos") && name.starts_with("Apple "))
 }
 
 pub fn filter_gpus(stats: Vec<GpuStats>, filter: &[usize]) -> Vec<GpuStats> {
@@ -953,6 +1620,79 @@ mod tests {
         assert_eq!(stats.pcie_width, 16);
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn apple_rows_are_marked_unified() {
+        // macmon answers mem_* with system RAM; the pool bar must label
+        // itself UNIFIED (same honest-label path as GB10) and keep a
+        // consistent free figure.
+        let mut gpus = vec![GpuStats {
+            index: 0,
+            name: "Apple M5 Max (40C)".into(),
+            mem_total_mb: 131_072,
+            mem_used_mb: 97_216,
+            mem_free_mb: 0,
+            ..Default::default()
+        }];
+        apple_unified_memory(&mut gpus);
+        let g = &gpus[0];
+        assert!(g.unified);
+        assert_eq!(g.mem_free_mb, 33_856);
+        assert!((g.vram_percent() - 74.2).abs() < 0.1);
+        // Zero rows (metadata-only fallbacks) stay zero.
+        let mut zeros = vec![GpuStats::default()];
+        apple_unified_memory(&mut zeros);
+        assert!(!zeros[0].unified);
+    }
+
+    #[test]
+    fn parses_real_powermetrics_gpu_sample() {
+        // Layout of `powermetrics --samplers gpu_power -n 1` on Apple
+        // Silicon: utilization under "GPU Power/Performance", power in mW.
+        let txt = "\
+GPU Power:
+  GPU active percentage: 87.5 %
+  GPU active residency:  91.2 %
+  GPU power:             412300.00mW
+ANE power:               12000.00mW
+RAM power:               8000.00mW
+";
+        let (util, gpu_w, ane_w, ram_w) = parse_powermetrics_powers(txt);
+        assert_eq!(util, 87.5);
+        assert!((gpu_w - 412.3).abs() < 0.1);
+        assert!((ane_w - 12.0).abs() < 0.1);
+        assert!((ram_w - 8.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn parse_watts_handles_mw_and_w() {
+        assert!((parse_watts(" 412300.00mW").unwrap() - 412.3).abs() < 0.01);
+        assert!((parse_watts(" 30.34W").unwrap() - 30.34).abs() < 0.01);
+        assert_eq!(parse_watts(" N/A"), None);
+        assert_eq!(parse_watts("no unit"), None);
+        assert_eq!(parse_watts(" 0.00W"), None);
+    }
+
+    #[test]
+    fn parses_real_macmon_line() {
+        // fixtures/macmon-pipe.json: one captured `macmon pipe -s 1000` line
+        // from an M5 Max. Metadata (name, cores) is injected as
+        // system_profiler would report it, keeping the test offline.
+        let txt = std::fs::read_to_string("fixtures/macmon-pipe.json").unwrap();
+        let s = parse_macmon_line(&txt, "Apple M5 Max", 40).expect("fixture parses");
+        assert_eq!(s.name, "Apple M5 Max (40C)");
+        assert!(s.mem_total_mb > 100_000); // macmon reports the 128 GiB pool
+        assert!(s.mem_used_mb > 0);
+        assert!(s.fan_rpm.unwrap_or(0) > 0);
+        assert!(s.fan_pct.unwrap() > 0.0 && s.fan_pct.unwrap() < 100.0);
+        assert!(s.power_watts > 0.0);
+        assert!(s.temperature.unwrap() > 30.0);
+        assert!(s.clock_sm_mhz > 0);
+        assert_eq!(s.pcie_gen, 0); // no PCIe counters on a Mac
+        assert!(!s.unified); // marked later by apple_unified_memory
+        assert_eq!(s.short_name(), "M5 Max (40C)"); // "Apple " trimmed in-panel
+        assert!(macmon_cluster_watts(&txt) > 0.0); // GPU-cluster draw for the ceiling
+    }
 }
 
 #[cfg(test)]
@@ -974,5 +1714,46 @@ mod live_tests {
             );
         }
         assert!(!stats.is_empty(), "no GPUs found by any backend");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod live_apple_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "live check: run on Apple Silicon"]
+    fn collects_live_apple_stats() {
+        let source = apple_source();
+        eprintln!("apple source: {source:?}");
+        // macmon needs ~1-2 s for its first sample; the backend returns an
+        // empty Ok during warmup by design.
+        let mut stats = Vec::new();
+        for _ in 0..20 {
+            stats = collect_apple(source).expect("apple backend returned an error");
+            if !stats.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        for g in &stats {
+            eprintln!(
+                "gpu: name='{}' util={:.1}% {}W/{:.0}W temp={:?} clk={}MHz fan={:?}/{:?} pool={}/{}MB unified_src",
+                g.name,
+                g.utilization_gpu,
+                g.power_watts,
+                g.power_max_watts,
+                g.temperature,
+                g.clock_sm_mhz,
+                g.fan_pct,
+                g.fan_rpm,
+                g.mem_used_mb,
+                g.mem_total_mb
+            );
+        }
+        assert!(!stats.is_empty());
+        let g = &stats[0];
+        assert!(g.name.starts_with("Apple "));
+        assert!(g.mem_total_mb > 0, "macmon should report the unified pool");
     }
 }
