@@ -488,7 +488,6 @@ fn uid_zero() -> bool {
 }
 
 /// One JSON line of `macmon pipe -s <poll_ms>`.
-#[cfg(target_os = "macos")]
 #[derive(Clone, Copy)]
 struct MacmonSample {
     util: f32,
@@ -561,7 +560,7 @@ struct MacmonFan {
 
 /// The panel-relevant fields of one macmon line (the JSON shape is a given,
 /// not something to abstract over).
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn extract_macmon(m: &MacmonLine) -> MacmonSample {
     let fan = m
         .fans
@@ -899,7 +898,6 @@ fn powermetrics_line() -> Result<Option<String>, String> {
 /// powermetrics→macmon demotion. The CPU cluster is excluded so an idle
 /// GPU is not divided by CPU load. 0 until either source answers:
 /// watts-only.
-#[cfg(target_os = "macos")]
 fn apple_power_max(_source: AppleSource) -> f32 {
     SYS_POWER_HWM.load(std::sync::atomic::Ordering::Relaxed) as f32
 }
@@ -910,7 +908,6 @@ fn apple_power_max(_source: AppleSource) -> f32 {
 /// (display included) and `cpu_power` covers no E-cores field, so the
 /// package-minus-CPU subtraction misreads it by tens of watts; the
 /// per-sampler fields are the honest composition.
-#[cfg(target_os = "macos")]
 fn macmon_cluster_watts(line: &str) -> f32 {
     serde_json::from_str::<MacmonLine>(line)
         .map(|m| (m.gpu_power + m.ane_power + m.gpu_ram_power).max(0.0) as f32)
@@ -922,7 +919,6 @@ fn macmon_cluster_watts(line: &str) -> f32 {
 /// ceiling it implies; powermetrics feeds the same cluster from its own
 /// samplers, so a later sudo-timestamp expiry degrades to the last value
 /// instead of to 0.
-#[cfg(target_os = "macos")]
 fn note_power_ceiling(cluster: f32) {
     if cluster > 0.0 {
         // Whole watts, saturating: the gauge reads a ceiling, not a meter.
@@ -931,7 +927,6 @@ fn note_power_ceiling(cluster: f32) {
     }
 }
 
-#[cfg(target_os = "macos")]
 static SYS_POWER_HWM: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 fn parse_watts(v: &str) -> Option<f32> {
@@ -1043,7 +1038,7 @@ fn collect_powermetrics() -> Result<Vec<GpuStats>, String> {
 /// Build one Apple GPU stats row. No device memory (`unified` left false —
 /// `apple_unified_memory` marks the macmon RAM pool), no PCIe counters (the
 /// panel hides the link tag and shows C2C "n/a" for unified parts).
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn apple_stats(name: &str, cores: u32, m: MacmonSample, source: AppleSource) -> GpuStats {
     let mem_total_mb = m.ram_total / 1024 / 1024;
     let mem_used_mb = m.ram_usage / 1024 / 1024;
@@ -1088,7 +1083,7 @@ fn apple_stats(name: &str, cores: u32, m: MacmonSample, source: AppleSource) -> 
 /// system-RAM answer, marked unified later by `apple_unified_memory`.
 /// Raises the sudoless ceiling HWM (apple_power_max) before building the
 /// row, so the frame a line first appears in already gauges against it.
-#[cfg(target_os = "macos")]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn parse_macmon_line(line: &str, name: &str, cores: u32) -> Result<GpuStats, String> {
     let m: MacmonLine =
         serde_json::from_str(line).map_err(|e| format!("macmon JSON unparsable: {e}"))?;
