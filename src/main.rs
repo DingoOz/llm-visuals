@@ -540,42 +540,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let theme = colors::get_theme(&theme_name);
 
     // Manual smoke tool: poll the real backend and print resolved rows, no
-    // TUI, no server needed. Not advertised in --help.
-    if std::env::var_os("LLM_VISUALS_GPU_PROBE").is_some() {
-        let nvml = nvml::NvmlSession::new();
-        let backend = GpuBackend::detect(nvml);
-        for _ in 0..40 {
-            if let Ok(stats) = backend.collect() {
-                let mut stats = gpu::filter_gpus(stats, &[]);
-                gpu::apple_unified_memory(&mut stats);
-                if !stats.is_empty() {
-                    for g in &stats {
-                        println!(
-                            "backend={} name='{}' short='{}' util={:.1} power={:.2}/{:.0}W temp={:?} clk={}MHz fan={:.0}%/{}rpm pool={:.1}/{:.1}G unified={} pcie=g{}x{}",
-                            backend.name(),
-                            g.name,
-                            g.short_name(),
-                            g.utilization_gpu,
-                            g.power_watts,
-                            g.power_max_watts,
-                            g.temperature,
-                            g.clock_sm_mhz,
-                            g.fan_pct.unwrap_or(0.0),
-                            g.fan_rpm.unwrap_or(0),
-                            g.vram_gb(),
-                            g.vram_total_gb(),
-                            g.unified,
-                            g.pcie_gen,
-                            g.pcie_width,
-                        );
-                    }
-                    return Ok(());
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(300)).await;
-        }
-        return Err("gpu probe: no samples from the detected backend".into());
-    }
+    // TUI, no server needed. Not advertised in --help. The `--ignored`
+    // live tests in gpu.rs cover the same ground without an env-var hook
+    // in main.
 
     let (discovered, endpoint_err) = if args.demo {
         (demo::demo_models(DEMO_CTX, args.demo_models), None)
@@ -979,18 +946,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let now = Instant::now();
         let mut gpu_updated = false;
+        let mut gpu_drained = false;
         while let Ok(sample) = gpu_rx.try_recv() {
             ui_changed = true;
             match sample {
+                // An empty sample is a warm-up or a transient failure
+                // holding the last frame (powermetrics sampler start,
+                // macmon first sample): replacing `latest_gpu` with it
+                // would blank the cards, so only a non-empty frame
+                // replaces the last one.
                 Ok(stats) => {
-                    latest_gpu = stats;
-                    gpu_error = None;
-                    gpu_updated = true;
+                    gpu_drained = true;
+                    if !stats.is_empty() {
+                        latest_gpu = stats;
+                        gpu_error = None;
+                        gpu_updated = true;
+                    }
                 }
-                Err(e) => gpu_error = Some(e),
+                Err(e) => {
+                    gpu_drained = true;
+                    gpu_error = Some(e);
+                }
             }
         }
-        if gpu_updated {
+        if gpu_drained {
             // Unified-memory parts (GB10 / DGX Spark) have no device memory:
             // build their VRAM numbers from the servers' own occupancy report
             // over system RAM before the perf tracker sees the sample, so the
@@ -1005,6 +984,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // device memory), so mark the pool unified even when no server
             // occupancy arrived above.
             gpu::apple_unified_memory(&mut latest_gpu);
+        }
+        if gpu_updated {
             // The cards are shared, so every model sees the same samples.
             for slot in &mut slots {
                 slot.perf.observe_gpu(&latest_gpu, now);
