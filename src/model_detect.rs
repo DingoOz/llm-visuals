@@ -730,7 +730,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
     models.sort_by_key(|m| {
         let has_model = m.path.is_some() || m.gguf.is_some();
         let engine_rank = match m.engine.as_str() {
-            "llama.cpp" | "vllm" | "sglang" | "strata" | "exllamav2" => 2,
+            "llama.cpp" | "vllm" | "sglang" | "strata" | "ninfer" | "exllamav2" => 2,
             "ollama" => 0,
             _ => 1,
         };
@@ -800,6 +800,7 @@ fn looks_like_llm(process_name: &str, cmdline: &str) -> bool {
         "text-generation",
         "aphrodite",
         "tensorrt-llm",
+        "ninfer-serve",
         "lmdeploy",
         "kobold",
         "tabbyapi",
@@ -904,6 +905,8 @@ fn engine_from(process_name: &str, cmdline: &str) -> String {
     let blob = format!("{process_name} {cmdline}").to_lowercase();
     if crate::strata::is_server(cmdline) {
         "strata".into()
+    } else if blob.contains("ninfer-serve") {
+        "ninfer".into()
     } else if blob.contains("llama-server") || blob.contains("llama.cpp") {
         "llama.cpp".into()
     } else if blob.contains("ollama") {
@@ -926,6 +929,17 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
         ..Default::default()
     };
 
+    if parsed.engine == "ninfer" {
+        if let Some(path) = tokens.get(1).filter(|p| p.ends_with(".ninfer")) {
+            let path = PathBuf::from(path);
+            parsed.name = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            parsed.path = Some(path);
+        }
+    }
     let mut i = 0;
     // Only tokens after `serve` / `api-server` can be vLLM's positional
     // weights path; without this the catch-all below eats argv[0] (the
@@ -958,7 +972,7 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
                     }
                 }
             }
-            "--alias" => {
+            "--alias" | "--model-id" => {
                 if let Some(v) = next() {
                     parsed.name = v;
                     if inline.is_none() {
@@ -984,7 +998,7 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
                     }
                 }
             }
-            "--ctx-size" | "--ctx_size" | "-c" => {
+            "--ctx-size" | "--ctx_size" | "-c" | "--max-context" => {
                 if let Some(v) = next() {
                     parsed.ctx_max = v.parse().ok();
                     if inline.is_none() {
@@ -1108,7 +1122,7 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
     if parsed.tensor_split.iter().all(|&s| s == 0.0) {
         parsed.tensor_split.clear();
     }
-    if parsed.port.is_none() && parsed.engine == "llama.cpp" {
+    if parsed.port.is_none() && matches!(parsed.engine.as_str(), "llama.cpp" | "ninfer") {
         parsed.port = Some(8080);
     }
     if parsed.port.is_none() && parsed.engine == "ollama" {
@@ -1860,6 +1874,11 @@ pub async fn probe_endpoint(
             if m.max_context > 0 {
                 ctx_max = Some(m.max_context);
             }
+        } else if body.contains("ninfer_generation_tokens_total") {
+            engine = "ninfer".to_string();
+            if let Some(c) = crate::ninfer::parse_metrics(&body) {
+                model_name = c.model_name.or(model_name);
+            }
         } else if body.contains("vllm:") {
             saw_vllm_metrics = true;
             engine = "vllm".to_string();
@@ -2034,6 +2053,17 @@ fn extra_probe_ips(ips: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ninfer_launch_is_detected() {
+        let cmd = "ninfer-serve models/qwen.ninfer --model-id qwen-test --max-context 8192";
+        assert!(super::looks_like_llm("ninfer-serve", cmd));
+        let model = super::parse_cmdline("ninfer-serve", cmd);
+        assert_eq!(model.engine, "ninfer");
+        assert_eq!(model.name, "qwen-test");
+        assert_eq!(model.ctx_max, Some(8192));
+        assert_eq!(model.port, Some(8080));
+    }
+
     use super::*;
 
     fn fake_hub(tag: &str) -> PathBuf {

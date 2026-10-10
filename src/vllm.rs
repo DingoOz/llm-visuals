@@ -53,6 +53,9 @@ pub struct VllmCounters {
     /// the MTP depth shown by the panel (base-0 or base-1 label schemes both
     /// count the same).
     pub spec_positions: Vec<u32>,
+    /// The speculative backend when the server names it (NInfer's
+    /// `speculative_backend` label); the panel's title. None reads as MTP.
+    pub spec_backend: Option<String>,
     /// Served model name from the metrics labels; the identity marker for
     /// the cross-wiring guard.
     pub model_name: Option<String>,
@@ -164,7 +167,12 @@ pub async fn poll_vllm(
 /// Whether a `model_name` label that disagrees with the expected name is
 /// evidence of a container port-publish collision: another detected model
 /// claims the same port and the label matches *its* name.
-fn cross_wired(label: &str, expected: &str, port: u16, others: &[(String, u16)]) -> bool {
+pub(crate) fn cross_wired(
+    label: &str,
+    expected: &str,
+    port: u16,
+    others: &[(String, u16)],
+) -> bool {
     label != expected
         && others.iter().any(|(name, p)| {
             *p == port
@@ -321,7 +329,7 @@ impl VllmAdapter {
             cache_tokens: cached_req,
             processing: running,
             spec_types: if spec_active {
-                "mtp".to_string()
+                c.spec_backend.clone().unwrap_or_else(|| "mtp".to_string())
             } else {
                 "none".to_string()
             },
