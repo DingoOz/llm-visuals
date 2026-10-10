@@ -9,6 +9,7 @@ mod gpu;
 mod host;
 mod llm;
 mod model_detect;
+mod ninfer;
 pub mod nvml;
 mod observe;
 mod perf;
@@ -398,7 +399,7 @@ async fn poll_server(
             tokio::time::sleep(sleep).await;
         }
     }
-    if model.engine == "vllm" {
+    if model.engine == "vllm" || model.engine == "ninfer" {
         // vLLM has no /slots or /experts endpoints; its /metrics counters
         // drive the live stats and the MTP panel. The 'r' rescan drops
         // dead processes (same policy as the llama.cpp path); until then a
@@ -408,7 +409,12 @@ async fn poll_server(
         let mut adapter = vllm::VllmAdapter::new();
         let mut misses = 0u32;
         loop {
-            if let Some(c) = vllm::poll_vllm(&model.host, port, &model.name, &others, &auth).await {
+            let counters = if model.engine == "ninfer" {
+                ninfer::poll(&model.host, port, &model.name, &others, &auth).await
+            } else {
+                vllm::poll_vllm(&model.host, port, &model.name, &others, &auth).await
+            };
+            if let Some(c) = counters {
                 misses = 0;
                 let (mut stats, spec) = adapter.observe(&c);
                 stats.ctx_max = model.ctx_max.unwrap_or(0);

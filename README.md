@@ -3,7 +3,7 @@
 **A live terminal dashboard for the LLM running on your machine.**
 
 It finds the inference servers you already have up (llama.cpp `llama-server`,
-ollama, vLLM, SGLang, Strata, …), reads their counters and NVIDIA, AMD or Intel
+ollama, vLLM, SGLang, Strata, NInfer, …), reads their counters and NVIDIA, AMD or Intel
 GPU telemetry, and turns them into a truecolor picture of what the model is doing
 right now: tokens per second, time to first token, GPU load and memory, context fill, speculative-decoding
 acceptance, which layers are busy on which GPU, and, with a small server patch,
@@ -556,6 +556,19 @@ from the `totals.drafts_offered` / `drafts_accepted` counters; they move only
 when a request ends, so the gauge shows each finished request's acceptance
 (spread over its server-measured decode time) and holds it until the next. The VRAM weights/KV split is the usual
 file-size estimate, which does not fit Strata's RAM-resident experts.
+
+### NInfer
+
+[NInfer](https://github.com/Neroued/ninfer) builds with the Prometheus
+endpoint are detected as `ninfer-serve` (port 8080 when `--port` is absent),
+or can be selected with `--endpoint http://127.0.0.1:8080`. The adapter reads
+NInfer's own `ninfer_*` counters from `GET /metrics` for live prefill and
+decode, prefix reuse, TTFT and speculative acceptance; the speculative panel
+is titled with the backend the server reports (`mtp`, `dflash2`, …). Use the
+server's own port when it runs behind a gateway; API keys work through the
+existing `--api-key-file` option. As with the vLLM adapter, request rows
+reconstructed from aggregate counters are activity windows, not individual
+concurrent request traces.
 
 ---
 
