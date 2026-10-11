@@ -44,8 +44,19 @@ pub fn weight_layout(detected: Option<&DetectedModel>, gpus: &[GpuStats]) -> Wei
         .unwrap_or((0, 0));
     let total = t.total_bytes;
     let active = t.active_bytes_per_token(n_exp, k);
+    // A unified part has no VRAM that weights could fail to fit in: the
+    // pool is the GPU, and whatever the server did not report as resident
+    // (file-offloaded lookup tables) is not a CPU-side layer either.
+    //
+    // Nor does a safetensors server (vLLM, SGLang) have CPU-side layers: it
+    // loads every weight onto its cards or does not start. The clamp below
+    // is llama.cpp's partial offload; it shares the file across every card
+    // on the host, so a server pinned to one card of two would be told that
+    // the other card's share is in RAM, and the verdict would blame RAM.
     let cpu_bytes = if m.n_gpu_layers == Some(0) || gpus.is_empty() {
         total
+    } else if t.estimated || gpus.iter().all(|g| g.unified) {
+        0
     } else {
         let split_sum: f32 = m.tensor_split.iter().copied().sum::<f32>().max(1.0);
         let mut on_gpu = 0u64;
@@ -123,6 +134,10 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
         .unwrap_or(0);
     let disk_busy = bw.disk.value > 50.0 || bw.proc_disk_mb_s > 20.0 || bw.majflt_per_s > 50.0;
     let cpu_side = bw.layout.known && bw.layout.cpu_bytes > bw.layout.total_bytes / 50;
+    // Unified-memory parts (GB10 / DGX Spark) expose no PCIe counter and no
+    // memory-controller counter: a zero from them is an absent sensor, not a
+    // free bus, so neither may decide the verdict there.
+    let unified = gpus.iter().any(|g| g.unified);
 
     match p.phase {
         Phase::Idle => {
@@ -150,7 +165,7 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
                     ),
                 };
             }
-            if pcie_frac > 0.5 {
+            if pcie_frac > 0.5 && !unified {
                 return Verdict {
                     stage: Some(StageId::Pcie),
                     headline: format!("PCIe link to GPU {pcie_busiest} is the bound"),
@@ -199,7 +214,7 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
                     ),
                 };
             }
-            if pcie_frac > 0.35 {
+            if pcie_frac > 0.35 && !unified {
                 return Verdict {
                     stage: Some(StageId::Pcie),
                     headline: format!("PCIe to GPU {pcie_busiest} is the bound"),
@@ -209,7 +224,7 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
                     ),
                 };
             }
-            if max_mem_busy >= 75.0 {
+            if max_mem_busy >= 75.0 && !unified {
                 return Verdict {
                     stage: Some(StageId::Vram),
                     headline: format!("VRAM bandwidth bound on GPU {busiest_gpu}"),
@@ -236,21 +251,35 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
                 return Verdict {
                     stage: Some(StageId::Decode),
                     headline: "GPU compute bound".into(),
-                    detail: format!(
-                        "GPU {:.0}% busy with the memory controller at {:.0}% — kernels, not bandwidth",
-                        max_gpu_util, max_mem_busy
-                    ),
+                    detail: if unified {
+                        format!(
+                            "GPU {:.0}% busy on the unified pool — no memory-controller or C2C counter exists here; kernels, not bandwidth",
+                            max_gpu_util
+                        )
+                    } else {
+                        format!(
+                            "GPU {:.0}% busy with the memory controller at {:.0}% — kernels, not bandwidth",
+                            max_gpu_util, max_mem_busy
+                        )
+                    },
                 };
             }
             Verdict {
                 stage: None,
                 headline: "no link saturated".into(),
-                detail: format!(
-                    "GPU {:.0}%, memory {:.0}%, PCIe {:.0}% — latency, sampling or host overhead between tokens",
-                    max_gpu_util,
-                    max_mem_busy,
-                    pcie_frac * 100.0
-                ),
+                detail: if unified {
+                    format!(
+                        "GPU {:.0}% — bandwidth counters do not exist on a unified part; latency, sampling or host overhead between tokens",
+                        max_gpu_util
+                    )
+                } else {
+                    format!(
+                        "GPU {:.0}%, memory {:.0}%, PCIe {:.0}% — latency, sampling or host overhead between tokens",
+                        max_gpu_util,
+                        max_mem_busy,
+                        pcie_frac * 100.0
+                    )
+                },
             }
         }
     }
@@ -303,6 +332,27 @@ mod tests {
     }
 
     #[test]
+    fn unified_ignores_the_counters_that_do_not_exist() {
+        let (mut p, now) = decoding();
+        let mut g = gpu(90.0, 95.0, 60_000);
+        g.unified = true;
+        g.mem_total_mb = 120_000;
+        g.pcie_gen = 1;
+        g.pcie_width = 1;
+        let g = vec![g];
+        p.observe_gpu(&g, now);
+        // A GB10 reports a dummy gen1 x1 link and no controller load; feed the
+        // meters anyway and the verdict must still refuse to blame a bus.
+        p.bw.pcie_rx[0].full_scale = Some(1000.0);
+        p.bw.pcie_rx[0].update(950.0, now, 0.2);
+        p.bw.vram_busy[0].update(95.0, now, 0.2);
+        let v = assess(&p, &g);
+        assert_eq!(v.stage, Some(StageId::Decode));
+        assert!(v.headline.contains("compute bound"));
+        assert!(v.detail.contains("C2C"), "{}", v.detail);
+    }
+
+    #[test]
     fn disk_wins_over_everything() {
         let (mut p, now) = decoding();
         let g = vec![gpu(90.0, 95.0, 20_000)];
@@ -345,6 +395,7 @@ mod tests {
             engram_bytes: 0,
             block_bytes: vec![],
             n_tensors: 1,
+            estimated: false,
         });
         m.cmdline = "llama-server -ub 256".into();
         // Two cards holding 7.8 G and 11.8 G: 12.5 G share each, clamped.
@@ -362,5 +413,32 @@ mod tests {
         assert_eq!(l.cpu_bytes, 25_000_000_000 - on_gpu);
         assert_eq!(l.active_bytes, 24_000_000_000);
         assert_eq!(weight_layout(None, &gpus).known, false);
+    }
+
+    #[test]
+    fn safetensors_layout_is_never_cpu_side_on_a_gpu() {
+        let mut m = crate::demo::demo_models(4096, 1).remove(0);
+        m.tensor_split = vec![];
+        m.n_gpu_layers = None;
+        m.tensors = Some(crate::gguf::TensorSummary {
+            total_bytes: 20_000_000_000,
+            n_tensors: 1,
+            estimated: true,
+            ..Default::default()
+        });
+        // One server pinned to card 0 of two: card 1 belongs to someone else
+        // and holds none of these weights, which does not put them in RAM.
+        let gpus = vec![
+            gpu(0.0, 0.0, 22_000),
+            GpuStats {
+                index: 1,
+                ..gpu(0.0, 0.0, 400)
+            },
+        ];
+        let l = weight_layout(Some(&m), &gpus);
+        assert!(l.known);
+        assert_eq!(l.cpu_bytes, 0);
+        // With no card at all the weights can only be in RAM.
+        assert_eq!(weight_layout(Some(&m), &[]).cpu_bytes, 20_000_000_000);
     }
 }

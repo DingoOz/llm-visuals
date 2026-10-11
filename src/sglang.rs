@@ -374,6 +374,8 @@ impl SglangAdapter {
             ctx_max: 0,
             prompt_tokens,
             prompt_processed,
+            prefill_tps: None,
+            prefill_secs: None,
             decoded,
             decoded_present: true,
             cache_tokens,
@@ -557,6 +559,43 @@ mod tests {
         let (s5, _) = a.observe(&loads(0, 0, 200, 90, 150), None);
         assert!(!s5.processing);
         assert_eq!(s5.id_task, 2);
+    }
+
+    #[test]
+    fn prefill_and_decode_keep_counter_based_measurements() {
+        use crate::perf::PerfTracker;
+        use std::time::{Duration, Instant};
+
+        let mut adapter = SglangAdapter::new();
+        let mut perf = PerfTracker::new();
+        let now = Instant::now();
+        let counters = [
+            loads(0, 0, 100, 0, 0),
+            loads(1, 500, 300, 0, 0),
+            loads(1, 1000, 700, 0, 0),
+            loads(1, 1020, 700, 20, 20),
+            loads(0, 0, 700, 40, 40),
+        ];
+        for (i, counters) in counters.iter().enumerate() {
+            let (stats, _) = adapter.observe(counters, None);
+            assert!(stats.prefill_tps.is_none());
+            assert!(stats.prefill_secs.is_none());
+            perf.observe(&stats, now + Duration::from_millis(400 * i as u64));
+            if i == 2 {
+                assert_eq!(perf.prefill_tps, 750.0);
+            }
+            if i == 3 {
+                assert_eq!(perf.decode_tps, 20.0 / 1.2);
+            }
+        }
+        let request = perf.history.back().unwrap();
+        assert_eq!(request.prefill_tokens, 600);
+        assert_eq!(request.decoded, 40);
+        assert_eq!(request.avg_prefill_tps(), 750.0);
+        assert_eq!(request.avg_decode_tps(), 50.0);
+        assert!(request.measured_prefill_tps.is_none());
+        assert_eq!(perf.session_prefilled, 600);
+        assert_eq!(perf.session_decoded, 40);
     }
 
     #[test]

@@ -1,0 +1,168 @@
+# HELP vllm:num_requests_running Requests reading their prompt or generating.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{model_name="qwen3.8-flash-next-iq2_xs"} 1
+# HELP vllm:num_requests_waiting Requests waiting for their turn.
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{model_name="qwen3.8-flash-next-iq2_xs"} 0
+# HELP vllm:kv_cache_usage_perc The running request's share of the context (1 = full).
+# TYPE vllm:kv_cache_usage_perc gauge
+vllm:kv_cache_usage_perc{model_name="qwen3.8-flash-next-iq2_xs"} 0.5025
+# HELP vllm:prompt_tokens_total Prompt tokens of the finished requests.
+# TYPE vllm:prompt_tokens_total counter
+vllm:prompt_tokens_total{model_name="qwen3.8-flash-next-iq2_xs"} 58
+# HELP vllm:generation_tokens_total Generated tokens.
+# TYPE vllm:generation_tokens_total counter
+vllm:generation_tokens_total{model_name="qwen3.8-flash-next-iq2_xs"} 132
+# HELP vllm:request_success_total Finished requests.
+# TYPE vllm:request_success_total counter
+vllm:request_success_total{model_name="qwen3.8-flash-next-iq2_xs"} 1
+# HELP vllm:prefix_cache_queries_total Prompt tokens looked up in the prompt cache.
+# TYPE vllm:prefix_cache_queries_total counter
+vllm:prefix_cache_queries_total{model_name="qwen3.8-flash-next-iq2_xs"} 58
+# HELP vllm:prefix_cache_hits_total Prompt tokens the prompt cache already held.
+# TYPE vllm:prefix_cache_hits_total counter
+vllm:prefix_cache_hits_total{model_name="qwen3.8-flash-next-iq2_xs"} 0
+# HELP vllm:spec_decode_num_draft_tokens_total MTP draft tokens offered.
+# TYPE vllm:spec_decode_num_draft_tokens_total counter
+vllm:spec_decode_num_draft_tokens_total{model_name="qwen3.8-flash-next-iq2_xs"} 0
+# HELP vllm:spec_decode_num_accepted_tokens_total MTP draft tokens accepted.
+# TYPE vllm:spec_decode_num_accepted_tokens_total counter
+vllm:spec_decode_num_accepted_tokens_total{model_name="qwen3.8-flash-next-iq2_xs"} 0
+# HELP vllm:num_preemptions_total Preempted requests (Strata does not preempt).
+# TYPE vllm:num_preemptions_total counter
+vllm:num_preemptions_total{model_name="qwen3.8-flash-next-iq2_xs"} 0
+# HELP vllm:time_to_first_token_seconds Time to the first token.
+# TYPE vllm:time_to_first_token_seconds histogram
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.001"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.005"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.01"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.02"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.04"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.06"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.08"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.1"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.25"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.5"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.75"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="1.0"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="2.5"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="5.0"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="7.5"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="10.0"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="20.0"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="40.0"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="80.0"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="160.0"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="640.0"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="2560.0"} 0
+vllm:time_to_first_token_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="+Inf"} 0
+vllm:time_to_first_token_seconds_sum{model_name="qwen3.8-flash-next-iq2_xs"} 0.0
+vllm:time_to_first_token_seconds_count{model_name="qwen3.8-flash-next-iq2_xs"} 0
+# HELP vllm:inter_token_latency_seconds Time between two tokens.
+# TYPE vllm:inter_token_latency_seconds histogram
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.001"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.005"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.01"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.02"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.04"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.06"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.08"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.1"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.25"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.5"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.75"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="1.0"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="2.5"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="5.0"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="7.5"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="10.0"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="20.0"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="40.0"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="80.0"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="160.0"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="640.0"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="2560.0"} 0
+vllm:inter_token_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="+Inf"} 0
+vllm:inter_token_latency_seconds_sum{model_name="qwen3.8-flash-next-iq2_xs"} 0.0
+vllm:inter_token_latency_seconds_count{model_name="qwen3.8-flash-next-iq2_xs"} 0
+# HELP vllm:e2e_request_latency_seconds A request from start to end.
+# TYPE vllm:e2e_request_latency_seconds histogram
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.001"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.005"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.01"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.02"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.04"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.06"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.08"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.1"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.25"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.5"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="0.75"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="1.0"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="2.5"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="5.0"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="7.5"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="10.0"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="20.0"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="40.0"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="80.0"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="160.0"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="640.0"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="2560.0"} 0
+vllm:e2e_request_latency_seconds_bucket{model_name="qwen3.8-flash-next-iq2_xs",le="+Inf"} 0
+vllm:e2e_request_latency_seconds_sum{model_name="qwen3.8-flash-next-iq2_xs"} 0.0
+vllm:e2e_request_latency_seconds_count{model_name="qwen3.8-flash-next-iq2_xs"} 0
+# HELP strata:live_state 1 for what the engine is doing (live.state).
+# TYPE strata:live_state gauge
+strata:live_state{model_name="qwen3.8-flash-next-iq2_xs",state="unloaded"} 0
+strata:live_state{model_name="qwen3.8-flash-next-iq2_xs",state="idle"} 0
+strata:live_state{model_name="qwen3.8-flash-next-iq2_xs",state="reading"} 0
+strata:live_state{model_name="qwen3.8-flash-next-iq2_xs",state="generating"} 1
+# HELP strata:live_tok_s Decode rate over the last seconds (live.tok_s).
+# TYPE strata:live_tok_s gauge
+strata:live_tok_s{model_name="qwen3.8-flash-next-iq2_xs"} 43.9
+# HELP strata:live_prefill_tok_s_mean Prompt reading rate of the running request (live.prefill_tok_s_mean).
+# TYPE strata:live_prefill_tok_s_mean gauge
+strata:live_prefill_tok_s_mean{model_name="qwen3.8-flash-next-iq2_xs"} 0
+# HELP strata:live_prompt_read Prompt tokens read so far by the running request (live.prompt_read).
+# TYPE strata:live_prompt_read gauge
+strata:live_prompt_read{model_name="qwen3.8-flash-next-iq2_xs"} 0
+# HELP strata:engine_max_context The engine's context (engine.max_context).
+# TYPE strata:engine_max_context gauge
+strata:engine_max_context{model_name="qwen3.8-flash-next-iq2_xs"} 32768
+# HELP strata:totals_prompt_seconds_total Time spent reading prompts (totals.prompt_ms).
+# TYPE strata:totals_prompt_seconds_total counter
+strata:totals_prompt_seconds_total{model_name="qwen3.8-flash-next-iq2_xs"} 1.891
+# HELP strata:totals_decode_seconds_total Time spent generating (totals.decode_ms).
+# TYPE strata:totals_decode_seconds_total counter
+strata:totals_decode_seconds_total{model_name="qwen3.8-flash-next-iq2_xs"} 5.41
+# HELP strata:last_hit_rate The last request's expert cache hit rate (requests[0].hit_rate).
+# TYPE strata:last_hit_rate gauge
+strata:last_hit_rate{model_name="qwen3.8-flash-next-iq2_xs"} 0.753
+# HELP strata:last_decode_tok_s The last request's decode rate (requests[0].decode_tok_s).
+# TYPE strata:last_decode_tok_s gauge
+strata:last_decode_tok_s{model_name="qwen3.8-flash-next-iq2_xs"} 24.4
+# HELP strata:gpu_util GPU busy, percent (hardware.gpu_util).
+# TYPE strata:gpu_util gauge
+strata:gpu_util{model_name="qwen3.8-flash-next-iq2_xs",gpu="0"} 100
+# HELP strata:gpu_mem_used_bytes GPU memory in use (hardware.gpu_mem_used).
+# TYPE strata:gpu_mem_used_bytes gauge
+strata:gpu_mem_used_bytes{model_name="qwen3.8-flash-next-iq2_xs",gpu="0"} 16869228544
+# HELP strata:gpu_mem_total_bytes GPU memory (hardware.gpu_mem_total).
+# TYPE strata:gpu_mem_total_bytes gauge
+strata:gpu_mem_total_bytes{model_name="qwen3.8-flash-next-iq2_xs",gpu="0"} 17179869184
+# HELP strata:gpu_temp_celsius GPU temperature (hardware.gpu_temp).
+# TYPE strata:gpu_temp_celsius gauge
+strata:gpu_temp_celsius{model_name="qwen3.8-flash-next-iq2_xs",gpu="0"} 64
+# HELP strata:gpu_power_watts GPU power draw (hardware.gpu_power).
+# TYPE strata:gpu_power_watts gauge
+strata:gpu_power_watts{model_name="qwen3.8-flash-next-iq2_xs",gpu="0"} 119.335
+# HELP strata:cpu CPU busy, percent (hardware.cpu).
+# TYPE strata:cpu gauge
+strata:cpu{model_name="qwen3.8-flash-next-iq2_xs"} 52.9
+# HELP strata:ram_used_bytes RAM in use (hardware.ram_used).
+# TYPE strata:ram_used_bytes gauge
+strata:ram_used_bytes{model_name="qwen3.8-flash-next-iq2_xs"} 44515999744
+# HELP strata:ram_total_bytes RAM (hardware.ram_total).
+# TYPE strata:ram_total_bytes gauge
+strata:ram_total_bytes{model_name="qwen3.8-flash-next-iq2_xs"} 164310102016

@@ -187,6 +187,7 @@ fn demo_model_n(ctx_max: usize, idx: usize) -> DetectedModel {
             engram_bytes: 0,
             block_bytes: vec![p.file_bytes / p.n_layers as u64; p.n_layers],
             n_tensors: 753,
+            estimated: false,
         }),
         vision: p.vision.map(|(device, gpu)| Vision {
             loaded: Some(true),

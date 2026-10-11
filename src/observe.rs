@@ -57,14 +57,20 @@ impl HttpAuth {
     }
 }
 
-fn http_request(host: &str, port: u16, path: &str, auth: &HttpAuth) -> String {
+/// What every endpoint is asked for unless it negotiates its format.
+const ACCEPT_ANY: &str = "application/json, text/plain, */*";
+/// For an endpoint that picks its format from `Accept`: Strata's `/metrics`
+/// (0.1.40.2+) answers anyone who takes `text/plain` in Prometheus text.
+const ACCEPT_JSON: &str = "application/json";
+
+fn http_request(host: &str, port: u16, path: &str, auth: &HttpAuth, accept: &str) -> String {
     let authority = if host.contains(':') && !host.starts_with('[') {
         format!("[{host}]:{port}")
     } else {
         format!("{host}:{port}")
     };
     format!(
-        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nAccept: application/json, text/plain, */*\r\n{}\r\n",
+        "GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nAccept: {accept}\r\n{}\r\n",
         auth.authorization_header()
     )
 }
@@ -74,8 +80,15 @@ fn http_request(host: &str, port: u16, path: &str, auth: &HttpAuth) -> String {
 pub struct LiveStats {
     pub ctx_max: usize,
     pub prompt_tokens: usize,
-    /// Prompt tokens pushed through prefill so far in this request (0 when idle).
+    /// Prompt tokens processed so far; adapters may retain final counters
+    /// while idle so a just-completed request can be recorded.
     pub prompt_processed: usize,
+    /// Engine-measured prefill throughput. Some(0) suppresses rates inferred
+    /// from chunked progress or positions belonging to a cached prefix.
+    pub prefill_tps: Option<f32>,
+    /// Completed request's prompt-processing duration. When present,
+    /// prompt_processed is the authoritative uncached token count.
+    pub prefill_secs: Option<f64>,
     pub decoded: usize,
     /// False when this `/slots` sample omitted `n_decoded`. A missing field
     /// is not a real zero: recent llama.cpp dev builds leave it out while
@@ -105,7 +118,7 @@ pub struct LiveStats {
     /// `(decoded - 1) / itl_sum`. Always 0.0 on llama.cpp.
     pub itl_sum: f64,
 
-    /// The finishing request's full counters (vLLM). Set on the poll
+    /// The finishing request's full counters (vLLM or Strata). Set on the poll
     /// where a completion and a successor's admission share one scrape:
     /// the adapter re-anchors its baselines onto the successor, so
     /// without this the finished request would look empty and its row
@@ -169,14 +182,15 @@ impl DecodeFallback {
     }
 }
 
-/// A vLLM request's full counters against the baseline in effect when it
-/// was admitted — captured on the poll where the adapter re-anchors
-/// onto a successor, so the finished request still gets a table row.
+/// A request's final counters captured when its completion and a successor
+/// share one poll, so the finished request still gets an accurate table row.
 #[derive(Debug, Clone, Default)]
 pub struct ClosingRequest {
     pub prompt: usize,
     pub cached: usize,
     pub gen: usize,
+    /// Strata's prompt-processing duration, separate from polling intervals.
+    pub prefill_secs: Option<f64>,
     /// Server-measured TTFT (mean over the window's completions).
     pub ttft_secs: f64,
     /// Sum of per-request inter-token latencies (see LiveStats).
@@ -420,6 +434,8 @@ pub fn parse_slots(body: &str) -> Option<LiveStats> {
         ctx_max: u("n_ctx"),
         prompt_tokens: u("n_prompt_tokens"),
         prompt_processed: u("n_prompt_tokens_processed"),
+        prefill_tps: None,
+        prefill_secs: None,
         decoded,
         decoded_present,
         cache_tokens: u("n_prompt_tokens_cache"),
@@ -470,12 +486,33 @@ pub async fn http_get(
     path: &str,
     auth: &HttpAuth,
 ) -> Result<String, HttpError> {
+    http_fetch(host, port, path, auth, ACCEPT_ANY).await
+}
+
+/// `http_get` that accepts JSON only, for an endpoint that would otherwise
+/// answer in another format.
+pub async fn http_get_json(
+    host: &str,
+    port: u16,
+    path: &str,
+    auth: &HttpAuth,
+) -> Result<String, HttpError> {
+    http_fetch(host, port, path, auth, ACCEPT_JSON).await
+}
+
+async fn http_fetch(
+    host: &str,
+    port: u16,
+    path: &str,
+    auth: &HttpAuth,
+    accept: &str,
+) -> Result<String, HttpError> {
     let connect = TcpStream::connect((host, port));
     let mut stream = tokio::time::timeout(Duration::from_millis(500), connect)
         .await
         .map_err(|_| HttpError::ConnectTimeout)?
         .map_err(HttpError::Connect)?;
-    let req = http_request(host, port, path, auth);
+    let req = http_request(host, port, path, auth, accept);
     stream
         .write_all(req.as_bytes())
         .await
@@ -501,24 +538,47 @@ mod tests {
     #[test]
     fn authenticated_request_uses_bearer_header() {
         let auth = HttpAuth(Some(Arc::from("test-secret")));
-        let request = http_request("127.0.0.1", 11434, "/metrics", &auth);
+        let request = http_request("127.0.0.1", 11434, "/metrics", &auth, ACCEPT_ANY);
         assert!(request.contains("Authorization: Bearer test-secret\r\n"));
         assert!(request.ends_with("\r\n\r\n"));
 
-        let request = http_request("127.0.0.1", 11434, "/metrics", &HttpAuth::default());
+        let request = http_request(
+            "127.0.0.1",
+            11434,
+            "/metrics",
+            &HttpAuth::default(),
+            ACCEPT_ANY,
+        );
         assert!(!request.contains("Authorization:"));
 
         let detected = HttpAuth::from_token(Some("cmdline-key".into()));
         let file = HttpAuth::from_token(Some("file-key".into()));
-        let request = http_request("127.0.0.1", 8080, "/slots", &detected.or(&file));
+        let request = http_request("127.0.0.1", 8080, "/slots", &detected.or(&file), ACCEPT_ANY);
         assert!(request.contains("Authorization: Bearer cmdline-key\r\n"));
         let request = http_request(
             "127.0.0.1",
             8080,
             "/slots",
             &HttpAuth::from_token(None).or(&file),
+            ACCEPT_ANY,
         );
         assert!(request.contains("Authorization: Bearer file-key\r\n"));
+    }
+
+    #[test]
+    fn json_request_does_not_accept_plain_text() {
+        // Strata's serve/prometheus.py: Prometheus text for an Accept that
+        // names text/plain or openmetrics, the JSON document otherwise.
+        let wants_prometheus =
+            |request: &str| request.contains("text/plain") || request.contains("openmetrics");
+        let auth = HttpAuth::default();
+        let any = http_request("127.0.0.1", 8095, "/metrics", &auth, ACCEPT_ANY);
+        assert!(any.contains("\r\nAccept: application/json, text/plain, */*\r\n"));
+        assert!(wants_prometheus(&any));
+        let json = http_request("127.0.0.1", 8095, "/metrics", &auth, ACCEPT_JSON);
+        assert!(json.contains("\r\nAccept: application/json\r\n"));
+        assert!(!wants_prometheus(&json));
+        assert!(json.ends_with("\r\n\r\n"));
     }
 
     #[test]
@@ -528,6 +588,8 @@ mod tests {
         assert_eq!(s.ctx_max, 98304);
         assert_eq!(s.prompt_tokens, 2537);
         assert_eq!(s.prompt_processed, 900);
+        assert!(s.prefill_tps.is_none());
+        assert!(s.prefill_secs.is_none());
         assert_eq!(s.decoded, 12);
         assert!(s.decoded_present);
         assert_eq!(s.cache_tokens, 100);
@@ -536,6 +598,49 @@ mod tests {
         assert_eq!(s.slots_busy, 0);
         assert_eq!(s.spec_types, "none,draft-mtp");
         assert!((s.cache_hit_frac() - 100.0 / 2537.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn llama_slots_keep_poll_based_prefill_and_decode_rates() {
+        use crate::perf::PerfTracker;
+
+        let mut perf = PerfTracker::new();
+        let now = std::time::Instant::now();
+        for (i, (busy, prompt, processed, decoded)) in [
+            (false, 0, 0, 0),
+            (true, 1000, 200, 0),
+            (true, 1000, 600, 0),
+            (true, 1000, 1000, 0),
+            (true, 1000, 1000, 10),
+            (true, 1000, 1000, 20),
+            (false, 1000, 0, 20),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let stats = parse_slots(&format!(
+                r#"[{{"id_task":1,"is_processing":{busy},"n_prompt_tokens":{prompt},
+                    "n_prompt_tokens_processed":{processed},"next_token":[{{"n_decoded":{decoded}}}]}}]"#
+            ))
+            .unwrap();
+            assert!(stats.prefill_tps.is_none());
+            assert!(stats.prefill_secs.is_none());
+            perf.observe(&stats, now + Duration::from_millis(200 * i as u64));
+            if i == 2 {
+                assert_eq!(perf.prefill_tps, 1500.0);
+            }
+            if i == 5 {
+                assert_eq!(perf.decode_tps, 20.0);
+            }
+        }
+        let request = perf.history.back().unwrap();
+        assert_eq!(request.prefill_tokens, 1000);
+        assert_eq!(request.decoded, 20);
+        assert!((request.avg_prefill_tps() - 1000.0 / 0.6).abs() < 0.01);
+        assert_eq!(request.avg_decode_tps(), 50.0);
+        assert!(request.measured_prefill_tps.is_none());
+        assert_eq!(perf.session_prefilled, 1000);
+        assert_eq!(perf.session_decoded, 20);
     }
 
     #[test]

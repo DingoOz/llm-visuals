@@ -14,6 +14,7 @@ mod observe;
 mod perf;
 mod pipeline;
 mod render;
+mod safetensors;
 mod settings;
 mod sglang;
 mod strata;
@@ -363,15 +364,15 @@ async fn poll_server(
         }
     }
     if model.engine == "strata" {
-        // Strata has no /slots or Prometheus counters: its /metrics is one
-        // JSON document from a Python server, so never poll it faster than
-        // 400 ms.
+        // Strata is read from its JSON /metrics: one document from a
+        // Python server, so never poll it faster than 400 ms.
         let delay = poll.max(Duration::from_millis(400));
+        let mut adapter = strata::StrataAdapter::default();
         let mut misses = 0u32;
         loop {
             if let Some(m) = strata::poll_metrics(&model.host, port, &auth).await {
                 misses = 0;
-                let mut stats = strata::live_stats(&m);
+                let mut stats = adapter.observe(&m);
                 if stats.ctx_max == 0 {
                     stats.ctx_max = model.ctx_max.unwrap_or(0);
                 }
@@ -943,6 +944,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         if gpu_updated {
+            // Unified-memory parts (GB10 / DGX Spark) have no device memory:
+            // build their VRAM numbers from the servers' own occupancy report
+            // over system RAM before the perf tracker sees the sample, so the
+            // bandwidth pool meter fills too. Re-applied on every drain
+            // because gpu_rx replaces the sample wholesale.
+            gpu::apply_unified_memory(
+                &mut latest_gpu,
+                sys_ram_total_mb.unwrap_or(0),
+                server_reported_gb(slots.iter().map(|s| &s.live)),
+            );
             // The cards are shared, so every model sees the same samples.
             for slot in &mut slots {
                 slot.perf.observe_gpu(&latest_gpu, now);
@@ -1062,15 +1073,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let frame_dt = (now - last_frame).as_secs_f32().clamp(0.0, 1.0);
         last_frame = now;
-        // Unified-memory parts (GB10 / DGX Spark) have no device memory to
-        // show: build their VRAM bar from the servers' own occupancy report
-        // over system RAM. Re-applied every frame because gpu_rx replaces
-        // the sample wholesale on every drain.
-        gpu::apply_unified_memory(
-            &mut latest_gpu,
-            sys_ram_total_mb.unwrap_or(0),
-            server_reported_gb(slots.iter().map(|s| &s.live)),
-        );
         for slot in &mut slots {
             if slot.live.ctx_max == 0 {
                 slot.live.ctx_max = slot.ctx_max;
@@ -1439,6 +1441,84 @@ mod tests {
             }
         });
         (port, shutdown_tx)
+    }
+
+    /// A server that picks the format of `/metrics` from `Accept` the way
+    /// Strata 0.1.40.2+ does, and has no `owned_by` in `/v1/models`.
+    async fn spawn_strata_server() -> (u16, tokio::sync::oneshot::Sender<()>) {
+        let json = std::fs::read_to_string("fixtures/strata-metrics.json").unwrap();
+        let prom = std::fs::read_to_string("fixtures/strata-metrics.prom").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    res = listener.accept() => {
+                        let Ok((mut stream, _)) = res else { break };
+                        let (json, prom) = (json.clone(), prom.clone());
+                        tokio::spawn(async move {
+                            let mut buf = [0u8; 1024];
+                            let Ok(n) = stream.read(&mut buf).await else { return };
+                            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                            let accept = req
+                                .lines()
+                                .find_map(|l| l.strip_prefix("Accept:"))
+                                .unwrap_or("");
+                            let (status, body) = if req.starts_with("GET /v1/models") {
+                                ("200 OK", r#"{"object":"list","data":[{"id":"qwen3.8-flash-next-iq2_xs","object":"model"}]}"#.to_string())
+                            } else if !req.starts_with("GET /metrics") {
+                                ("404 Not Found", r#"{"error":{"message":"not found"}}"#.to_string())
+                            } else if accept.contains("text/plain") || accept.contains("openmetrics") {
+                                ("200 OK", prom)
+                            } else {
+                                ("200 OK", json)
+                            };
+                            let resp = format!(
+                                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = stream.write_all(resp.as_bytes()).await;
+                        });
+                    }
+                }
+            }
+        });
+        (port, shutdown_tx)
+    }
+
+    #[tokio::test]
+    async fn strata_poll_asks_for_json_from_a_server_that_negotiates() {
+        let (port, _shutdown) = spawn_strata_server().await;
+        let auth = HttpAuth::default();
+        // What every other endpoint is sent gets the Prometheus rendering.
+        let any = observe::http_get("127.0.0.1", port, "/metrics", &auth)
+            .await
+            .unwrap();
+        assert!(strata::parse_metrics(&any).is_none());
+        let m = strata::poll_metrics("127.0.0.1", port, &auth)
+            .await
+            .expect("the JSON document");
+        assert_eq!(m.state, "generating");
+        assert_eq!(m.model.as_deref(), Some("qwen3.8-flash-next-iq2_xs"));
+    }
+
+    #[tokio::test]
+    async fn discover_names_a_negotiating_strata_server_strata() {
+        let (port, _shutdown) = spawn_strata_server().await;
+        let ep = format!("http://127.0.0.1:{port}/v1");
+        let args = Args::try_parse_from(["llm-visuals", "--endpoint", &ep]).unwrap();
+        let (models, err) = discover(&args, &HttpAuth::default()).await;
+        assert!(err.is_none(), "Unexpected error: {err:?}");
+        let m = models
+            .iter()
+            .find(|m| m.port == Some(port))
+            .expect("explicit endpoint model");
+        // Its Prometheus text is all vLLM metric names; it is still Strata.
+        assert_eq!(m.engine, "strata");
+        assert_eq!(m.name, "qwen3.8-flash-next-iq2_xs");
+        assert_eq!(m.ctx_max, Some(32768));
     }
 
     #[tokio::test]

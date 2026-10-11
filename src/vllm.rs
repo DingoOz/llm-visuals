@@ -258,6 +258,7 @@ impl VllmAdapter {
                         prompt: (c.prompt_total - self.base_prompt).max(0.0) as usize,
                         cached: (c.cached_total - self.base_cached).max(0.0) as usize,
                         gen: (c.generation_total - self.base_generation).max(0.0) as usize,
+                        prefill_secs: None,
                         // Mean TTFT over the completions in this window
                         // (exact when exactly one completed).
                         ttft_secs: (c.ttft_sum - self.base_ttft_sum).max(0.0)
@@ -313,6 +314,8 @@ impl VllmAdapter {
             ctx_max: 0,
             prompt_tokens: prompt_req + cached_req,
             prompt_processed: prompt_req,
+            prefill_tps: None,
+            prefill_secs: None,
             decoded: decoded_req,
             decoded_present: true,
             cache_tokens: cached_req,
@@ -400,6 +403,54 @@ mod tests {
         assert_eq!(s4.id_task, 9);
         assert_eq!(s4.decoded, 0);
         assert_eq!(s4.prompt_tokens, 0);
+        for stats in [&s, &s2, &s3, &s4] {
+            assert!(stats.prefill_tps.is_none());
+            assert!(stats.prefill_secs.is_none());
+            if let Some(closing) = &stats.closing {
+                assert!(closing.prefill_secs.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn prefill_and_decode_keep_vllm_histogram_measurements() {
+        use crate::perf::PerfTracker;
+        use std::time::{Duration, Instant};
+
+        let mut adapter = VllmAdapter::new();
+        let mut perf = PerfTracker::new();
+        let now = Instant::now();
+        let counters = [
+            counters(100.0, 50.0, 0.0, 7.0),
+            counters(100.0, 50.0, 1.0, 7.0),
+            VllmCounters {
+                prompt_total: 700.0,
+                generation_total: 90.0,
+                cached_total: 200.0,
+                succeeded: 8.0,
+                ttft_sum: 2.0,
+                ttft_count: 1.0,
+                itl_sum: 1.0,
+                ..Default::default()
+            },
+        ];
+        for (i, counters) in counters.iter().enumerate() {
+            let (stats, _) = adapter.observe(counters);
+            assert!(stats.prefill_tps.is_none());
+            assert!(stats.prefill_secs.is_none());
+            perf.observe(&stats, now + Duration::from_millis(400 * i as u64));
+        }
+        let request = perf.history.back().unwrap();
+        assert_eq!(request.prefill_tokens, 600);
+        assert_eq!(request.cached_tokens, 200);
+        assert_eq!(request.decoded, 40);
+        assert_eq!(request.avg_prefill_tps(), 300.0);
+        assert_eq!(request.avg_decode_tps(), 39.0);
+        assert!(request.measured_prefill_tps.is_none());
+        assert_eq!(perf.peak_prefill_tps, 300.0);
+        assert_eq!(perf.peak_decode_tps, 39.0);
+        assert_eq!(perf.session_prefilled, 600);
+        assert_eq!(perf.session_decoded, 40);
     }
 
     #[test]

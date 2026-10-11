@@ -148,6 +148,10 @@ pub struct TensorSummary {
     /// Bytes per transformer block (`blk.N.*`), indexed by N.
     pub block_bytes: Vec<u64>,
     pub n_tensors: usize,
+    /// True when the table came from safetensors shard headers rather than a
+    /// GGUF tensor table: the file bytes are exact, the bytes-per-token
+    /// projection is an estimate and the UI labels it `est`.
+    pub estimated: bool,
 }
 
 impl TensorSummary {
@@ -610,6 +614,7 @@ mod tests {
             engram_bytes: 0,
             block_bytes: vec![],
             n_tensors: 3,
+            estimated: false,
         };
         assert_eq!(t.active_bytes_per_token(0, 0), 950);
         assert_eq!(t.active_bytes_per_token(256, 8), 150 + 25);
