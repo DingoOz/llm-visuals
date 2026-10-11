@@ -7,6 +7,7 @@ mod fade;
 mod gguf;
 mod gpu;
 mod host;
+mod landscape;
 mod llm;
 mod model_detect;
 pub mod nvml;
@@ -718,6 +719,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let empty_fade = FadeState::new();
 
     let mut view_mode = ViewMode::All;
+    let mut camera = landscape::Camera::new();
+    let mut idle_frame = 0u8;
     let mut last_frame = Instant::now();
     let mut running = true;
     let mut done = false;
@@ -836,6 +839,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('p') => view_mode = ViewMode::Perf,
                         KeyCode::Char('h') => view_mode = ViewMode::Heatmap,
                         KeyCode::Char('m') => view_mode = ViewMode::MoE,
+                        KeyCode::Char('e') => view_mode = ViewMode::Landscape,
+                        // The landscape's camera: turn to the next corner,
+                        // look from higher or lower, stop or start the sway.
+                        KeyCode::Left if view_mode == ViewMode::Landscape => camera.rotate(-1),
+                        KeyCode::Right if view_mode == ViewMode::Landscape => camera.rotate(1),
+                        KeyCode::Up if view_mode == ViewMode::Landscape => camera.tilt(1),
+                        KeyCode::Down if view_mode == ViewMode::Landscape => camera.tilt(-1),
+                        KeyCode::Char(' ') if view_mode == ViewMode::Landscape => {
+                            camera.toggle_orbit()
+                        }
                         KeyCode::Char('b') => view_mode = ViewMode::Bandwidth,
                         KeyCode::Char('v') => view_mode = ViewMode::Models,
                         KeyCode::Tab => focus = (focus + 1) % n,
@@ -978,6 +991,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             slot.routing = Some(upd);
+            slot.fade.observe_experts(&e);
             slot.experts = Some(e);
         }
         while let Ok((pid, m)) = spec_rx.try_recv() {
@@ -1062,8 +1076,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if slots.iter().any(|slot| slot.live.processing) {
             last_visual_activity = now;
         }
-        let animate = now.duration_since(last_visual_activity) < Duration::from_secs(3);
-        if !animate && !ui_changed {
+        // The landscape's camera keeps moving on an idle server; freezing
+        // it (space) hands the idle screen back to the slow cadence.
+        let camera_moving = view_mode == ViewMode::Landscape && !camera.settled();
+        let active = now.duration_since(last_visual_activity) < Duration::from_secs(3);
+        // With nothing else going on the camera only sways, a fraction of a
+        // pixel a frame: one frame in three is as smooth and a third the work.
+        let swaying = camera_moving && !camera.turning() && !active && !ui_changed;
+        idle_frame = if swaying { (idle_frame + 1) % 3 } else { 0 };
+        if (!active && !camera_moving && !ui_changed) || idle_frame != 0 {
             if !running && !done {
                 break;
             }
@@ -1073,6 +1094,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let frame_dt = (now - last_frame).as_secs_f32().clamp(0.0, 1.0);
         last_frame = now;
+        if view_mode == ViewMode::Landscape {
+            camera.tick(frame_dt);
+        }
         for slot in &mut slots {
             if slot.live.ctx_max == 0 {
                 slot.live.ctx_max = slot.ctx_max;
@@ -1117,6 +1141,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             num_layers: cur.map(|v| v.num_layers).unwrap_or(bridge_layers),
             num_heads: cur.map(|v| v.num_heads).unwrap_or(bridge_heads),
             view: view_mode,
+            camera: &camera,
             status: &status,
             theme_name: &theme_name,
             demo: args.demo,
