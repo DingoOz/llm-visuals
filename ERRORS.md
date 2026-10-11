@@ -2,7 +2,7 @@
 
 ## Summary
 
-28 entries (as of 2026-10-08). Recurring themes:
+31 entries (as of 2026-10-12). Recurring themes:
 
 - **Optional or missing telemetry treated as a real value** (Logic, most common): a missing counter read as 0, record close gated on optional TTFT, unknown ctx rendered as full, model ownership derived from an unknown weight estimate. Rule of thumb: keep "unknown" distinct from zero and never gate state or ownership on an optional measurement.
 - **Under-discriminating matches when resolving processes/devices**: docker-proxy matched by IP only, comm-name gating, xe fans keyed by a constant path component, env GPU masks merged with host indices. Match on every discriminating field and prefer authoritative (driver/host) sources over inferred ones.
@@ -292,3 +292,33 @@
 - **Root cause:** Strata 0.1.40.2 began answering `/metrics` in Prometheus text (under vLLM's metric names) for any client that accepts `text/plain`. The JSON parser failed on every scrape, so a detected Strata server sat idle with no live numbers, and the endpoint probe matched `vllm:` in the text and called the server vLLM.
 - **Fix applied:** `http_get_json` asks for `application/json` alone and Strata's poll uses it; the probe recognises Strata's rendering by its `strata:` samples before the `vllm:` test and re-reads it as JSON.
 - **Prevention rule:** Ask an endpoint for exactly the format its parser reads, and identify a server by what only it emits, never by names another server's compatibility layer copies.
+
+### A short flag carried from one CLI to another that spells it differently — 2026-10-12
+
+- **Severity:** High
+- **Category:** API Misuse
+- **File(s):** `src/gpu.rs`
+- **Pattern:** Passing `-s <ms>` as a sample interval to two tools where `-s` means something else: macmon's `pipe -s N` is a sample count, and powermetrics' `-s` is `--samplers`.
+- **Root cause:** `macmon pipe -s 250` printed one line a second and exited after 250 lines. Every exit counted against a restart budget that was reset only when the last line was already 10 s old, so the GPU panel would have stopped for good at the sixth exit, about 25 minutes into a session. `powermetrics … -s -i 250` takes `-i` as the sampler list, so that source could not have produced a sample.
+- **Fix applied:** `macmon -i 250 pipe` and `powermetrics -i 250 -b 1`; `next_restart` counts only a child that printed nothing, and a stream silent since its spawn is reported like one silent since its last line.
+- **Prevention rule:** Take each flag from the tool's own help or source at the version in use, and run a stream past its shortest finite limit before calling it live-tested.
+
+### Parser and fixture written to an expected payload, not a captured one — 2026-10-12
+
+- **Severity:** High
+- **Category:** Logic
+- **File(s):** `src/gpu.rs`, `fixtures/macmon-pipe.json`
+- **Pattern:** A text parser whose keys were never seen in the tool's output, tested on a sample written to match the parser; and a captured fixture edited so that an assertion would hold.
+- **Root cause:** The powermetrics parser looked for `GPU active percentage`, `GPU power` and `RAM power` and split samples on a `Received SIGINFO` line. powermetrics prints `GPU HW active residency`, `GPU Power` and no RAM line, and opens each sample with `*** Sampled system activity`. Nothing matched, and a sample that matched nothing read as an idle GPU at 0 W. The macmon fixture's `ane_power` and `gpu_ram_power` had been raised from the captured 0 to 12 and 8 so the ceiling could be asserted at 20 W.
+- **Fix applied:** The parser and the sample framer follow the layout powermetrics prints; a sample with no GPU line is an error, not a zero; the fixture is the capture again, and the sum is tested on a line marked as synthetic.
+- **Prevention rule:** A parser's test input is a capture, or the test says it is not. Never edit a capture to fit an assertion, and keep "nothing matched" a different result from "matched zero".
+
+### Behaviour promised in a comment that the code could not reach — 2026-10-12
+
+- **Severity:** Medium
+- **Category:** Logic
+- **File(s):** `src/gpu.rs`, `src/main.rs`
+- **Pattern:** A second pass that marks rows by name after a first pass has already skipped them for carrying a value.
+- **Root cause:** The README and a doc comment said a server's reported occupancy replaces macmon's system-wide RAM figure in the unified bar. `apply_unified_memory` skipped every row whose memory was already filled, and macmon rows always are, so the override never ran; the rows were marked unified afterwards, by an `Apple ` name prefix that the `hw.model` fallback name does not carry.
+- **Fix applied:** The Apple backend marks its own rows unified, `apply_unified_memory` fills a pool that is already unified, and the name always carries the prefix. The separate marking pass is gone.
+- **Prevention rule:** A backend that knows what its rows are says so itself, and a behaviour a comment promises gets a test that reaches it.

@@ -551,11 +551,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut theme_name = args.theme.clone();
     let theme = colors::get_theme(&theme_name);
 
-    // Manual smoke tool: poll the real backend and print resolved rows, no
-    // TUI, no server needed. Not advertised in --help. The `--ignored`
-    // live tests in gpu.rs cover the same ground without an env-var hook
-    // in main.
-
     let (discovered, endpoint_err) = if args.demo {
         (demo::demo_models(DEMO_CTX, args.demo_models), None)
     } else {
@@ -724,16 +719,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut sys_ram_total_mb: Option<u64> = None;
     if let Some(backend) = &gpu_backend {
         match GpuMonitor::collect_once(backend) {
-            Ok(stats) => {
-                let mut stats = gpu::filter_gpus(stats, &args.gpu_indices());
-                gpu::apply_unified_memory(
-                    &mut stats,
-                    sys_ram_total_mb.unwrap_or(0),
-                    server_reported_gb(slots.iter().map(|s| &s.live)),
-                );
-                gpu::apple_unified_memory(&mut stats);
-                latest_gpu = stats;
-            }
+            Ok(stats) => latest_gpu = gpu::filter_gpus(stats, &args.gpu_indices()),
             Err(e) => gpu_error = Some(e),
         }
     }
@@ -958,30 +944,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let now = Instant::now();
         let mut gpu_updated = false;
-        let mut gpu_drained = false;
         while let Ok(sample) = gpu_rx.try_recv() {
             ui_changed = true;
             match sample {
-                // An empty sample is a warm-up or a transient failure
-                // holding the last frame (powermetrics sampler start,
-                // macmon first sample): replacing `latest_gpu` with it
-                // would blank the cards, so only a non-empty frame
-                // replaces the last one.
+                // An empty sample is a source still warming up (the Apple
+                // streams take a second or more to print their first):
+                // replacing `latest_gpu` with it would blank the cards, so
+                // only a non-empty frame replaces the last one.
+                Ok(stats) if stats.is_empty() => {}
                 Ok(stats) => {
-                    gpu_drained = true;
-                    if !stats.is_empty() {
-                        latest_gpu = stats;
-                        gpu_error = None;
-                        gpu_updated = true;
-                    }
+                    latest_gpu = stats;
+                    gpu_error = None;
+                    gpu_updated = true;
                 }
-                Err(e) => {
-                    gpu_drained = true;
-                    gpu_error = Some(e);
-                }
+                Err(e) => gpu_error = Some(e),
             }
         }
-        if gpu_drained {
+        if gpu_updated {
             // Unified-memory parts (GB10 / DGX Spark) have no device memory:
             // build their VRAM numbers from the servers' own occupancy report
             // over system RAM before the perf tracker sees the sample, so the
@@ -992,12 +971,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sys_ram_total_mb.unwrap_or(0),
                 server_reported_gb(slots.iter().map(|s| &s.live)),
             );
-            // Apple Silicon: macmon's mem_* are system RAM (there is no
-            // device memory), so mark the pool unified even when no server
-            // occupancy arrived above.
-            gpu::apple_unified_memory(&mut latest_gpu);
-        }
-        if gpu_updated {
             // The cards are shared, so every model sees the same samples.
             for slot in &mut slots {
                 slot.perf.observe_gpu(&latest_gpu, now);
