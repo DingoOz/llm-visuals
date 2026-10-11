@@ -1875,14 +1875,17 @@ pub async fn probe_endpoint(
         }
     }
 
-    // A key guards /v1/* but not /metrics, so the scrape above still finds
-    // a keyed server; /v1/status then names the model the 401'd /v1/models
-    // could not.
-    if engine == "strata" && model_name.is_none() {
-        if let Some(st) = crate::strata::poll_status(host, port, auth).await {
-            model_name = st.model;
+    // A Strata server started with an API key answers /v1/models and
+    // /metrics with 401 when the key is missing or wrong, so nothing above
+    // has recognised it. /health is served without the key and names the
+    // service, the model and the context. The live numbers still need the
+    // key, since they come from /metrics.
+    if model_name.is_none() {
+        if let Some(h) = crate::strata::poll_health(host, port, auth).await {
+            engine = "strata".to_string();
+            model_name = h.model;
             if ctx_max.is_none() {
-                ctx_max = (st.max_context > 0).then_some(st.max_context);
+                ctx_max = (h.max_context > 0).then_some(h.max_context);
             }
         }
     }

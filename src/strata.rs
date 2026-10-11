@@ -175,21 +175,22 @@ pub async fn poll_metrics(host: &str, port: u16, auth: &HttpAuth) -> Option<Stra
     parse_metrics(&body)
 }
 
-/// What `GET /v1/status` says: `{"service":"strata", ...}`.
+/// What `GET /health` says:
+/// `{"status":"ok","max_context":…,"model":…,"api_key":…,"service":"strata"}`.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct StrataStatus {
+pub struct StrataHealth {
     pub model: Option<String>,
     pub max_context: usize,
 }
 
-/// Parse `/v1/status`. `None` unless it names the strata service, so other
-/// servers' status endpoints never false-positive.
-pub fn parse_status(body: &str) -> Option<StrataStatus> {
+/// Parse `/health`. `None` unless it names the strata service: llama.cpp
+/// answers the same path with a bare `{"status":"ok"}`.
+pub fn parse_health(body: &str) -> Option<StrataHealth> {
     let v: Value = serde_json::from_str(body).ok()?;
     if v.get("service").and_then(|s| s.as_str())? != "strata" {
         return None;
     }
-    Some(StrataStatus {
+    Some(StrataHealth {
         model: v
             .get("model")
             .and_then(|m| m.as_str())
@@ -199,9 +200,11 @@ pub fn parse_status(body: &str) -> Option<StrataStatus> {
     })
 }
 
-pub async fn poll_status(host: &str, port: u16, auth: &HttpAuth) -> Option<StrataStatus> {
-    let body = http_get(host, port, "/v1/status", auth).await.ok()?;
-    parse_status(&body)
+/// `/health` is the one endpoint a server started with an API key answers
+/// without it; `/metrics`, `/v1/models` and `/v1/status` all send 401.
+pub async fn poll_health(host: &str, port: u16, auth: &HttpAuth) -> Option<StrataHealth> {
+    let body = http_get(host, port, "/health", auth).await.ok()?;
+    parse_health(&body)
 }
 
 /// Strata's Prometheus rendering of `/metrics`. It carries vLLM's metric
@@ -771,16 +774,23 @@ mod tests {
     }
 
     #[test]
-    fn status_names_the_service_and_rejects_others() {
-        let st = parse_status(
-            r#"{"service":"strata","model":"qwen-iq2","max_context":32768,"version":"0.1.35"}"#,
+    fn health_names_the_service_and_rejects_others() {
+        // The fields serve/server.py puts in /health (Strata 7695859); not
+        // a captured reply.
+        let h = parse_health(
+            r#"{"status": "ok", "max_context": 32768, "model": "qwen-iq2", "images": false, "api_key": true, "loaded": true, "service": "strata"}"#,
         )
         .unwrap();
-        assert_eq!(st.model.as_deref(), Some("qwen-iq2"));
-        assert_eq!(st.max_context, 32768);
-        assert!(parse_status(r#"{"service":"vllm"}"#).is_none());
-        assert!(parse_status(r#"{"status":"ok"}"#).is_none());
-        assert!(parse_status("<html>401</html>").is_none());
+        assert_eq!(h.model.as_deref(), Some("qwen-iq2"));
+        assert_eq!(h.max_context, 32768);
+        assert!(parse_health(r#"{"service":"vllm"}"#).is_none());
+        // llama.cpp's /health, and what a keyed Strata sends everywhere else.
+        assert!(parse_health(r#"{"status":"ok"}"#).is_none());
+        assert!(parse_health(
+            r#"{"error": {"type": "authentication_error", "message": "missing or wrong API key"}}"#
+        )
+        .is_none());
+        assert!(parse_health("<html>401</html>").is_none());
     }
 
     #[test]
