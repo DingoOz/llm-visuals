@@ -408,6 +408,9 @@ async fn poll_server(
         // off, instead of freezing the UI mid-request at full poll rate.
         let mut adapter = vllm::VllmAdapter::new();
         let mut misses = 0u32;
+        // NInfer reports its context limit. Without --max-context it runs
+        // at the server's default, which the command line cannot tell.
+        let mut ctx_max = model.ctx_max.unwrap_or(0);
         loop {
             let counters = if model.engine == "ninfer" {
                 ninfer::poll(&model.host, port, &model.name, &others, &auth).await
@@ -417,7 +420,10 @@ async fn poll_server(
             if let Some(c) = counters {
                 misses = 0;
                 let (mut stats, spec) = adapter.observe(&c);
-                stats.ctx_max = model.ctx_max.unwrap_or(0);
+                if c.max_context > 0 {
+                    ctx_max = c.max_context;
+                }
+                stats.ctx_max = ctx_max;
                 let _ = live_tx.try_send((model.key(), stats));
                 if let Some(m) = spec {
                     let _ = spec_tx.try_send((model.key(), m));
@@ -426,7 +432,7 @@ async fn poll_server(
                 misses = misses.saturating_add(1);
                 if misses == 3 {
                     let stats = LiveStats {
-                        ctx_max: model.ctx_max.unwrap_or(0),
+                        ctx_max,
                         ..Default::default()
                     };
                     let _ = live_tx.try_send((model.key(), stats));

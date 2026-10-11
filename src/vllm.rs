@@ -56,6 +56,9 @@ pub struct VllmCounters {
     /// The speculative backend when the server names it (NInfer's
     /// `speculative_backend` label); the panel's title. None reads as MTP.
     pub spec_backend: Option<String>,
+    /// The context limit when the server reports one (NInfer's
+    /// `ninfer_max_context_tokens`); 0 when it does not.
+    pub max_context: usize,
     /// Served model name from the metrics labels; the identity marker for
     /// the cross-wiring guard.
     pub model_name: Option<String>,

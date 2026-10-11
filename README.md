@@ -564,7 +564,9 @@ endpoint are detected as `ninfer-serve` (port 8080 when `--port` is absent),
 or can be selected with `--endpoint http://127.0.0.1:8080`. The adapter reads
 NInfer's own `ninfer_*` counters from `GET /metrics` for live prefill and
 decode, prefix reuse, TTFT and speculative acceptance; the speculative panel
-is titled with the backend the server reports (`mtp`, `dflash2`, …). Use the
+is titled with the backend the server reports (`mtp`, `dflash2`, …). The
+context limit is the server's `ninfer_max_context_tokens`, so a launch without
+`--max-context` still fills the context panel. Use the
 server's own port when it runs behind a gateway; API keys work through the
 existing `--api-key-file` option. As with the vLLM adapter, request rows
 reconstructed from aggregate counters are activity windows, not individual

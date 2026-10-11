@@ -37,6 +37,7 @@ pub fn parse_metrics(body: &str) -> Option<VllmCounters> {
             "spec_decode_draft_tokens_total" => c.spec_draft_tokens = value,
             "spec_decode_accepted_tokens_total" => c.spec_accepted = value,
             "spec_decode_draft_window" => depth = value as u32,
+            "max_context_tokens" => c.max_context = value as usize,
             "model_info" => {
                 if let Some(label) = head.strip_prefix("model_info{model_name=") {
                     // Prometheus label escaping is a subset of JSON string escaping.
@@ -95,6 +96,7 @@ mod tests {
             "ninfer_requests_total{outcome=\"cancelled\"} 1\n",
             "ninfer_requests_total{outcome=\"rejected\"} 7\n",
             "ninfer_spec_decode_draft_window 3\n",
+            "ninfer_max_context_tokens 8192\n",
             "ninfer_spec_decode_rounds_total 4\n",
             "ninfer_spec_decode_draft_tokens_total 12\n",
             "ninfer_spec_decode_accepted_tokens_total 6\n",
@@ -108,6 +110,7 @@ mod tests {
         assert_eq!(c.running, 2.0);
         assert_eq!(c.spec_accepted / c.spec_draft_tokens, 0.5);
         assert_eq!(c.spec_positions.len(), 3);
+        assert_eq!(c.max_context, 8192);
         assert_eq!(c.ttft_sum / c.ttft_count, 0.25);
         assert_eq!(c.model_name.as_deref(), Some("my model\"\\name\nnext"));
         assert_eq!(c.spec_backend.as_deref(), Some("mtp"));
