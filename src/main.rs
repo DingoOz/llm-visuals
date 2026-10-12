@@ -1521,6 +1521,89 @@ mod tests {
         assert_eq!(m.ctx_max, Some(32768));
     }
 
+    /// A Strata server started with an API key. `/health` is open; every
+    /// other path answers 401 unless the request carries the key
+    /// (`_authorized` in serve/server.py).
+    async fn spawn_keyed_strata_server(
+        key: &'static str,
+    ) -> (u16, tokio::sync::oneshot::Sender<()>) {
+        let json = std::fs::read_to_string("fixtures/strata-metrics.json").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    res = listener.accept() => {
+                        let Ok((mut stream, _)) = res else { break };
+                        let json = json.clone();
+                        tokio::spawn(async move {
+                            let mut buf = [0u8; 1024];
+                            let Ok(n) = stream.read(&mut buf).await else { return };
+                            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                            let keyed = req.contains(&format!("Authorization: Bearer {key}\r\n"));
+                            let (status, body) = if req.starts_with("GET /health") {
+                                ("200 OK", r#"{"status": "ok", "max_context": 32768, "model": "qwen3.8-flash-next-iq2_xs", "images": false, "api_key": true, "loaded": true, "service": "strata"}"#.to_string())
+                            } else if !keyed {
+                                ("401 Unauthorized", r#"{"error": {"type": "authentication_error", "message": "missing or wrong API key"}}"#.to_string())
+                            } else if req.starts_with("GET /v1/models") {
+                                ("200 OK", r#"{"object":"list","data":[{"id":"qwen3.8-flash-next-iq2_xs","object":"model"}]}"#.to_string())
+                            } else if req.starts_with("GET /metrics") {
+                                ("200 OK", json)
+                            } else {
+                                ("404 Not Found", r#"{"error":{"message":"not found"}}"#.to_string())
+                            };
+                            let resp = format!(
+                                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = stream.write_all(resp.as_bytes()).await;
+                        });
+                    }
+                }
+            }
+        });
+        (port, shutdown_tx)
+    }
+
+    #[tokio::test]
+    async fn discover_names_a_keyed_strata_server_from_health() {
+        let (port, _shutdown) = spawn_keyed_strata_server("test-secret").await;
+        let ep = format!("http://127.0.0.1:{port}/v1");
+        let args = Args::try_parse_from(["llm-visuals", "--endpoint", &ep]).unwrap();
+
+        // Without the key /v1/models and /metrics are refused. /health
+        // still says whose server it is, which model and how much context.
+        let none = HttpAuth::default();
+        let (models, err) = discover(&args, &none).await;
+        assert!(err.is_none(), "Unexpected error: {err:?}");
+        let m = models
+            .iter()
+            .find(|m| m.port == Some(port))
+            .expect("explicit endpoint model");
+        assert_eq!(m.engine, "strata");
+        assert_eq!(m.name, "qwen3.8-flash-next-iq2_xs");
+        assert_eq!(m.ctx_max, Some(32768));
+        // The live numbers are /metrics, and that stays behind the key.
+        assert!(strata::poll_metrics("127.0.0.1", port, &none)
+            .await
+            .is_none());
+
+        let key = HttpAuth::from_token(Some("test-secret".into()));
+        let (models, err) = discover(&args, &key).await;
+        assert!(err.is_none(), "Unexpected error: {err:?}");
+        let m = models
+            .iter()
+            .find(|m| m.port == Some(port))
+            .expect("explicit endpoint model");
+        assert_eq!(m.engine, "strata");
+        assert_eq!(m.name, "qwen3.8-flash-next-iq2_xs");
+        assert!(strata::poll_metrics("127.0.0.1", port, &key)
+            .await
+            .is_some());
+    }
+
     #[tokio::test]
     async fn discover_with_explicit_endpoint() {
         let (port, _shutdown) = spawn_mock_server(CANNED_VLLM_MODELS, CANNED_VLLM_METRICS).await;

@@ -496,6 +496,11 @@ server's command line and sends it as a bearer token, so no setup is needed.
 If the key is not on the command line, `--api-key-file` supplies one for
 every server.
 
+A Strata server started with a key answers `/metrics` and `/v1/models` with
+401 as well. Reached by `--endpoint` without the key it is still recognised:
+its `/health` is open and names the server, the model and the context. The
+live numbers come from `/metrics`, so they need the key.
+
 LM Studio starts every model it loads as such a llama-server, with its own
 port and key, so press `r` after it loads a different model. It has no switch
 for `--metrics`, but the llama-server it starts inherits its environment:
