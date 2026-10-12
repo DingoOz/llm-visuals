@@ -10,6 +10,7 @@ mod host;
 mod landscape;
 mod llm;
 mod model_detect;
+mod ninfer;
 pub mod nvml;
 mod observe;
 mod perf;
@@ -399,7 +400,7 @@ async fn poll_server(
             tokio::time::sleep(sleep).await;
         }
     }
-    if model.engine == "vllm" {
+    if model.engine == "vllm" || model.engine == "ninfer" {
         // vLLM has no /slots or /experts endpoints; its /metrics counters
         // drive the live stats and the MTP panel. The 'r' rescan drops
         // dead processes (same policy as the llama.cpp path); until then a
@@ -408,11 +409,22 @@ async fn poll_server(
         // off, instead of freezing the UI mid-request at full poll rate.
         let mut adapter = vllm::VllmAdapter::new();
         let mut misses = 0u32;
+        // NInfer reports its context limit. Without --max-context it runs
+        // at the server's default, which the command line cannot tell.
+        let mut ctx_max = model.ctx_max.unwrap_or(0);
         loop {
-            if let Some(c) = vllm::poll_vllm(&model.host, port, &model.name, &others, &auth).await {
+            let counters = if model.engine == "ninfer" {
+                ninfer::poll(&model.host, port, &model.name, &others, &auth).await
+            } else {
+                vllm::poll_vllm(&model.host, port, &model.name, &others, &auth).await
+            };
+            if let Some(c) = counters {
                 misses = 0;
                 let (mut stats, spec) = adapter.observe(&c);
-                stats.ctx_max = model.ctx_max.unwrap_or(0);
+                if c.max_context > 0 {
+                    ctx_max = c.max_context;
+                }
+                stats.ctx_max = ctx_max;
                 let _ = live_tx.try_send((model.key(), stats));
                 if let Some(m) = spec {
                     let _ = spec_tx.try_send((model.key(), m));
@@ -421,7 +433,7 @@ async fn poll_server(
                 misses = misses.saturating_add(1);
                 if misses == 3 {
                     let stats = LiveStats {
-                        ctx_max: model.ctx_max.unwrap_or(0),
+                        ctx_max,
                         ..Default::default()
                     };
                     let _ = live_tx.try_send((model.key(), stats));
@@ -532,6 +544,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Child of vision::cuda_bus_ids, run under a server's CUDA environment.
     if std::env::args().nth(1).as_deref() == Some(vision::CUDA_PROBE_ARG) {
         std::process::exit(if vision::print_cuda_bus_ids() { 0 } else { 1 });
+    }
+    // `--print-gpu` (optionally `--print-gpu --json`): one poll, print what
+    // the backend sees, exit. Under sudo this is the reviewable proof the
+    // powermetrics path ran on this Mac; before any terminal/DB side effects.
+    if std::env::args().nth(1).as_deref() == Some(gpu::PRINT_GPU_ARG) {
+        let as_json = std::env::args().skip(1).any(|a| a == "--json");
+        std::process::exit(if gpu::print_gpu_once(as_json) { 0 } else { 1 });
     }
     let launch = settings::launch();
     let mut args = launch.args.clone();
@@ -948,6 +967,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Ok(sample) = gpu_rx.try_recv() {
             ui_changed = true;
             match sample {
+                // An empty sample is a source still warming up (the Apple
+                // streams take a second or more to print their first):
+                // replacing `latest_gpu` with it would blank the cards, so
+                // only a non-empty frame replaces the last one.
+                Ok(stats) if stats.is_empty() => {}
                 Ok(stats) => {
                     latest_gpu = stats;
                     gpu_error = None;
@@ -1544,6 +1568,89 @@ mod tests {
         assert_eq!(m.engine, "strata");
         assert_eq!(m.name, "qwen3.8-flash-next-iq2_xs");
         assert_eq!(m.ctx_max, Some(32768));
+    }
+
+    /// A Strata server started with an API key. `/health` is open; every
+    /// other path answers 401 unless the request carries the key
+    /// (`_authorized` in serve/server.py).
+    async fn spawn_keyed_strata_server(
+        key: &'static str,
+    ) -> (u16, tokio::sync::oneshot::Sender<()>) {
+        let json = std::fs::read_to_string("fixtures/strata-metrics.json").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    res = listener.accept() => {
+                        let Ok((mut stream, _)) = res else { break };
+                        let json = json.clone();
+                        tokio::spawn(async move {
+                            let mut buf = [0u8; 1024];
+                            let Ok(n) = stream.read(&mut buf).await else { return };
+                            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                            let keyed = req.contains(&format!("Authorization: Bearer {key}\r\n"));
+                            let (status, body) = if req.starts_with("GET /health") {
+                                ("200 OK", r#"{"status": "ok", "max_context": 32768, "model": "qwen3.8-flash-next-iq2_xs", "images": false, "api_key": true, "loaded": true, "service": "strata"}"#.to_string())
+                            } else if !keyed {
+                                ("401 Unauthorized", r#"{"error": {"type": "authentication_error", "message": "missing or wrong API key"}}"#.to_string())
+                            } else if req.starts_with("GET /v1/models") {
+                                ("200 OK", r#"{"object":"list","data":[{"id":"qwen3.8-flash-next-iq2_xs","object":"model"}]}"#.to_string())
+                            } else if req.starts_with("GET /metrics") {
+                                ("200 OK", json)
+                            } else {
+                                ("404 Not Found", r#"{"error":{"message":"not found"}}"#.to_string())
+                            };
+                            let resp = format!(
+                                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            let _ = stream.write_all(resp.as_bytes()).await;
+                        });
+                    }
+                }
+            }
+        });
+        (port, shutdown_tx)
+    }
+
+    #[tokio::test]
+    async fn discover_names_a_keyed_strata_server_from_health() {
+        let (port, _shutdown) = spawn_keyed_strata_server("test-secret").await;
+        let ep = format!("http://127.0.0.1:{port}/v1");
+        let args = Args::try_parse_from(["llm-visuals", "--endpoint", &ep]).unwrap();
+
+        // Without the key /v1/models and /metrics are refused. /health
+        // still says whose server it is, which model and how much context.
+        let none = HttpAuth::default();
+        let (models, err) = discover(&args, &none).await;
+        assert!(err.is_none(), "Unexpected error: {err:?}");
+        let m = models
+            .iter()
+            .find(|m| m.port == Some(port))
+            .expect("explicit endpoint model");
+        assert_eq!(m.engine, "strata");
+        assert_eq!(m.name, "qwen3.8-flash-next-iq2_xs");
+        assert_eq!(m.ctx_max, Some(32768));
+        // The live numbers are /metrics, and that stays behind the key.
+        assert!(strata::poll_metrics("127.0.0.1", port, &none)
+            .await
+            .is_none());
+
+        let key = HttpAuth::from_token(Some("test-secret".into()));
+        let (models, err) = discover(&args, &key).await;
+        assert!(err.is_none(), "Unexpected error: {err:?}");
+        let m = models
+            .iter()
+            .find(|m| m.port == Some(port))
+            .expect("explicit endpoint model");
+        assert_eq!(m.engine, "strata");
+        assert_eq!(m.name, "qwen3.8-flash-next-iq2_xs");
+        assert!(strata::poll_metrics("127.0.0.1", port, &key)
+            .await
+            .is_some());
     }
 
     #[tokio::test]

@@ -3,7 +3,7 @@
 **A live terminal dashboard for the LLM running on your machine.**
 
 It finds the inference servers you already have up (llama.cpp `llama-server`,
-ollama, vLLM, SGLang, Strata, …), reads their counters and NVIDIA, AMD or Intel
+ollama, vLLM, SGLang, Strata, NInfer, …), reads their counters and NVIDIA, AMD or Intel
 GPU telemetry, and turns them into a truecolor picture of what the model is doing
 right now: tokens per second, time to first token, GPU load and memory, context fill, speculative-decoding
 acceptance, which layers are busy on which GPU, and, with a small server patch,
@@ -42,6 +42,7 @@ a Tesla P100 under llama.cpp, mid-request.</sub>
 
 Requirements: a Rust toolchain (1.75+), `nvidia-smi` for NVIDIA GPU panels,
 `xpu-smi` for Intel GPU panels or the Linux amdgpu driver for AMD GPU panels,
+`macmon` for Apple silicon GPU panels (or run under `sudo` for `powermetrics`),
 and a locally listening
 `llama-server` for throughput panels. Nothing at all is needed for demo mode.
 
@@ -166,15 +167,16 @@ console, pass `--color truecolor` if colours look flat.
 
 ## macOS
 
-macOS support is new and has only been type-checked, not run on a Mac yet.
-Both Apple silicon and Intel are built and released; please report results in
-an issue.
+macOS support is new and has only been run on Apple silicon. Both Apple
+silicon and Intel are built and released; please report results in an issue.
 
-Requirements are the same as elsewhere, minus the GPU panels: `nvidia-smi`
-does not exist on macOS, so the GPU row and the PCIe stage of the memory
-pipeline stay empty. Everything driven by the server's own metrics —
-throughput, context, MTP acceptance, layers and experts — works as it does on
-Linux.
+Requirements are the same as elsewhere; on Apple silicon the GPU panels read
+from `macmon` (brew install macmon, or `cargo install macmon`) — or from the
+built-in `powermetrics` when running under `sudo` (see
+[What differs from Linux](#what-differs-from-linux)). Intel Macs have no
+GPU panels, like Windows had none before `nvidia-smi`. Everything driven by
+the server's own metrics — throughput, context, MTP acceptance, layers and
+experts — works as it does on Linux.
 
 ### What differs from Linux
 
@@ -182,10 +184,37 @@ Linux.
   instead of `/proc`, exactly as on Windows. Run the dashboard as the same
   user as the server, or the server's command line — and with it the model
   path, port and context size — is hidden and it is matched by name alone.
-- **No GPU panels**: there is no `nvidia-smi`, so utilisation, VRAM, power and
-  temperature are unavailable, and Metal/unified memory is not read.
+- **Apple silicon GPU panels**: the source is chosen once at startup. It is
+  the built-in `powermetrics` when running as root, or when `sudo -n` works
+  without a password prompt; otherwise a long-lived sudoless `macmon pipe`
+  stream; otherwise a one-line error naming both. Either source samples
+  every 250 ms and reports the same two things about the GPU: the share of
+  the interval it was active, which is the utilisation shown, and its power.
+  `macmon` adds temperature, clock, fans and system RAM. `powermetrics` has
+  none of those, so they read `n/a` under `sudo` unless `macmon` is
+  installed too, in which case it fills them in. If the `powermetrics`
+  stream stops or prints something unrecognised, the rest of the session
+  reads `macmon`. A `macmon` older than 0.8 has no time-active figure; its
+  frequency-weighted one is shown instead. A virtual Mac has no GPU figures
+  to read: `powermetrics` prints empty samples there and `macmon` exits,
+  and the panel shows what each of them said. `llm-visuals --print-gpu`
+  (add `--json` for a machine-readable record) prints the source that was
+  chosen and one parsed sample without opening the dashboard, which is the
+  thing to paste into an issue.
+- **Power gauge**: Apple publishes no GPU power limit, so the gauge is
+  scaled to the largest GPU-cluster draw seen since the dashboard started:
+  GPU, ANE and RAM from `macmon`, GPU and ANE from `powermetrics`, the CPU
+  excluded. It is a share of the session's peak, not of a rated maximum.
+- **VRAM / unified memory**: Apple silicon parts have no device memory, so
+  the VRAM stage of the memory pipeline (`b`) is labelled `UNIFIED` and shows
+  pool fill — server-reported occupancy when available, otherwise the whole
+  system RAM in use — over the installed pool. The pool comes from `macmon`;
+  with `powermetrics` alone the bar fills only once a server reports its
+  occupancy. There is no memory controller to watch, so its busy % reads
+  `n/a`, and the PCIe stage is labelled `C2C` and reads `n/a` (NVLink-C2C
+  traffic has no counter).
 - **Memory pipeline (`b`)**: RAM totals and the server's resident memory come
-  from the OS; the DISK and PCIe stages have no counters to read.
+  from the OS; the DISK stage has no counters to read.
 - **Settings** go to `~/Library/Application Support/llm-visuals/settings.json`
   and the log database to the same directory.
 
@@ -528,6 +557,11 @@ server's command line and sends it as a bearer token, so no setup is needed.
 If the key is not on the command line, `--api-key-file` supplies one for
 every server.
 
+A Strata server started with a key answers `/metrics` and `/v1/models` with
+401 as well. Reached by `--endpoint` without the key it is still recognised:
+its `/health` is open and names the server, the model and the context. The
+live numbers come from `/metrics`, so they need the key.
+
 LM Studio starts every model it loads as such a llama-server, with its own
 port and key, so press `r` after it loads a different model. It has no switch
 for `--metrics`, but the llama-server it starts inherits its environment:
@@ -588,6 +622,21 @@ from the `totals.drafts_offered` / `drafts_accepted` counters; they move only
 when a request ends, so the gauge shows each finished request's acceptance
 (spread over its server-measured decode time) and holds it until the next. The VRAM weights/KV split is the usual
 file-size estimate, which does not fit Strata's RAM-resident experts.
+
+### NInfer
+
+[NInfer](https://github.com/Neroued/ninfer) builds with the Prometheus
+endpoint are detected as `ninfer-serve` (port 8080 when `--port` is absent),
+or can be selected with `--endpoint http://127.0.0.1:8080`. The adapter reads
+NInfer's own `ninfer_*` counters from `GET /metrics` for live prefill and
+decode, prefix reuse, TTFT and speculative acceptance; the speculative panel
+is titled with the backend the server reports (`mtp`, `dflash2`, …). The
+context limit is the server's `ninfer_max_context_tokens`, so a launch without
+`--max-context` still fills the context panel. Use the
+server's own port when it runs behind a gateway; API keys work through the
+existing `--api-key-file` option. As with the vLLM adapter, request rows
+reconstructed from aggregate counters are activity windows, not individual
+concurrent request traces.
 
 ---
 
