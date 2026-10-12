@@ -16,6 +16,8 @@ BG = "#0d0f16"
 ANSI16 = ["#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5",
           "#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#ffffff"]
 SGR = re.compile(r"\x1b\[([0-9;]*)m")
+# glyph -> (where it starts down the cell, how much of the cell it fills)
+BLOCKS = {"\u2580": (0.0, 0.5), "\u2584": (0.5, 0.5), "\u2588": (0.0, 1.0)}
 
 
 def idx256(n):
@@ -32,8 +34,10 @@ def idx256(n):
 
 def parse(text):
     rows = []
+    # tmux does not repeat a colour that is already in force, and that holds
+    # from the end of one line to the start of the next.
+    fg, bg, bold = None, None, False
     for line in text.split("\n"):
-        fg, bg, bold = None, None, False
         cells = []
         pos = 0
         for m in SGR.finditer(line):
@@ -102,6 +106,21 @@ def svg(rows, cols):
             if bg and bg != BG:
                 out.append(f'<rect x="{PAD + x0 * CW:.1f}" y="{PAD + y * CH:.1f}" '
                            f'width="{(x - x0) * CW + 0.3:.1f}" height="{CH:.1f}" fill="{bg}"/>')
+    # Block glyphs are drawn as rectangles: a picture made of half blocks
+    # (the expert landscape) shows seams wherever a font's glyph falls short
+    # of the cell, and no two fonts agree on where that is.
+    for y, row in enumerate(rows):
+        x = 0
+        while x < len(row):
+            ch, fg = row[x][0], row[x][1]
+            x0 = x
+            while x < len(row) and (row[x][0], row[x][1]) == (ch, fg):
+                x += 1
+            if ch in BLOCKS:
+                top, part = BLOCKS[ch]
+                out.append(f'<rect x="{PAD + x0 * CW:.1f}" y="{PAD + (y + top) * CH:.1f}" '
+                           f'width="{(x - x0) * CW + 0.3:.1f}" height="{part * CH + 0.3:.1f}" '
+                           f'fill="{fg or "#dee2ec"}"/>')
     for y, row in enumerate(rows):  # text runs
         x = 0
         while x < len(row):
@@ -109,7 +128,7 @@ def svg(rows, cols):
             x0 = x
             run = ""
             while x < len(row) and (row[x][1], row[x][3]) == (fg, bold):
-                run += row[x][0]
+                run += " " if row[x][0] in BLOCKS else row[x][0]
                 x += 1
             if run.strip():
                 wt = ' font-weight="bold"' if bold else ""

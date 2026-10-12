@@ -138,7 +138,7 @@ console, pass `--color truecolor` if colours look flat.
 ### What to test
 
 - [ ] `cargo build --release` completes (MSVC linker and SQLite C build found).
-- [ ] `--demo` renders every view (`a` `p` `h` `m` `b` `v`) and `q` restores
+- [ ] `--demo` renders every view (`a` `p` `h` `m` `e` `b` `v`) and `q` restores
       the terminal.
 - [ ] Colours: truecolor is picked automatically in Windows Terminal.
 - [ ] GPU panels show utilisation, VRAM, power and temperature from `nvidia-smi`.
@@ -346,6 +346,36 @@ the mean number of distinct experts each layer touched over its last 256
 tokens). Without the patch the title reads `simulated`: the timing is real
 (each new token re-routes every layer) but the identities are a stand-in.
 
+![expert landscape](docs/landscape.svg)
+
+<sub>Expert landscape (`e`), `--demo`, 140×44: the routing of the map above,
+stood up. Each tower is a block of experts in one layer; its height is how
+often the router picked it over the server's window, and its crown lights
+while it is being picked.</sub>
+
+The landscape (`e`) is the expert map as an isometric height field. Experts
+run along one edge of the plinth and layers along the other. A tower's
+**height** is its hit count over the server's sliding window (`recent` from
+`GET /experts`), scaled to the busiest expert of any layer so that layers
+compare; that expert is named on the picture and the five busiest are listed
+in the corner. A tower's **light** is how often it is being picked right now,
+measured against the busiest part of the field and taken from the same
+per-expert heat the flat map colours by. Height is the last few hundred tokens
+and light is the last second, so when a prompt changes subject new towers
+light first and then grow, while the old ones go dark and then sink.
+
+When there are more experts or layers than the panel has pixels they are
+grouped, and the title says `N/block`: a block stands as tall as its tallest
+expert and is lit by the mean of its members. Without the server patch there
+are no hit counts, so the plain stays flat, the title reads `simulated`, and a
+stand-in pick only lifts its tile for a moment. A dense model, the attention
+bridge and a panel under 60×18 get the flat map instead, laid out as `m` is.
+
+`←` `→` turn the view to the next corner, `↑` `↓` tilt it, and `space` stops
+or restarts the slow sway. The view takes the context and MTP row's space as
+well. It is drawn two pixels to a cell with half blocks, supersampled, with a
+soft glow in truecolor; a 256-colour terminal gets it without the glow.
+
 If the model carries an **engram** module (a hashed n-gram memory; llama.cpp's
 `<arch>.ple.*` keys, as in Qwen3.8-Flash-Next), the bottom row of the expert
 panel describes it: n-gram order, the layer it feeds, hash heads, table rows ×
@@ -440,6 +470,7 @@ watched and `--pid A,B` restricts it to named processes.
 | `p` | performance zoom: tall sparklines, longer request log |
 | `h` | layer tiles zoom |
 | `m` | expert map zoom, finer blocks |
+| `e` | expert landscape: the expert map as an isometric height field (`←` `→` turn, `↑` `↓` tilt, `space` hold still) |
 | `b` | memory pipeline: disk → RAM → PCIe → VRAM → prefill → decode VU meters and the bottleneck verdict |
 | `v` | compare every model side by side |
 | `Tab` / `Shift-Tab` | focus the next / previous model |
@@ -477,6 +508,7 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | layer → GPU | `--tensor-split` proportions |
 | layer activity | utilisation of the GPU the layer lives on, smoothed |
 | expert blocks | real top-k routing from `GET /experts` (patched server), else a deterministic stand-in keyed by layer and token step |
+| expert landscape | height: `recent`, the hits per expert over the server's window from `GET /experts`, as a share of the busiest expert's. Light: the expert blocks' heat, averaged over a block and measured against the busiest fiftieth of the field. Without `/experts` there are no heights and the picks are the stand-in's |
 | MTP / speculative depth (tokens drafted per step) | llama.cpp: `--spec-draft-n-max` (or `--draft-max`) on the command line, else the model's MTP layer count. vLLM: number of per-position acceptance counters. SGLang: `speculative_num_draft_tokens` |
 | MTP acceptance, tok/step, steps/s | deltas of `spec_decode_num_draft_tokens_total`, `…accepted_tokens_total`, `…drafts_total` from `GET /metrics`, 1.5 s window |
 | disk MB/s, faults/s | deltas of sectors read in `/proc/diskstats` (whole disks), `read_bytes` in `/proc/<pid>/io`, `majflt` in `/proc/<pid>/stat` |
@@ -801,7 +833,8 @@ src/
 ├── perf.rs          rates, TTFT, request records, MTP stats, VU meters
 ├── bandwidth.rs     weight layout and the bottleneck verdict
 ├── host.rs          /proc disk, faults, RSS; in-process NVML PCIe (dmon fallback)
-├── fade.rs          smoothing and expert heat
+├── fade.rs          smoothing, expert heat and usage
+├── landscape.rs     the expert landscape: camera, projection, rasteriser
 ├── observe.rs       /slots, /metrics, /experts parsers
 ├── gpu.rs           NVIDIA/AMD/Intel collectors, demo GPUs
 ├── nvml.rs          in-process NVML driver bindings & PCIe throughput

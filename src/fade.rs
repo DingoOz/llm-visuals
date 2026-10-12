@@ -1,3 +1,4 @@
+use crate::observe::ExpertStats;
 use std::collections::VecDeque;
 use std::time::Instant;
 
@@ -17,6 +18,15 @@ pub struct FadeState {
     pub layer_hist: Vec<VecDeque<f32>>,
     /// Per-expert heat: 1.0 the moment it is routed, cooling over ~0.6 s.
     pub expert: Vec<Vec<f32>>,
+    /// Per-expert share of the busiest expert's hits, 0..1: the heights of
+    /// the landscape. Eased toward the server's counts so a tower grows
+    /// rather than jumps. All zero until real routing arrives.
+    pub expert_usage: Vec<Vec<f32>>,
+    usage_target: Vec<Vec<f32>>,
+    /// The hit count a full-height tower stands for, and the window (in
+    /// tokens) the server counted it over.
+    pub usage_peak: u32,
+    pub usage_window: usize,
     last_step: usize,
     /// True once real routing has been seen; disables the stand-in for good.
     pub real_routing: bool,
@@ -77,6 +87,10 @@ impl FadeState {
             layer_gpu: Vec::new(),
             layer_hist: Vec::new(),
             expert: Vec::new(),
+            expert_usage: Vec::new(),
+            usage_target: Vec::new(),
+            usage_peak: 0,
+            usage_window: 0,
             last_step: usize::MAX,
             real_routing: false,
             kv: vec![0.0; KV_BUCKETS],
@@ -107,6 +121,8 @@ impl FadeState {
                 .map(|_| VecDeque::from(vec![0.0; HISTORY]))
                 .collect();
             self.expert = vec![vec![0.0; self.n_experts]; n_layers];
+            self.expert_usage = self.expert.clone();
+            self.usage_target = self.expert.clone();
         }
         if n_gpus > self.gpu.len() {
             self.gpu.resize(n_gpus, 0.0);
@@ -114,6 +130,39 @@ impl FadeState {
             self.weight_frac.resize(n_gpus, 0.0);
             self.kv_alloc_frac.resize(n_gpus, 0.0);
             self.model_owned.resize(n_gpus, false);
+        }
+    }
+
+    /// Take the server's per-expert hit counts as the landscape's heights.
+    /// They are scaled to the busiest expert of any layer, not of each
+    /// layer, so one layer's towers can be compared with another's.
+    pub fn observe_experts(&mut self, e: &ExpertStats) {
+        let peak = e
+            .layers
+            .iter()
+            .flat_map(|l| l.recent.iter().copied())
+            .max()
+            .unwrap_or(0);
+        self.usage_peak = peak;
+        // The server's ring holds `window` tokens once it has seen that
+        // many; until then the counts cover only what has been routed.
+        self.usage_window = e
+            .window
+            .min(usize::try_from(e.n_tokens).unwrap_or(usize::MAX));
+        // A layer the server stopped listing has no hits to show.
+        for row in self.usage_target.iter_mut() {
+            row.fill(0.0);
+        }
+        if peak == 0 {
+            return;
+        }
+        for l in &e.layers {
+            let Some(row) = self.usage_target.get_mut(l.il) else {
+                continue;
+            };
+            for (t, &hits) in row.iter_mut().zip(&l.recent) {
+                *t = hits as f32 / peak as f32;
+            }
         }
     }
 
@@ -202,6 +251,12 @@ impl FadeState {
             }
         }
         self.last_step = sample.token_step;
+
+        for (row, target) in self.expert_usage.iter_mut().zip(&self.usage_target) {
+            for (u, &t) in row.iter_mut().zip(target) {
+                *u = smooth(*u, t, dt, 0.22, 0.9);
+            }
+        }
 
         let head = self.kv_frac.clamp(0.0, 1.0);
         self.kv_head = smooth(self.kv_head, head, dt, 0.25, 0.9);
@@ -313,6 +368,86 @@ mod tests {
         assert_eq!(a, routed_indices(3, 2500, 256, 8));
         assert_ne!(a, routed_indices(3, 2501, 256, 8));
         assert_eq!(routed_indices(0, 1, 1, 8), vec![0]);
+    }
+
+    #[test]
+    fn expert_usage_grows_toward_the_busiest_experts_share() {
+        use crate::observe::{ExpertLayer, ExpertStats};
+        let sample = FadeSample {
+            layer_target: vec![0.0; 3],
+            layer_gpu: vec![0; 3],
+            kv_filled: vec![false; 4],
+            processing: false,
+            decoded: 0,
+            token_step: 0,
+            routing: None,
+            gpu_util: vec![0.0],
+            gpu_vram: vec![0.0],
+            weight_frac: vec![0.0],
+            kv_alloc_frac: vec![0.0],
+            model_owned: vec![true],
+            ctx_used: 0,
+            ctx_max: 100,
+            n_experts: 4,
+            n_experts_used: 2,
+            n_heads: 1,
+        };
+        let layer = |il: usize, recent: Vec<u32>| ExpertLayer {
+            il,
+            n_tokens: 0,
+            tokens: vec![],
+            recent,
+        };
+        let stats = |layers| ExpertStats {
+            n_expert: 4,
+            n_expert_used: 2,
+            n_tokens: 4096,
+            window: 128,
+            layers,
+        };
+        let mut f = FadeState::new();
+        // Before the first tick there is nothing sized to hold the counts.
+        f.observe_experts(&stats(vec![layer(0, vec![1, 2, 3, 4])]));
+        f.tick(&sample);
+        assert!(f.expert_usage.iter().flatten().all(|&u| u == 0.0));
+
+        // Layer 1 is not listed; layer 2 holds the busiest expert of all.
+        f.observe_experts(&stats(vec![
+            layer(0, vec![10, 0, 20, 0]),
+            layer(2, vec![0, 40, 0, 0]),
+        ]));
+        assert_eq!((f.usage_peak, f.usage_window), (40, 128));
+        f.tick(&sample);
+        let first = f.expert_usage[2][1];
+        assert!(
+            first > 0.0 && first < 0.5,
+            "a tower grows, it does not jump: {first}"
+        );
+        for _ in 0..400 {
+            f.tick(&sample);
+        }
+        // Scaled to the busiest expert of any layer, so layers compare.
+        assert!((f.expert_usage[2][1] - 1.0).abs() < 0.01);
+        assert!((f.expert_usage[0][2] - 0.5).abs() < 0.01);
+        assert!((f.expert_usage[0][0] - 0.25).abs() < 0.01);
+        assert!(f.expert_usage[1].iter().all(|&u| u == 0.0));
+
+        // A layer the server stops listing sinks back to the ground.
+        f.observe_experts(&stats(vec![layer(2, vec![0, 8, 0, 0])]));
+        for _ in 0..2000 {
+            f.tick(&sample);
+        }
+        assert!(f.expert_usage[0].iter().all(|&u| u < 0.01));
+        assert!((f.expert_usage[2][1] - 1.0).abs() < 0.01);
+        // Nothing routed yet: no heights, and no division by a zero peak.
+        f.observe_experts(&stats(vec![layer(0, vec![0; 4])]));
+        assert_eq!(f.usage_peak, 0);
+        // A server 31 tokens in has counted 31 tokens, not a full window.
+        f.observe_experts(&ExpertStats {
+            n_tokens: 31,
+            ..stats(vec![layer(0, vec![20, 11, 0, 0])])
+        });
+        assert_eq!((f.usage_peak, f.usage_window), (20, 31));
     }
 
     #[test]

@@ -16,6 +16,7 @@ use crate::config::ViewMode;
 use crate::dblog::{ContextSpeed, LogSummary};
 use crate::fade::FadeState;
 use crate::gpu::GpuStats;
+use crate::landscape::{self, Camera};
 use crate::model_detect::DetectedModel;
 use crate::observe::{ExpertStats, LiveStats};
 use crate::perf::{Meter, PerfTracker, Phase, RequestRecord};
@@ -61,6 +62,8 @@ pub struct Dashboard<'a> {
     pub num_layers: usize,
     pub num_heads: usize,
     pub view: ViewMode,
+    /// Where the expert landscape (`e`) is seen from.
+    pub camera: &'a Camera,
     pub status: &'a str,
     pub theme_name: &'a str,
     pub demo: bool,
@@ -200,7 +203,10 @@ impl Renderer {
         let show_requests = h >= 22;
         let show_ctx = h >= 16;
         let req_h = if show_requests { 7 } else { 0 };
-        let ctx_h = if !show_ctx {
+        // The landscape is a picture and wants every row it can get. Where
+        // it cannot be drawn the flat map stands in, laid out as `m` is.
+        let landscape = d.view == ViewMode::Landscape && landscape_fits(d, area);
+        let ctx_h = if !show_ctx || landscape {
             0
         } else if d.view == ViewMode::Perf {
             6
@@ -221,7 +227,11 @@ impl Renderer {
                 Constraint::Length(0),
                 Constraint::Length(if show_requests { 12 } else { 0 }),
             ],
-            ViewMode::Heatmap | ViewMode::MoE | ViewMode::Bandwidth | ViewMode::Models => vec![
+            ViewMode::Heatmap
+            | ViewMode::MoE
+            | ViewMode::Landscape
+            | ViewMode::Bandwidth
+            | ViewMode::Models => vec![
                 Constraint::Length(0),
                 Constraint::Length(ctx_h),
                 Constraint::Min(8),
@@ -252,7 +262,8 @@ impl Renderer {
         if rows[2].height > 0 {
             match d.view {
                 ViewMode::Heatmap => self.render_layers(frame, rows[2], d),
-                ViewMode::MoE => self.render_experts(frame, rows[2], d),
+                ViewMode::Landscape if landscape => self.render_landscape(frame, rows[2], d),
+                ViewMode::MoE | ViewMode::Landscape => self.render_experts(frame, rows[2], d),
                 _ => {
                     let split = Layout::default()
                         .direction(Direction::Horizontal)
@@ -1669,6 +1680,11 @@ impl Renderer {
         let is_moe = n_e > 1;
         let w = area.width.saturating_sub(2) as usize;
         let h = area.height.saturating_sub(2) as usize;
+        // No row inside the border: nothing to draw, and nothing for the
+        // rows-per-slot arithmetic below to divide by.
+        if h == 0 {
+            return;
+        }
         let label_w = 4usize;
         let cols = w.saturating_sub(label_w).max(1);
         // Horizontal: one block per expert when it fits, else `per_block` experts share a block.
@@ -1794,6 +1810,236 @@ impl Renderer {
             lines.push(Line::from(spans));
         }
         frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    }
+
+    // -----------------------------------------------------------------------
+    // Expert landscape
+    // -----------------------------------------------------------------------
+
+    /// The expert map as an isometric landscape: a tower's height is how
+    /// often the router picked that expert over the server's window, its
+    /// light how recently. Painted two pixels to a cell with half blocks.
+    fn render_landscape(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
+        let f = d.fade;
+        let (n_l, n_e) = (f.n_layers, f.n_experts.max(1));
+        if !landscape_fits(d, area) {
+            self.render_experts(frame, area, d);
+            return;
+        }
+        let live = f.real_routing && d.experts.is_some();
+        let canvas = Rect::new(
+            area.x + 1,
+            area.y + 1,
+            area.width - 2,
+            area.height.saturating_sub(3),
+        );
+        let (w, h) = (canvas.width as usize, canvas.height as usize * 2);
+        let view = landscape::View::fit(w, h, d.camera);
+        // Without real routing there is no usage to stand on: the plain
+        // stays flat and a stand-in pick only lifts its tile for a moment.
+        let grid = landscape::Grid::bin(n_l, n_e, view.max_cells(), |l, e| {
+            let at = |m: &Vec<Vec<f32>>| m.get(l).and_then(|r| r.get(e)).copied().unwrap_or(0.0);
+            let heat = at(&f.expert);
+            (
+                if live {
+                    at(&f.expert_usage)
+                } else {
+                    0.16 * heat
+                },
+                heat,
+            )
+        });
+
+        let mut title = format!(
+            " ◆ EXPERT LANDSCAPE  {} of {} per token",
+            f.n_experts_used, n_e
+        );
+        title.push_str(if live { " · live" } else { " · simulated" });
+        if grid.per_block > 1 {
+            title.push_str(&format!(" · {}/block", grid.per_block));
+        }
+        if grid.layers_per_row > 1 {
+            title.push_str(&format!(" · {} layers/row", grid.layers_per_row));
+        }
+        title.push(' ');
+        let muted = Style::default().fg(pal::c(pal::TEXT_MUTED));
+        let legend = if live {
+            Line::from(vec![
+                Span::styled(
+                    match f.usage_window {
+                        0 => " height = hits per expert  ".to_string(),
+                        n => format!(" height = hits in {n} tokens  "),
+                    },
+                    muted,
+                ),
+                Span::styled("█", Style::default().fg(self.theme.map_intensity(1.0))),
+                Span::styled("█", Style::default().fg(self.theme.map_intensity(0.6))),
+                Span::styled("█", Style::default().fg(self.theme.map_intensity(0.3))),
+                Span::styled(" routed now→cold ", muted),
+            ])
+        } else {
+            Line::from(Span::styled(
+                " no /experts: heights unknown, picks are a stand-in ",
+                muted,
+            ))
+        }
+        .right_aligned();
+        let (block, _) = with_right(panel(&title, pal::VIOLET), &title, legend, area);
+        frame.render_widget(block, area);
+
+        let chrome = pal::chrome();
+        let ramp = |t: f32| self.theme.map_rgb(t);
+        let img = landscape::render(
+            &grid,
+            &view,
+            &landscape::Look {
+                ramp: &ramp,
+                bg: chrome.bg,
+                slab: chrome.border,
+                bloom: pal::truecolor(),
+            },
+            w,
+            h,
+        );
+        let buf = frame.buffer_mut();
+        for cy in 0..canvas.height as usize {
+            for cx in 0..canvas.width as usize {
+                let (top, bottom) = (img.px[cy * 2 * w + cx], img.px[(cy * 2 + 1) * w + cx]);
+                if top == chrome.bg && bottom == chrome.bg {
+                    continue;
+                }
+                if let Some(cell) = buf.cell_mut((canvas.x + cx as u16, canvas.y + cy as u16)) {
+                    cell.set_char('▀')
+                        .set_fg(pal::c(top))
+                        .set_bg(pal::c(bottom));
+                }
+            }
+        }
+
+        // Labels sit on the picture. `anchor` is the pixel the text hangs
+        // from; it is right-aligned to it on the left half of the canvas.
+        let mut label = |anchor: (f32, f32), rows_down: i32, text: &str, style: Style| {
+            let len = text.chars().count() as i32;
+            let col = anchor.0.round() as i32;
+            let x = if col < w as i32 / 2 {
+                col - len - 1
+            } else {
+                col + 2
+            };
+            let y = (anchor.1 / 2.0).round() as i32 + rows_down;
+            let x = x.clamp(0, (canvas.width as i32 - len).max(0));
+            let y = y.clamp(0, canvas.height as i32 - 1);
+            if len > canvas.width as i32 {
+                return;
+            }
+            buf.set_string(canvas.x + x as u16, canvas.y + y as u16, text, style);
+        };
+        let mid = |e: [(f32, f32); 2]| ((e[0].0 + e[1].0) / 2.0, (e[0].1 + e[1].1) / 2.0);
+        // The arrow points the way the index grows along the plinth's edge.
+        let arrow = |e: [(f32, f32); 2]| match (e[1].0 >= e[0].0, e[1].1 >= e[0].1) {
+            (true, true) => "↘",
+            (true, false) => "↗",
+            (false, true) => "↙",
+            (false, false) => "↖",
+        };
+        let axis = Style::default().fg(pal::c(pal::TEXT_DIM));
+        let m = img.marks;
+        label(
+            mid(m.experts),
+            2,
+            &format!("experts 0 {} {}", arrow(m.experts), n_e - 1),
+            axis,
+        );
+        label(
+            mid(m.layers),
+            2,
+            &format!("layers 0 {} {}", arrow(m.layers), n_l - 1),
+            axis,
+        );
+
+        // The busiest experts: the first is named on the picture and
+        // spelled out below it, the rest are listed in the empty corner.
+        let busiest = d
+            .experts
+            .filter(|_| live)
+            .map(|e| busiest_experts(e, 5))
+            .unwrap_or_default();
+        let tallest = busiest.first().copied();
+        if canvas.width >= 100 && canvas.height >= 18 {
+            let peak_hits = tallest.map_or(1, |t| t.0).max(1);
+            for (i, &(n, il, e)) in busiest.iter().enumerate() {
+                let frac = n as f32 / peak_hits as f32;
+                let bar = "█".repeat(((frac * 8.0).round() as usize).max(1));
+                let name = format!(" L{il}·E{e}");
+                let line = Line::from(vec![
+                    Span::styled(format!("{name:<10}"), axis),
+                    Span::styled(
+                        format!("{bar:<8}"),
+                        Style::default().fg(self.theme.map_intensity(0.35 + 0.65 * frac)),
+                    ),
+                    Span::styled(format!(" {n}"), muted),
+                ]);
+                let (x, y) = (canvas.x, canvas.y + 1 + i as u16);
+                // Never over the picture: a turned or tilted landscape can
+                // reach into the corner.
+                let free = (0..line.width() as u16)
+                    .all(|dx| buf.cell((x + dx, y)).is_some_and(|c| c.symbol() != "▀"));
+                if free {
+                    buf.set_line(x, y, &line, line.width() as u16);
+                }
+            }
+        }
+        // The tag stands on the tower it names. The name comes from the
+        // server's counts and the heights are eased toward them, so the
+        // tallest tower on screen can be a different one for a moment (or
+        // for as long as two are level).
+        let roof = tallest.and_then(|(_, il, e)| Some((il, e, grid.roof(&view, il, e)?)));
+        if let Some((il, e, roof)) = roof {
+            let tag = format!("L{il}·E{e}");
+            let x = (roof.0.round() as i32 - tag.chars().count() as i32 / 2)
+                .clamp(0, (canvas.width as i32 - tag.chars().count() as i32).max(0));
+            let y = (roof.1 / 2.0).floor() as i32 - 1;
+            if y >= 0 {
+                // On its own ground: over a lit roof the letters would take
+                // the picture's colours and wash out.
+                buf.set_string(
+                    canvas.x + x as u16,
+                    canvas.y + y as u16,
+                    tag,
+                    Style::default()
+                        .fg(pal::c(pal::WHITE))
+                        .bg(pal::c(chrome.bg))
+                        .add_modifier(Modifier::BOLD),
+                );
+            }
+        }
+
+        let row = Rect::new(canvas.x, canvas.y + canvas.height, canvas.width, 1);
+        let keys = format!(
+            " ←→ turn  ↑↓ tilt  space {}",
+            if d.camera.orbit { "hold still" } else { "sway" }
+        );
+        let keys_w = keys.chars().count();
+        frame.render_widget(Paragraph::new(Span::styled(keys, muted)), row);
+        let note = match tallest {
+            Some((n, il, e)) => format!(
+                "busiest: layer {il} · expert {e} · {n} of the last {} tokens ",
+                f.usage_window
+            ),
+            None if live => "no tokens routed yet ".to_string(),
+            None => "start the server with --expert-stats for real heights ".to_string(),
+        };
+        // Only beside the key hint, never over it, with a gap between them.
+        if note.chars().count() + keys_w + 2 <= row.width as usize {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    note,
+                    Style::default().fg(pal::c(pal::TEXT_DIM)),
+                ))
+                .alignment(Alignment::Right),
+                row,
+            );
+        }
     }
 
     /// One line describing an engram module: what it hashes, where it is
@@ -1992,6 +2238,7 @@ impl Renderer {
             ("p", "perf".into(), d.view == ViewMode::Perf),
             ("h", "layers".into(), d.view == ViewMode::Heatmap),
             ("m", "experts".into(), d.view == ViewMode::MoE),
+            ("e", "3d".into(), d.view == ViewMode::Landscape),
             ("b", "bandwidth".into(), d.view == ViewMode::Bandwidth),
         ];
         if multi {
@@ -4332,12 +4579,309 @@ mod tests {
         assert_eq!(quant_from_path(&m).as_deref(), Some("IQ4_XS"));
     }
 
+    /// Draw the landscape for one of the demo models into a `w` × `h`
+    /// terminal and return it as text. `routed` feeds real routing; without
+    /// it the view has only the stand-in to show.
+    fn landscape_text(profile: usize, w: u16, h: u16, routed: bool, turns: i32) -> String {
+        landscape_text_with(profile, w, h, routed, turns, None)
+    }
+
+    /// As `landscape_text`, with a `rival` (layer, expert) routed exactly as
+    /// often as the busiest expert.
+    fn landscape_text_with(
+        profile: usize,
+        w: u16,
+        h: u16,
+        routed: bool,
+        turns: i32,
+        rival: Option<(usize, usize)>,
+    ) -> String {
+        use crate::fade::FadeSample;
+        use crate::observe::ExpertLayer;
+        use ratatui::backend::TestBackend;
+
+        let model = crate::demo::demo_models(4096, profile + 1).remove(profile);
+        let (n_l, n_e) = (model.n_layers().max(1), model.n_experts().max(1));
+        let stats = ExpertStats {
+            n_expert: n_e,
+            n_expert_used: model.n_experts_used(),
+            n_tokens: 256,
+            window: 256,
+            layers: (0..n_l)
+                .map(|il| ExpertLayer {
+                    il,
+                    n_tokens: 256,
+                    tokens: vec![],
+                    // One tall expert per layer on a diagonal, one taller still.
+                    recent: (0..n_e)
+                        .map(|e| match (il, e) {
+                            (2, 5) => 90,
+                            _ if rival == Some((il, e)) => 90,
+                            _ if e == (il * 3) % n_e => 40,
+                            _ => 4,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        };
+        let mut fade = FadeState::new();
+        let sample = FadeSample {
+            layer_target: vec![0.5; n_l],
+            layer_gpu: vec![0; n_l],
+            kv_filled: vec![false; crate::fade::KV_BUCKETS],
+            processing: true,
+            decoded: 1,
+            token_step: 1,
+            routing: routed.then(|| (0..n_l).map(|il| (il, vec![vec![5, 1]])).collect()),
+            gpu_util: vec![50.0],
+            gpu_vram: vec![50.0],
+            weight_frac: vec![0.5],
+            kv_alloc_frac: vec![0.1],
+            model_owned: vec![true],
+            ctx_used: 100,
+            ctx_max: 4096,
+            n_experts: n_e,
+            n_experts_used: model.n_experts_used().max(1),
+            n_heads: 8,
+        };
+        fade.tick(&sample);
+        if routed {
+            fade.observe_experts(&stats);
+        }
+        // Let the towers grow to their heights: a tick is never shorter
+        // than 8 ms to the smoother, however fast it is called.
+        for _ in 0..250 {
+            fade.tick(&sample);
+        }
+        let mut camera = Camera::new();
+        camera.toggle_orbit();
+        for _ in 0..turns {
+            camera.rotate(1);
+        }
+        for _ in 0..200 {
+            camera.tick(0.05);
+        }
+        let (perf, live) = (PerfTracker::new(), LiveStats::default());
+        let (attention, generated) = (TokenBuffer::new(8), GeneratedText::new());
+        let views = [ModelView {
+            detected: &model,
+            perf: &perf,
+            live: &live,
+            fade: &fade,
+            experts: routed.then_some(&stats),
+            num_layers: n_l,
+            num_heads: 8,
+        }];
+        let dash = Dashboard {
+            models: &views,
+            focus: 0,
+            detected: Some(&model),
+            gpus: &[],
+            gpu_error: None,
+            fade: &fade,
+            perf: &perf,
+            live: &live,
+            attention: &attention,
+            generated: &generated,
+            num_layers: n_l,
+            num_heads: 8,
+            view: ViewMode::Landscape,
+            camera: &camera,
+            status: "",
+            theme_name: "defrag",
+            demo: true,
+            experts: routed.then_some(&stats),
+            gpu_backend: None,
+            settings: None,
+            log: None,
+            ctx_speed: None,
+        };
+        let renderer = Renderer::new(pal::get_theme("defrag"), 0, 0, 1);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|frame| renderer.render_view(frame, frame.area(), &dash))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn landscape_draws_towers_and_names_the_busiest() {
+        let text = landscape_text(0, 150, 46, true, 0);
+        assert!(text.contains("EXPERT LANDSCAPE  8 of 256 per token · live"));
+        assert!(text.contains("height = hits in 256 tokens"));
+        // The picture itself, in half blocks, across a good part of the panel.
+        let widest = text
+            .lines()
+            .map(|l| l.matches('▀').count())
+            .max()
+            .unwrap_or(0);
+        assert!(widest > 60, "widest row of the picture: {widest}");
+        // Both axes, and the busiest expert on the picture, in the list and
+        // spelled out underneath.
+        assert!(text.contains("experts 0 ↘ 255"), "{text}");
+        assert!(text.contains("layers 0 ↙ 40"));
+        assert_eq!(text.matches("L2·E5").count(), 2);
+        assert!(text.contains("busiest: layer 2 · expert 5 · 90 of the last 256 tokens"));
+        assert!(text.contains(" e 3d "));
+        // From the next corner round the axes run the other way across the
+        // screen, and the arrows say so.
+        let turned = landscape_text(0, 150, 46, true, 1);
+        assert!(turned.contains("experts 0 ↙ 255"), "{turned}");
+        assert!(turned.contains("layers 0 ↖ 40"));
+    }
+
+    /// Where the tag naming the busiest expert was drawn: (row, column).
+    /// The list in the corner starts in the first columns; the tag is on
+    /// the picture.
+    fn tag_position(text: &str, tag: &str) -> Option<(usize, usize)> {
+        text.lines().enumerate().find_map(|(y, line)| {
+            let chars: Vec<char> = line.chars().collect();
+            let tag: Vec<char> = tag.chars().collect();
+            (12..chars.len().saturating_sub(tag.len()))
+                .find(|&x| chars[x..x + tag.len()] == tag[..])
+                .map(|x| (y, x))
+        })
+    }
+
+    #[test]
+    fn the_tag_stays_on_the_tower_it_names_when_another_is_as_tall() {
+        let alone = landscape_text(0, 150, 46, true, 0);
+        let at = tag_position(&alone, "L2·E5").expect("the tag is on the picture");
+        // Layer 30's expert 200 is routed exactly as often. The counts rank
+        // the lower layer first, so the name does not change, and neither
+        // may the tower it is written on.
+        let tied = landscape_text_with(0, 150, 46, true, 0, Some((30, 200)));
+        assert!(tied.contains("busiest: layer 2 · expert 5 · 90 of the last 256 tokens"));
+        assert!(tied.contains(" L30·E200"), "the rival is in the list");
+        assert_eq!(tag_position(&tied, "L2·E5"), Some(at));
+    }
+
+    #[test]
+    fn the_flat_map_keeps_the_context_row_when_the_landscape_cannot_draw() {
+        // The picture takes the context panel's rows...
+        let drawn = landscape_text(0, 150, 46, true, 0);
+        assert!(drawn.contains("EXPERT LANDSCAPE") && !drawn.contains("◆ CONTEXT"));
+        // ...and gives them back wherever the flat map stands in for it.
+        let dense = landscape_text(1, 150, 46, true, 0);
+        assert!(dense.contains("EXPERTS  dense model") && dense.contains("◆ CONTEXT"));
+        // Too narrow for the picture, tall enough for the context row.
+        let narrow = landscape_text(0, 58, 40, true, 0);
+        assert!(
+            narrow.contains("◆ EXPERTS  8 of 256") && narrow.contains("◆ CONTEXT"),
+            "{narrow}"
+        );
+    }
+
+    #[test]
+    fn a_terminal_one_or_two_rows_high_draws_nothing_and_does_not_panic() {
+        for h in 1..=4 {
+            for profile in 0..2 {
+                landscape_text(profile, 80, h, true, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn landscape_without_routing_says_so_and_small_or_dense_falls_back() {
+        let text = landscape_text(0, 150, 46, false, 0);
+        assert!(text.contains("EXPERT LANDSCAPE  8 of 256 per token · simulated"));
+        assert!(text.contains("no /experts: heights unknown"));
+        assert!(text.contains("--expert-stats"));
+        assert!(!text.contains("busiest:"));
+        // A dense model has no experts to stand up: the flat panel's message.
+        let dense = landscape_text(1, 150, 46, true, 0);
+        assert!(dense.contains("EXPERTS  dense model"), "{dense}");
+        // Too small for a picture: the flat map, which packs tighter.
+        let small = landscape_text(0, 60, 16, true, 0);
+        assert!(small.contains("◆ EXPERTS  8 of 256"), "{small}");
+        // And every size in between draws something without panicking.
+        for (w, h) in [
+            (44, 19),
+            (60, 22),
+            (80, 24),
+            (100, 30),
+            (133, 37),
+            (300, 90),
+        ] {
+            let t = landscape_text(0, w, h, true, 2);
+            assert!(t.contains("EXPERT"), "{w}x{h}");
+        }
+        // Eight chunky experts are never grouped.
+        let few = landscape_text(3, 120, 40, true, 3);
+        assert!(
+            few.contains("EXPERT LANDSCAPE  2 of 8 per token · live "),
+            "{few}"
+        );
+    }
+
+    #[test]
+    fn busiest_experts_are_ranked_and_stable() {
+        use crate::observe::ExpertLayer;
+        let layer = |il: usize, recent: Vec<u32>| ExpertLayer {
+            il,
+            n_tokens: 0,
+            tokens: vec![],
+            recent,
+        };
+        let e = ExpertStats {
+            n_expert: 4,
+            n_expert_used: 2,
+            n_tokens: 0,
+            window: 64,
+            layers: vec![layer(0, vec![3, 9, 0, 9]), layer(1, vec![9, 1, 12, 0])],
+        };
+        assert_eq!(
+            busiest_experts(&e, 3),
+            vec![(12, 1, 2), (9, 0, 1), (9, 0, 3)]
+        );
+        assert_eq!(busiest_experts(&e, 10).len(), 6, "zero hits are not ranked");
+        assert!(busiest_experts(&ExpertStats::default(), 5).is_empty());
+    }
+
     #[test]
     fn tile_size_fits_all_layers() {
         let (tw, th, tpr) = layer_tile_size(60, 10, 41);
         let tpc = 10 / th;
         assert!(tpr * tpc >= 41, "{tw}x{th} tpr {tpr}");
     }
+}
+
+/// Whether the expert landscape can be drawn in `area`. The bridge's output
+/// text, a dense model and a panel too small for a picture all read better
+/// as the flat map. The layout and the panel both ask here, so the row the
+/// landscape takes from the context panel is only taken when it draws.
+fn landscape_fits(d: &Dashboard, area: Rect) -> bool {
+    d.attention.is_empty()
+        && d.fade.n_experts > 1
+        && d.fade.n_layers > 0
+        && area.width >= 60
+        && area.height >= 18
+}
+
+/// The `n` most-routed experts over the server's window, busiest first:
+/// (hits, layer, expert). Ties go to the lower layer, then the lower expert,
+/// so the list does not reshuffle between frames.
+fn busiest_experts(e: &ExpertStats, n: usize) -> Vec<(u32, usize, usize)> {
+    let mut top: Vec<(u32, usize, usize)> = Vec::with_capacity(n + 1);
+    for l in &e.layers {
+        for (i, &hits) in l.recent.iter().enumerate() {
+            if hits == 0 || (top.len() == n && hits <= top[n - 1].0) {
+                continue;
+            }
+            let at = top.partition_point(|t| t.0 >= hits);
+            top.insert(at, (hits, l.il, i));
+            top.truncate(n);
+        }
+    }
+    top
 }
 
 /// 320_001_536 → "320M", 20_000_003 → "20.0M", 4096 → "4.1K".
