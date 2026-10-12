@@ -197,7 +197,10 @@ experts — works as it does on Linux.
   reads `macmon`. A `macmon` older than 0.8 has no time-active figure; its
   frequency-weighted one is shown instead. A virtual Mac has no GPU figures
   to read: `powermetrics` prints empty samples there and `macmon` exits,
-  and the panel shows what each of them said.
+  and the panel shows what each of them said. `llm-visuals --print-gpu`
+  (add `--json` for a machine-readable record) prints the source that was
+  chosen and one parsed sample without opening the dashboard, which is the
+  thing to paste into an issue.
 - **Power gauge**: Apple publishes no GPU power limit, so the gauge is
   scaled to the largest GPU-cluster draw seen since the dashboard started:
   GPU, ANE and RAM from `macmon`, GPU and ANE from `powermetrics`, the CPU

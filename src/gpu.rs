@@ -1073,40 +1073,23 @@ fn collect_powermetrics() -> Result<Vec<GpuStats>, String> {
     // is installed, read its line only to enrich the powermetrics row with
     // those fields (the power/util come from the privileged source).
     //
-    // macmon_line() spawns its child lazily and returns None while that child
-    // warms up (~1s). Under macmon selection this poll is called every tick so
-    // the warm-up is transient; a single-shot caller that stops as soon as the
-    // powermetrics row exists never gives macmon its warm-up, and the
-    // enrichment fields stay null forever. Keep polling macmon — after a
-    // present-but-cold read, a few more reads while its stream warms up let
-    // the merge fire. One poll's powermetrics failure still demotes: this only
-    // extends the warm-up window, it does not retry failures.
+    // macmon_line() starts its child on the first call and answers None
+    // through that child's ~1 s warm-up, so the first rows have no macmon
+    // fields and the next poll that finds a line fills them in. This is
+    // read once and never waited on: the collector runs inside the 200 ms
+    // poll. A caller that polls once (`print_gpu_once`) does the waiting.
     if which_macmon().is_some() {
-        let mut extra = None;
-        for _ in 0..8 {
-            match macmon_line() {
-                Ok(Some(line)) => {
-                    match serde_json::from_str::<MacmonLine>(&line) {
-                        Ok(m) => {
-                            extra = Some(extract_macmon(&m));
-                            note_power_ceiling(macmon_cluster_watts(&m));
-                            break;
-                        }
-                        Err(_) => break, // a real parse error: do not spin
-                    }
-                }
-                Ok(None) => {}   // still warming up
-                Err(_) => break, // macmon dead or macmon absent: powermetrics alone
+        if let Ok(Some(line)) = macmon_line() {
+            if let Ok(m) = serde_json::from_str::<MacmonLine>(&line) {
+                note_power_ceiling(macmon_cluster_watts(&m));
+                let extra = extract_macmon(&m);
+                sample.temp = extra.temp;
+                sample.freq_mhz = extra.freq_mhz;
+                sample.ram_total = extra.ram_total;
+                sample.ram_usage = extra.ram_usage;
+                sample.fan_rpm = extra.fan_rpm;
+                sample.fan_max = extra.fan_max;
             }
-            std::thread::sleep(Duration::from_millis(300));
-        }
-        if let Some(e) = extra {
-            sample.temp = e.temp;
-            sample.freq_mhz = e.freq_mhz;
-            sample.ram_total = e.ram_total;
-            sample.ram_usage = e.ram_usage;
-            sample.fan_rpm = e.fan_rpm;
-            sample.fan_max = e.fan_max;
         }
     }
     Ok(vec![apple_stats(&name, cores, sample)])
@@ -1244,19 +1227,39 @@ pub fn print_gpu_once(as_json: bool) -> bool {
 
     // One poll is not enough for a stream backend: the sampler needs seconds
     // for its first sample, so keep polling until a row appears or the window
-    // closes. A row that never arrives is a real, reportable failure.
+    // closes. A row that never arrives is a real, reportable failure. Every
+    // other backend answers its first poll, with rows or with its error.
+    let backend = GpuBackend::detect(NvmlSession::new());
+    let polls = if matches!(backend, GpuBackend::Apple(_)) {
+        40
+    } else {
+        1
+    };
+    // Under powermetrics, macmon fills in the rest of the row once its own
+    // stream has printed, about a second after the first row exists. The
+    // dashboard gets that from its next poll; this is the caller with no
+    // next poll, so it is the one that waits, for a row carrying the pool
+    // or for ten more polls when macmon never delivers.
+    let mut patience = if macmon_path.is_some() { 10 } else { 0 };
     let mut stats: Vec<GpuStats> = Vec::new();
     let mut last_err: Option<String> = None;
-    for _ in 0..40 {
-        match GpuBackend::detect(NvmlSession::new()).collect() {
+    for poll in 0..polls {
+        if poll > 0 {
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        match backend.collect() {
             Ok(s) if !s.is_empty() => {
+                let complete = s.iter().all(|g| g.unified);
                 stats = s;
-                break;
+                last_err = None;
+                if complete || patience == 0 {
+                    break;
+                }
+                patience -= 1;
             }
             Ok(_) => {}
             Err(e) => last_err = Some(e),
         }
-        std::thread::sleep(Duration::from_millis(300));
     }
     if as_json {
         let value = serde_json::json!({
@@ -1304,8 +1307,8 @@ pub fn print_gpu_once(as_json: bool) -> bool {
             );
         }
     }
-    // Success only if a row with the Apple path actually came back on macOS;
-    // elsewhere, any row. A non-zero exit is itself part of the proof.
+    // Success is a row from whichever backend the host has. A non-zero exit
+    // is itself part of the proof.
     !stats.is_empty()
 }
 

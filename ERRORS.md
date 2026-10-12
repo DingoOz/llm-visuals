@@ -2,7 +2,7 @@
 
 ## Summary
 
-32 entries (as of 2026-10-12). Recurring themes:
+33 entries (as of 2026-10-12). Recurring themes:
 
 - **Optional or missing telemetry treated as a real value** (Logic, most common): a missing counter read as 0, record close gated on optional TTFT, unknown ctx rendered as full, model ownership derived from an unknown weight estimate. Rule of thumb: keep "unknown" distinct from zero and never gate state or ownership on an optional measurement.
 - **Under-discriminating matches when resolving processes/devices**: docker-proxy matched by IP only, comm-name gating, xe fans keyed by a constant path component, env GPU masks merged with host indices. Match on every discriminating field and prefer authoritative (driver/host) sources over inferred ones.
@@ -332,3 +332,13 @@
 - **Root cause:** On a virtual Mac `powermetrics` prints its sample headers with nothing under them. The framer dropped empty samples, so the collector waited out the 10 s stall window and then reported silence from a stream that was printing four times a second. `macmon` exits there with its reason on stderr, which went to `/dev/null`; the panel advised running under `sudo` in a session that already was.
 - **Fix applied:** An empty sample is published and reported as having no GPU line, which moves the session to `macmon` on the first one. The reason `macmon` gives on exit is shown, with the `powermetrics` failure beside it when both fail. Found by running both sources on GitHub's macOS runners.
 - **Prevention rule:** "Present but empty" is reported as itself, never folded into "absent". An error repeats what the failing tool said before it suggests anything.
+
+### A one-shot caller's wait added to the collector every poll runs — 2026-10-12
+
+- **Severity:** Medium
+- **Category:** Other
+- **File(s):** `src/gpu.rs`
+- **Pattern:** Fixing a caller that polls once by making the shared collector wait, when the collector is also the body of a 200 ms poll.
+- **Root cause:** `--print-gpu` stops at the first row, which under `powermetrics` arrives before `macmon` has printed, so the row had no temperature, clock, fans or pool. The fix looped inside `collect_powermetrics`, sleeping up to 8 x 300 ms for `macmon`. The dashboard calls the same function from its GPU poll, where the next poll would have filled the row in anyway and the sleep only held the poll up.
+- **Fix applied:** The collector reads `macmon` once per poll again. `print_gpu_once` waits for a row that carries the pool, detects the backend once instead of on every attempt, and polls a backend that is not a stream a single time.
+- **Prevention rule:** Waiting belongs to the caller that has no next poll. Nothing reached from the 200 ms poll sleeps.
