@@ -1203,16 +1203,23 @@ fn collect_macmon(name: &str, cores: u32) -> Result<Vec<GpuStats>, String> {
 /// merge in-process; without sudo it selects `Macmon`. It prints the chosen
 /// [`AppleSource`], the parsed rows, and (with `--print-gpu --json`) a machine
 /// readable record, so the output is copy-pasteable into a PR as evidence the
-/// privileged path ran on real hardware. Ex non-macOS it reports the backend
-/// NVML/nvidia-smi would return, so the flag behaves the same everywhere.
+/// privileged path ran on real hardware. Ex non-macOS the Apple diagnostics
+/// are absent and it reports whatever backend the host has.
 pub fn print_gpu_once(as_json: bool) -> bool {
     // Which Apple source detection picks (root/sudo -n → powermetrics, else
-    // macmon, else metadata-only). Only meaningful on macOS.
-    let apple_source = if cfg!(target_os = "macos") {
-        Some(format!("{:?}", apple_source()))
-    } else {
-        None
-    };
+    // macmon, else metadata-only) and whether macmon is installed. Both are
+    // macOS-only helpers.
+    #[cfg(target_os = "macos")]
+    let (apple_source, macmon_path) = (Some(format!("{:?}", apple_source())), which_macmon());
+    #[cfg(not(target_os = "macos"))]
+    let (apple_source, macmon_path): (Option<String>, Option<PathBuf>) = (None, None);
+    // `is_root` is the macOS real-uid helper; ex macOS the harness has no
+    // privileged path to report.
+    #[cfg(target_os = "macos")]
+    let is_root = is_root();
+    #[cfg(not(target_os = "macos"))]
+    let is_root = false;
+
     // One poll is not enough for a stream backend: the sampler needs seconds
     // for its first sample, so keep polling until a row appears or the window
     // closes. A row that never arrives is a real, reportable failure.
@@ -1232,9 +1239,9 @@ pub fn print_gpu_once(as_json: bool) -> bool {
     if as_json {
         let value = serde_json::json!({
             "os": std::env::consts::OS,
-            "uid_is_root": is_root(),
+            "uid_is_root": is_root,
             "apple_source": apple_source,
-            "macmon_installed": which_macmon().map(|p| p.display().to_string()),
+            "macmon_installed": macmon_path.map(|p| p.display().to_string()),
             "gpus": stats,
             "error": last_err,
         });
@@ -1243,11 +1250,11 @@ pub fn print_gpu_once(as_json: bool) -> bool {
             serde_json::to_string_pretty(&value).unwrap_or_default()
         );
     } else {
-        println!("os={} uid_is_root={}", std::env::consts::OS, is_root());
+        println!("os={} uid_is_root={}", std::env::consts::OS, is_root);
         if let Some(src) = &apple_source {
             println!(
                 "apple_source={src} macmon_installed={}",
-                which_macmon().is_some()
+                macmon_path.is_some()
             );
         }
         if stats.is_empty() {
