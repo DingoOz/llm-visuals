@@ -8,6 +8,7 @@ mod gguf;
 mod gpu;
 mod host;
 mod llm;
+mod mlx;
 mod model_detect;
 mod ninfer;
 pub mod nvml;
@@ -399,7 +400,7 @@ async fn poll_server(
             tokio::time::sleep(sleep).await;
         }
     }
-    if model.engine == "vllm" || model.engine == "ninfer" {
+    if model.engine == "vllm" || model.engine == "ninfer" || model.engine == "mlx" {
         // vLLM has no /slots or /experts endpoints; its /metrics counters
         // drive the live stats and the MTP panel. The 'r' rescan drops
         // dead processes (same policy as the llama.cpp path); until then a
@@ -410,12 +411,13 @@ async fn poll_server(
         let mut misses = 0u32;
         // NInfer reports its context limit. Without --max-context it runs
         // at the server's default, which the command line cannot tell.
+        // mlx-serve's v1/models context was taken at detection.
         let mut ctx_max = model.ctx_max.unwrap_or(0);
         loop {
-            let counters = if model.engine == "ninfer" {
-                ninfer::poll(&model.host, port, &model.name, &others, &auth).await
-            } else {
-                vllm::poll_vllm(&model.host, port, &model.name, &others, &auth).await
+            let counters = match model.engine.as_str() {
+                "ninfer" => ninfer::poll(&model.host, port, &model.name, &others, &auth).await,
+                "mlx" => mlx::poll(&model.host, port, &model.name, &others, &auth).await,
+                _ => vllm::poll_vllm(&model.host, port, &model.name, &others, &auth).await,
             };
             if let Some(c) = counters {
                 misses = 0;

@@ -636,6 +636,28 @@ pub fn detect_models() -> Vec<DetectedModel> {
         if parsed.engine == "sglang" {
             parsed.port = resolve_container_host_port(pid, parsed.port, 30000);
         }
+        // mlx-serve names its metrics with the config's architecture name,
+        // not the served id, so identity comes from its own un-keyed
+        // /v1/models (detection-time only; the command line is the
+        // fallback when the server is not answering yet). It is a process
+        // we just scanned, so a brief wait closes that gap; the HTTP probe
+        // never runs inside a tokio runtime (detect_models runs on both
+        // sides of one), so it goes to a dedicated thread.
+        if parsed.engine == "mlx" {
+            if parsed.port.is_none() {
+                parsed.port = Some(crate::mlx::DEFAULT_PORT);
+            }
+            if let Some((id, ctx)) = crate::mlx::served_model_blocking(
+                &parsed.host,
+                parsed.port,
+                std::time::Duration::from_millis(300),
+            ) {
+                parsed.name = id;
+                if ctx > 0 {
+                    parsed.ctx_max = Some(ctx);
+                }
+            }
+        }
         by_pid.insert(
             pid,
             DetectedModel {
@@ -795,6 +817,7 @@ fn looks_like_llm(process_name: &str, cmdline: &str) -> bool {
         "llama.cpp",
         "ollama",
         "vllm",
+        "mlx-serve",
         "sglang",
         "exllama",
         "text-generation",
@@ -824,6 +847,9 @@ fn looks_like_llm(process_name: &str, cmdline: &str) -> bool {
             // not the bare keyword `sglang`.
             || t.contains("sglang.launch_server")
             || t.contains("sglang.srt.entrypoints")
+            // `python -m mlx_lm.server` is one argv token that is not a
+            // path whose basename is a key.
+            || t == "mlx_lm.server"
     };
     keys.iter().any(|k| p.contains(k))
         || c.split_whitespace().any(token_matches)
@@ -909,6 +935,11 @@ fn engine_from(process_name: &str, cmdline: &str) -> String {
         "ninfer".into()
     } else if blob.contains("llama-server") || blob.contains("llama.cpp") {
         "llama.cpp".into()
+    } else if blob.contains("mlx-serve") || blob.contains("mlx_lm.server") {
+        // MLX servers speak vLLM's Prometheus names on /metrics plus a live
+        // `mlx_serve:` namespace; the mlx poller rides the shared vLLM counter
+        // adapter and names the engine on the panel.
+        "mlx".into()
     } else if blob.contains("ollama") {
         "ollama".into()
     } else if blob.contains("vllm") {
@@ -1133,6 +1164,9 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
     }
     if parsed.port.is_none() && parsed.engine == "strata" {
         parsed.port = Some(crate::strata::DEFAULT_PORT);
+    }
+    if parsed.port.is_none() && parsed.engine == "mlx" {
+        parsed.port = Some(crate::mlx::DEFAULT_PORT);
     }
     if parsed.host.is_empty() {
         parsed.host = "127.0.0.1".into();
@@ -1828,6 +1862,10 @@ pub async fn probe_endpoint(
             if !owned_by.is_empty() {
                 engine = if owned_by == "library" || port == 11434 {
                     "ollama".to_string()
+                } else if owned_by == "mlx-serve" || owned_by == "mlx_lm.server" {
+                    // vLLM's Prometheus names on /metrics, but the panel
+                    // label and poller key on the engine's own name.
+                    "mlx".to_string()
                 } else {
                     owned_by
                 };
@@ -1879,9 +1917,17 @@ pub async fn probe_endpoint(
             if let Some(c) = crate::ninfer::parse_metrics(&body) {
                 model_name = c.model_name.or(model_name);
             }
-        } else if body.contains("vllm:") {
+        } else if body.contains("vllm:") || body.contains("mlx_serve:") {
+            // mlx-serve publishes its counters under vLLM's names; the
+            // `/v1/models` step above already told the two apart when it
+            // could reach that endpoint, and an explicit probe whose path
+            // prefix is vLLM-shaped is believed.
             saw_vllm_metrics = true;
-            engine = "vllm".to_string();
+            engine = if engine == "mlx" {
+                "mlx".to_string()
+            } else {
+                "vllm".to_string()
+            };
             if let Some(c) = crate::vllm::parse_vllm_metrics(&body) {
                 if model_name.is_none() {
                     model_name = c.model_name;
