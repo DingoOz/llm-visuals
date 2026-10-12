@@ -2,7 +2,7 @@
 
 ## Summary
 
-31 entries (as of 2026-10-12). Recurring themes:
+32 entries (as of 2026-10-12). Recurring themes:
 
 - **Optional or missing telemetry treated as a real value** (Logic, most common): a missing counter read as 0, record close gated on optional TTFT, unknown ctx rendered as full, model ownership derived from an unknown weight estimate. Rule of thumb: keep "unknown" distinct from zero and never gate state or ownership on an optional measurement.
 - **Under-discriminating matches when resolving processes/devices**: docker-proxy matched by IP only, comm-name gating, xe fans keyed by a constant path component, env GPU masks merged with host indices. Match on every discriminating field and prefer authoritative (driver/host) sources over inferred ones.
@@ -322,3 +322,13 @@
 - **Root cause:** The README and a doc comment said a server's reported occupancy replaces macmon's system-wide RAM figure in the unified bar. `apply_unified_memory` skipped every row whose memory was already filled, and macmon rows always are, so the override never ran; the rows were marked unified afterwards, by an `Apple ` name prefix that the `hw.model` fallback name does not carry.
 - **Fix applied:** The Apple backend marks its own rows unified, `apply_unified_memory` fills a pool that is already unified, and the name always carries the prefix. The separate marking pass is gone.
 - **Prevention rule:** A backend that knows what its rows are says so itself, and a behaviour a comment promises gets a test that reaches it.
+
+### A source with nothing to report taken for one that had gone quiet — 2026-10-12
+
+- **Severity:** Low
+- **Category:** Logic
+- **File(s):** `src/gpu.rs`
+- **Pattern:** Dropping an empty record ahead of the code that would have reported it as empty, and discarding a child's stderr before guessing at why it died.
+- **Root cause:** On a virtual Mac `powermetrics` prints its sample headers with nothing under them. The framer dropped empty samples, so the collector waited out the 10 s stall window and then reported silence from a stream that was printing four times a second. `macmon` exits there with its reason on stderr, which went to `/dev/null`; the panel advised running under `sudo` in a session that already was.
+- **Fix applied:** An empty sample is published and reported as having no GPU line, which moves the session to `macmon` on the first one. The reason `macmon` gives on exit is shown, with the `powermetrics` failure beside it when both fail. Found by running both sources on GitHub's macOS runners.
+- **Prevention rule:** "Present but empty" is reported as itself, never folded into "absent". An error repeats what the failing tool said before it suggests anything.

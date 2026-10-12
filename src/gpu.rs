@@ -642,6 +642,19 @@ fn next_restart(restarts: u32, delivered: bool) -> Option<u32> {
     (n <= MACMON_MAX_RESTARTS).then_some(n)
 }
 
+/// The last line a child wrote to stderr, which is where macmon says why it
+/// is exiting. Reads to the end, so it returns once the child has gone.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn last_stderr_line(stderr: impl std::io::Read) -> Option<String> {
+    use std::io::BufRead;
+    std::io::BufReader::new(stderr)
+        .lines()
+        .map_while(Result::ok)
+        .filter(|l| !l.trim().is_empty())
+        .last()
+        .map(|l| l.trim().to_string())
+}
+
 /// Spawn the macmon pipeline and drain it, publishing every complete line.
 #[cfg(target_os = "macos")]
 fn macmon_pump(poll_ms: u64) {
@@ -659,7 +672,7 @@ fn macmon_pump(poll_ms: u64) {
             .args(["-i", &poll_ms.max(250).to_string(), "pipe"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn();
         let mut child = match child {
             Ok(c) => c,
@@ -677,6 +690,12 @@ fn macmon_pump(poll_ms: u64) {
                 return;
             }
         };
+        // Read on a thread of its own, so a child that fills stderr never
+        // blocks while this one is reading stdout.
+        let complaint = child
+            .stderr
+            .take()
+            .map(|e| std::thread::spawn(move || last_stderr_line(e)));
         MACMON.lock().unwrap_or_else(|e| e.into_inner()).spawned = Some(Instant::now());
         let mut delivered = false;
         for line in std::io::BufReader::new(stdout).lines() {
@@ -696,16 +715,17 @@ fn macmon_pump(poll_ms: u64) {
         // The stream ended: the child died.
         let _ = child.kill();
         let _ = child.wait();
+        let why = complaint
+            .and_then(|t| t.join().ok().flatten())
+            .map(|w| format!(": {w}"))
+            .unwrap_or_default();
         let mut st = MACMON.lock().unwrap_or_else(|e| e.into_inner());
         let Some(restarts) = next_restart(st.restarts, delivered) else {
-            st.last_error = Some(
-                "macmon stream keeps failing; reinstall macmon or run under sudo for powermetrics"
-                    .into(),
-            );
+            st.last_error = Some(format!("macmon keeps exiting{why}"));
             return;
         };
         st.restarts = restarts;
-        st.last_error = Some("macmon stream ended; restarting".into());
+        st.last_error = Some(format!("macmon exited{why}; restarting"));
         drop(st);
         // A child that dies at once would otherwise be respawned in a spin.
         std::thread::sleep(Duration::from_millis(500));
@@ -824,7 +844,9 @@ static POWERMETRICS: std::sync::Mutex<PowermetricsState> =
 /// Splits powermetrics' text output into samples. Each sample opens with a
 /// `*** Sampled system activity (…) ***` line and nothing marks its end, so
 /// a sample is complete when the next one opens. The machine and OS lines
-/// printed before the first sample are not one.
+/// printed before the first sample are not one. A sample with nothing under
+/// its header still is: a virtual Mac prints exactly that, and it has to
+/// read as a sampler with no GPU figures, not as one that has gone quiet.
 #[derive(Default)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct PowermetricsFramer {
@@ -838,8 +860,7 @@ impl PowermetricsFramer {
     fn push(&mut self, line: &str) -> Option<String> {
         if line.starts_with("*** Sampled system activity") {
             let done = std::mem::take(&mut self.sample);
-            let closed = self.open && !done.trim().is_empty();
-            self.open = true;
+            let closed = std::mem::replace(&mut self.open, true);
             return closed.then_some(done);
         }
         if self.open {
@@ -891,7 +912,7 @@ fn powermetrics_pump() {
         let Ok(line) = line else { break };
         // Once the backend has moved to macmon nobody reads this stream:
         // stop the sampler rather than leave it running as root.
-        if DEMOTED_TO_MACMON.load(std::sync::atomic::Ordering::Relaxed) {
+        if DEMOTED_TO_MACMON.get().is_some() {
             break;
         }
         if let Some(sample) = framer.push(&line) {
@@ -1034,7 +1055,7 @@ fn collect_powermetrics() -> Result<Vec<GpuStats>, String> {
         return Ok(Vec::new()); // sampler warming up: keep last frame
     };
     let Some((util, gpu_w, ane_w)) = parse_powermetrics_powers(&txt) else {
-        return Err("powermetrics output not recognised: no GPU residency or power line".into());
+        return Err("powermetrics printed no GPU residency or power line".into());
     };
     note_power_ceiling(gpu_w + ane_w);
     let (name, cores) = apple_gpu_metadata();
@@ -1151,29 +1172,29 @@ fn parse_macmon_line(line: &str, name: &str, cores: u32) -> Result<GpuStats, Str
 
 /// One Apple poll. powermetrics is preferred at detection, but the sampler
 /// can die, stall or print something this does not recognise; the first
-/// failure flips the backend's own flag so the rest of the session polls
-/// macmon directly (the demotion is one-way, and the detection cache is
-/// not re-probed). With macmon absent there is nothing to fall back to and
-/// the failure is reported: a stream that failed stays failed.
+/// failure is remembered so the rest of the session polls macmon directly
+/// (the demotion is one-way, and the detection cache is not re-probed).
+/// With macmon absent there is nothing to fall back to and the failure is
+/// reported: a stream that failed stays failed. When macmon fails as well,
+/// the error carries what both said.
 #[cfg(target_os = "macos")]
 fn collect_apple(source: AppleSource) -> Result<Vec<GpuStats>, String> {
     let (name, cores) = apple_gpu_metadata();
     match source {
         AppleSource::Macmon => collect_macmon(&name, cores),
         AppleSource::Powermetrics => {
-            if DEMOTED_TO_MACMON.load(std::sync::atomic::Ordering::Relaxed) {
-                return collect_macmon(&name, cores);
-            }
-            collect_powermetrics().or_else(|e| {
-                if which_macmon().is_none() {
-                    return Err(e);
-                }
-                // One-way: a failing powermetrics source stops being
-                // polled for the rest of the session, and its reader
-                // thread stops the sampler.
-                DEMOTED_TO_MACMON.store(true, std::sync::atomic::Ordering::Relaxed);
-                collect_macmon(&name, cores)
-            })
+            let why = match DEMOTED_TO_MACMON.get() {
+                Some(why) => why,
+                None => match collect_powermetrics() {
+                    Ok(stats) => return Ok(stats),
+                    Err(e) if which_macmon().is_none() => return Err(e),
+                    // One-way: a failing powermetrics source stops being
+                    // polled for the rest of the session, and its reader
+                    // thread stops the sampler.
+                    Err(e) => DEMOTED_TO_MACMON.get_or_init(|| e),
+                },
+            };
+            collect_macmon(&name, cores).map_err(|e| format!("{e}; {why}"))
         }
         AppleSource::MetadataOnly => Err(
             "no sudoless Apple GPU telemetry: install macmon (brew install macmon) \
@@ -1183,10 +1204,11 @@ fn collect_apple(source: AppleSource) -> Result<Vec<GpuStats>, String> {
     }
 }
 
-/// Set once a powermetrics poll fails and macmon exists: the rest of the
-/// session polls macmon without touching sudo again.
+/// Why the backend left powermetrics, set once when a powermetrics poll
+/// fails and macmon exists: the rest of the session polls macmon without
+/// touching sudo again.
 #[cfg(target_os = "macos")]
-static DEMOTED_TO_MACMON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static DEMOTED_TO_MACMON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 #[cfg(target_os = "macos")]
 fn collect_macmon(name: &str, cores: u32) -> Result<Vec<GpuStats>, String> {
@@ -2083,6 +2105,32 @@ GPU Power: 4210 mW
             peak_util = peak_util.max(util);
         }
         assert!(peak_util > 0.0);
+    }
+
+    /// `sudo powermetrics --samplers gpu_power,cpu_power -i 250 -b 1 -n 4`
+    /// on a GitHub macos-15 runner, a virtual M1: four headers and nothing
+    /// under any of them.
+    #[test]
+    fn a_virtual_macs_empty_samples_are_samples_with_no_gpu_figures() {
+        let capture = std::fs::read_to_string("fixtures/powermetrics-virtual.txt").unwrap();
+        let mut framer = PowermetricsFramer::default();
+        let samples: Vec<String> = capture.lines().filter_map(|l| framer.push(l)).collect();
+        // The fourth is still open: nothing after it says it is complete.
+        assert_eq!(samples.len(), 3);
+        assert!(samples
+            .iter()
+            .all(|s| parse_powermetrics_powers(s).is_none()));
+    }
+
+    /// What macmon 0.8.2 printed on the same runner before exiting 1.
+    #[test]
+    fn the_reason_macmon_gives_on_exit_is_its_last_stderr_line() {
+        let said = b"\nError: \"No CPU frequencies found\"\n\n";
+        assert_eq!(
+            last_stderr_line(&said[..]).as_deref(),
+            Some("Error: \"No CPU frequencies found\"")
+        );
+        assert_eq!(last_stderr_line(&b"\n  \n"[..]), None);
     }
 
     #[test]
