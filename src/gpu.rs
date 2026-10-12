@@ -5,8 +5,12 @@ use tokio::time;
 
 use crate::nvml::NvmlSession;
 
+/// Diagnostic mode: print the GPU row(s) `--print-gpu` sees and exit, without
+/// starting the dashboard. See [`print_gpu_once`].
+pub const PRINT_GPU_ARG: &str = "--print-gpu";
+
 /// Statistics for a single GPU
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 #[allow(dead_code)]
 pub struct GpuStats {
     pub index: u32,
@@ -1047,18 +1051,41 @@ fn collect_powermetrics() -> Result<Vec<GpuStats>, String> {
     // powermetrics has no temperature, clock or fan samplers; when macmon
     // is installed, read its line only to enrich the powermetrics row with
     // those fields (the power/util come from the privileged source).
+    //
+    // macmon_line() spawns its child lazily and returns None while that child
+    // warms up (~1s). Under macmon selection this poll is called every tick so
+    // the warm-up is transient; a single-shot caller that stops as soon as the
+    // powermetrics row exists never gives macmon its warm-up, and the
+    // enrichment fields stay null forever. Keep polling macmon — after a
+    // present-but-cold read, a few more reads while its stream warms up let
+    // the merge fire. One poll's powermetrics failure still demotes: this only
+    // extends the warm-up window, it does not retry failures.
     if which_macmon().is_some() {
-        if let Ok(Some(line)) = macmon_line() {
-            if let Ok(m) = serde_json::from_str::<MacmonLine>(&line) {
-                note_power_ceiling(macmon_cluster_watts(&m));
-                let extra = extract_macmon(&m);
-                sample.temp = extra.temp;
-                sample.freq_mhz = extra.freq_mhz;
-                sample.ram_total = extra.ram_total;
-                sample.ram_usage = extra.ram_usage;
-                sample.fan_rpm = extra.fan_rpm;
-                sample.fan_max = extra.fan_max;
+        let mut extra = None;
+        for _ in 0..8 {
+            match macmon_line() {
+                Ok(Some(line)) => {
+                    match serde_json::from_str::<MacmonLine>(&line) {
+                        Ok(m) => {
+                            extra = Some(extract_macmon(&m));
+                            note_power_ceiling(macmon_cluster_watts(&m));
+                            break;
+                        }
+                        Err(_) => break, // a real parse error: do not spin
+                    }
+                }
+                Ok(None) => {}   // still warming up
+                Err(_) => break, // macmon dead or macmon absent: powermetrics alone
             }
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        if let Some(e) = extra {
+            sample.temp = e.temp;
+            sample.freq_mhz = e.freq_mhz;
+            sample.ram_total = e.ram_total;
+            sample.ram_usage = e.ram_usage;
+            sample.fan_rpm = e.fan_rpm;
+            sample.fan_max = e.fan_max;
         }
     }
     Ok(vec![apple_stats(&name, cores, sample)])
@@ -1167,6 +1194,90 @@ fn collect_macmon(name: &str, cores: u32) -> Result<Vec<GpuStats>, String> {
         return Ok(Vec::new()); // first sample warming up: keep last frame
     };
     Ok(vec![parse_macmon_line(&line, name, cores)?])
+}
+
+/// `--print-gpu`: run one real poll and print what the GPU backend sees, then
+/// the caller exits. This is the proof harness for the paths a unit test and
+/// a fixture capture cannot reach — under `sudo` it selects `Powermetrics` and
+/// exercises the live sampler stream and the macmon-enriches-powermetrics
+/// merge in-process; without sudo it selects `Macmon`. It prints the chosen
+/// [`AppleSource`], the parsed rows, and (with `--print-gpu --json`) a machine
+/// readable record, so the output is copy-pasteable into a PR as evidence the
+/// privileged path ran on real hardware. Ex non-macOS it reports the backend
+/// NVML/nvidia-smi would return, so the flag behaves the same everywhere.
+pub fn print_gpu_once(as_json: bool) -> bool {
+    // Which Apple source detection picks (root/sudo -n → powermetrics, else
+    // macmon, else metadata-only). Only meaningful on macOS.
+    let apple_source = if cfg!(target_os = "macos") {
+        Some(format!("{:?}", apple_source()))
+    } else {
+        None
+    };
+    // One poll is not enough for a stream backend: the sampler needs seconds
+    // for its first sample, so keep polling until a row appears or the window
+    // closes. A row that never arrives is a real, reportable failure.
+    let mut stats: Vec<GpuStats> = Vec::new();
+    let mut last_err: Option<String> = None;
+    for _ in 0..40 {
+        match GpuBackend::detect(NvmlSession::new()).collect() {
+            Ok(s) if !s.is_empty() => {
+                stats = s;
+                break;
+            }
+            Ok(_) => {}
+            Err(e) => last_err = Some(e),
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    if as_json {
+        let value = serde_json::json!({
+            "os": std::env::consts::OS,
+            "uid_is_root": is_root(),
+            "apple_source": apple_source,
+            "macmon_installed": which_macmon().map(|p| p.display().to_string()),
+            "gpus": stats,
+            "error": last_err,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&value).unwrap_or_default()
+        );
+    } else {
+        println!("os={} uid_is_root={}", std::env::consts::OS, is_root());
+        if let Some(src) = &apple_source {
+            println!(
+                "apple_source={src} macmon_installed={}",
+                which_macmon().is_some()
+            );
+        }
+        if stats.is_empty() {
+            println!(
+                "no GPU row after the warm-up window: {}",
+                last_err.as_deref().unwrap_or("backend returned nothing")
+            );
+        }
+        for g in &stats {
+            println!(
+                "gpu idx={} name='{}' util_gpu={:.1}% power={:.3}W/ceil{:.0}W temp={:?} \
+                 clk={}MHz fan={:?}/{:?} mem={}/{}MB unified={}",
+                g.index,
+                g.name,
+                g.utilization_gpu,
+                g.power_watts,
+                g.power_max_watts,
+                g.temperature,
+                g.clock_sm_mhz,
+                g.fan_pct,
+                g.fan_rpm,
+                g.mem_used_mb,
+                g.mem_total_mb,
+                g.unified,
+            );
+        }
+    }
+    // Success only if a row with the Apple path actually came back on macOS;
+    // elsewhere, any row. A non-zero exit is itself part of the proof.
+    !stats.is_empty()
 }
 
 #[cfg(target_os = "linux")]
