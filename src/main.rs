@@ -544,6 +544,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().nth(1).as_deref() == Some(vision::CUDA_PROBE_ARG) {
         std::process::exit(if vision::print_cuda_bus_ids() { 0 } else { 1 });
     }
+    // `--print-gpu` (optionally `--print-gpu --json`): one poll, print what
+    // the backend sees, exit. Under sudo this is the reviewable proof the
+    // powermetrics path ran on this Mac; before any terminal/DB side effects.
+    if std::env::args().nth(1).as_deref() == Some(gpu::PRINT_GPU_ARG) {
+        let as_json = std::env::args().skip(1).any(|a| a == "--json");
+        std::process::exit(if gpu::print_gpu_once(as_json) { 0 } else { 1 });
+    }
     let launch = settings::launch();
     let mut args = launch.args.clone();
     let auth = HttpAuth::from_key_file(args.api_key_file.as_deref())?;
@@ -947,6 +954,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Ok(sample) = gpu_rx.try_recv() {
             ui_changed = true;
             match sample {
+                // An empty sample is a source still warming up (the Apple
+                // streams take a second or more to print their first):
+                // replacing `latest_gpu` with it would blank the cards, so
+                // only a non-empty frame replaces the last one.
+                Ok(stats) if stats.is_empty() => {}
                 Ok(stats) => {
                     latest_gpu = stats;
                     gpu_error = None;

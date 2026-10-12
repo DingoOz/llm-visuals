@@ -1,0 +1,21 @@
+Machine model: VirtualMac2,1
+OS version: 24G830
+Boot arguments: 
+Boot time: Mon Oct 12 02:12:29 2026
+
+
+
+*** Sampled system activity (Mon Oct 12 02:14:28 2026 +0000) (308.10ms elapsed) ***
+
+
+
+*** Sampled system activity (Mon Oct 12 02:14:28 2026 +0000) (252.99ms elapsed) ***
+
+
+
+*** Sampled system activity (Mon Oct 12 02:14:28 2026 +0000) (305.18ms elapsed) ***
+
+
+
+*** Sampled system activity (Mon Oct 12 02:14:29 2026 +0000) (319.46ms elapsed) ***
+

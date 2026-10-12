@@ -42,6 +42,7 @@ a Tesla P100 under llama.cpp, mid-request.</sub>
 
 Requirements: a Rust toolchain (1.75+), `nvidia-smi` for NVIDIA GPU panels,
 `xpu-smi` for Intel GPU panels or the Linux amdgpu driver for AMD GPU panels,
+`macmon` for Apple silicon GPU panels (or run under `sudo` for `powermetrics`),
 and a locally listening
 `llama-server` for throughput panels. Nothing at all is needed for demo mode.
 
@@ -166,15 +167,16 @@ console, pass `--color truecolor` if colours look flat.
 
 ## macOS
 
-macOS support is new and has only been type-checked, not run on a Mac yet.
-Both Apple silicon and Intel are built and released; please report results in
-an issue.
+macOS support is new and has only been run on Apple silicon. Both Apple
+silicon and Intel are built and released; please report results in an issue.
 
-Requirements are the same as elsewhere, minus the GPU panels: `nvidia-smi`
-does not exist on macOS, so the GPU row and the PCIe stage of the memory
-pipeline stay empty. Everything driven by the server's own metrics —
-throughput, context, MTP acceptance, layers and experts — works as it does on
-Linux.
+Requirements are the same as elsewhere; on Apple silicon the GPU panels read
+from `macmon` (brew install macmon, or `cargo install macmon`) — or from the
+built-in `powermetrics` when running under `sudo` (see
+[What differs from Linux](#what-differs-from-linux)). Intel Macs have no
+GPU panels, like Windows had none before `nvidia-smi`. Everything driven by
+the server's own metrics — throughput, context, MTP acceptance, layers and
+experts — works as it does on Linux.
 
 ### What differs from Linux
 
@@ -182,10 +184,37 @@ Linux.
   instead of `/proc`, exactly as on Windows. Run the dashboard as the same
   user as the server, or the server's command line — and with it the model
   path, port and context size — is hidden and it is matched by name alone.
-- **No GPU panels**: there is no `nvidia-smi`, so utilisation, VRAM, power and
-  temperature are unavailable, and Metal/unified memory is not read.
+- **Apple silicon GPU panels**: the source is chosen once at startup. It is
+  the built-in `powermetrics` when running as root, or when `sudo -n` works
+  without a password prompt; otherwise a long-lived sudoless `macmon pipe`
+  stream; otherwise a one-line error naming both. Either source samples
+  every 250 ms and reports the same two things about the GPU: the share of
+  the interval it was active, which is the utilisation shown, and its power.
+  `macmon` adds temperature, clock, fans and system RAM. `powermetrics` has
+  none of those, so they read `n/a` under `sudo` unless `macmon` is
+  installed too, in which case it fills them in. If the `powermetrics`
+  stream stops or prints something unrecognised, the rest of the session
+  reads `macmon`. A `macmon` older than 0.8 has no time-active figure; its
+  frequency-weighted one is shown instead. A virtual Mac has no GPU figures
+  to read: `powermetrics` prints empty samples there and `macmon` exits,
+  and the panel shows what each of them said. `llm-visuals --print-gpu`
+  (add `--json` for a machine-readable record) prints the source that was
+  chosen and one parsed sample without opening the dashboard, which is the
+  thing to paste into an issue.
+- **Power gauge**: Apple publishes no GPU power limit, so the gauge is
+  scaled to the largest GPU-cluster draw seen since the dashboard started:
+  GPU, ANE and RAM from `macmon`, GPU and ANE from `powermetrics`, the CPU
+  excluded. It is a share of the session's peak, not of a rated maximum.
+- **VRAM / unified memory**: Apple silicon parts have no device memory, so
+  the VRAM stage of the memory pipeline (`b`) is labelled `UNIFIED` and shows
+  pool fill — server-reported occupancy when available, otherwise the whole
+  system RAM in use — over the installed pool. The pool comes from `macmon`;
+  with `powermetrics` alone the bar fills only once a server reports its
+  occupancy. There is no memory controller to watch, so its busy % reads
+  `n/a`, and the PCIe stage is labelled `C2C` and reads `n/a` (NVLink-C2C
+  traffic has no counter).
 - **Memory pipeline (`b`)**: RAM totals and the server's resident memory come
-  from the OS; the DISK and PCIe stages have no counters to read.
+  from the OS; the DISK stage has no counters to read.
 - **Settings** go to `~/Library/Application Support/llm-visuals/settings.json`
   and the log database to the same directory.
 
