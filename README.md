@@ -369,7 +369,7 @@ grouped, and the title says `N/block`: a block stands as tall as its tallest
 expert and is lit by the mean of its members. Without the server patch there
 are no hit counts, so the plain stays flat, the title reads `simulated`, and a
 stand-in pick only lifts its tile for a moment. A dense model, the attention
-bridge and a panel under 60×18 get the flat map instead.
+bridge and a panel under 60×18 get the flat map instead, laid out as `m` is.
 
 `←` `→` turn the view to the next corner, `↑` `↓` tilt it, and `space` stops
 or restarts the slow sway. The view takes the context and MTP row's space as

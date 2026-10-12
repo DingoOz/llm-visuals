@@ -144,7 +144,11 @@ impl FadeState {
             .max()
             .unwrap_or(0);
         self.usage_peak = peak;
-        self.usage_window = e.window;
+        // The server's ring holds `window` tokens once it has seen that
+        // many; until then the counts cover only what has been routed.
+        self.usage_window = e
+            .window
+            .min(usize::try_from(e.n_tokens).unwrap_or(usize::MAX));
         // A layer the server stopped listing has no hits to show.
         for row in self.usage_target.iter_mut() {
             row.fill(0.0);
@@ -397,7 +401,7 @@ mod tests {
         let stats = |layers| ExpertStats {
             n_expert: 4,
             n_expert_used: 2,
-            n_tokens: 0,
+            n_tokens: 4096,
             window: 128,
             layers,
         };
@@ -438,6 +442,12 @@ mod tests {
         // Nothing routed yet: no heights, and no division by a zero peak.
         f.observe_experts(&stats(vec![layer(0, vec![0; 4])]));
         assert_eq!(f.usage_peak, 0);
+        // A server 31 tokens in has counted 31 tokens, not a full window.
+        f.observe_experts(&ExpertStats {
+            n_tokens: 31,
+            ..stats(vec![layer(0, vec![20, 11, 0, 0])])
+        });
+        assert_eq!((f.usage_peak, f.usage_window), (20, 31));
     }
 
     #[test]

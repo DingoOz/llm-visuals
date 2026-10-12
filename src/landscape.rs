@@ -11,7 +11,7 @@
 //! resolution and averaged down, which is what keeps one-pixel towers from
 //! shimmering as the camera moves.
 
-use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
+use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, FRAC_PI_6, PI};
 
 pub type Rgb = (u8, u8, u8);
 
@@ -60,8 +60,11 @@ impl Default for Camera {
 impl Camera {
     /// Elevations the tilt keys step through. The middle one is the 2:1
     /// isometric of pixel art: one pixel down for every two across.
-    const PITCHES: [f32; 5] = [0.36, 0.44, 0.5236, 0.62, 0.74];
+    const PITCHES: [f32; 5] = [0.36, 0.44, FRAC_PI_6, 0.62, 0.74];
     const SWAY: f32 = 0.20;
+    /// Both of the sway's sines are back where they started after this
+    /// many seconds, so the clock can wrap there without a jump.
+    const SWAY_PERIOD: f32 = 200.0 * PI;
 
     pub fn new() -> Self {
         Self {
@@ -96,7 +99,15 @@ impl Camera {
         self.pitch += (Self::PITCHES[self.tilt as usize] - self.pitch) * ease(0.18);
         let want = if self.orbit { 1.0 } else { 0.0 };
         self.sway += (want - self.sway) * ease(0.6);
-        self.clock += dt;
+        // Neither count may grow without bound: an f32 that large stops
+        // taking a frame's worth of time, or of turn, and the view would
+        // freeze after days open or redraw for ever after enough turns.
+        // Whole turns come off the corner and the eased yaw together, so
+        // the view is the same one, mid-turn or at rest.
+        self.clock = (self.clock + dt) % Self::SWAY_PERIOD;
+        let whole = self.corner.div_euclid(4) * 4;
+        self.corner -= whole;
+        self.turn -= whole as f32;
     }
 
     /// On the way to another corner or another tilt: quick motion that
@@ -251,14 +262,20 @@ impl Grid {
         (self.height[i], self.heat[i], self.fresh[i])
     }
 
-    /// The tallest block, if anything stands at all: (block, row).
-    fn peak(&self) -> Option<(usize, usize)> {
-        let (i, h) = self
-            .height
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1))?;
-        (*h > 0.0).then_some((i % self.nx, i / self.nx))
+    /// Where one expert's roof is on the canvas, for a label that names
+    /// it: the top of the block it was grouped into, at the height that
+    /// block is drawn. `None` for an expert the grid does not hold.
+    pub fn roof(&self, view: &View, layer: usize, expert: usize) -> Option<(f32, f32)> {
+        let (ix, iz) = (expert / self.per_block, layer / self.layers_per_row);
+        if ix >= self.nx || iz >= self.nz {
+            return None;
+        }
+        let (height, _, _) = self.cell(ix, iz);
+        Some(view.project(
+            -0.5 + (ix as f32 + 0.5) / self.nx as f32,
+            height * TOWER,
+            -0.5 + (iz as f32 + 0.5) / self.nz as f32,
+        ))
     }
 }
 
@@ -280,8 +297,6 @@ pub struct Marks {
     pub experts: [(f32, f32); 2],
     /// The front edge the layers run along: first layer, last layer.
     pub layers: [(f32, f32); 2],
-    /// The top of the tallest tower.
-    pub peak: Option<(f32, f32)>,
 }
 
 /// `w` × `h` pixels, row by row from the top.
@@ -729,14 +744,6 @@ pub fn render(grid: &Grid, view: &View, look: &Look, w: usize, h: usize) -> Imag
             view.project(x_front, -SLAB, -0.5),
             view.project(x_front, -SLAB, 0.5),
         ],
-        peak: grid.peak().map(|(ix, iz)| {
-            let (height, _, _) = grid.cell(ix, iz);
-            view.project(
-                -0.5 + (ix as f32 + 0.5) * cw,
-                height * TOWER,
-                -0.5 + (iz as f32 + 0.5) * cd,
-            )
-        }),
     };
     Image { px, marks }
 }
@@ -843,11 +850,9 @@ mod tests {
         assert_eq!((g.nx, g.nz, g.per_block, g.layers_per_row), (64, 41, 4, 1));
         // Tallest member's height, the members' mean heat, the hottest's flash.
         assert_eq!(g.cell(32, 3), (1.0, 0.9 / 4.0, 0.9));
-        assert_eq!(g.peak(), Some((32, 3)));
         // Few experts are never split or padded.
         let g = Grid::bin(24, 8, 64, |_, _| (0.0, 0.0));
         assert_eq!((g.nx, g.per_block), (8, 1));
-        assert_eq!(g.peak(), None);
         // More layers than the canvas resolves are grouped too.
         let g = Grid::bin(96, 8, 40, |_, _| (0.0, 0.0));
         assert_eq!((g.nz, g.layers_per_row), (32, 3));
@@ -882,7 +887,66 @@ mod tests {
                 "far tower drew over the near one at {x},{y}"
             );
         }
-        assert_eq!(a.marks.peak.map(|p| p.0.round()), Some(roof_x.round()));
+        assert_eq!(
+            near_only.roof(&view, 7, 7).map(|p| p.0.round()),
+            Some(roof_x.round())
+        );
+    }
+
+    #[test]
+    fn a_label_stands_on_the_expert_it_names_not_on_the_tallest_block() {
+        let view = View::fit(146, 72, &still());
+        // Expert 130 of layer 3 is named while its tower is still growing;
+        // two others already stand at full height, one of them level with
+        // where 130 will end up.
+        let g = Grid::bin(41, 256, 64, |l, e| match (l, e) {
+            (3, 130) => (0.4, 0.0),
+            (9, 20) | (30, 200) => (1.0, 0.0),
+            _ => (0.05, 0.0),
+        });
+        let roof = g.roof(&view, 3, 130).unwrap();
+        // Its own block (four experts to a block), at its own height.
+        let own = view.project(-0.5 + 32.5 / 64.0, 0.4 * TOWER, -0.5 + 3.5 / 41.0);
+        assert!((roof.0 - own.0).abs() < 1e-3 && (roof.1 - own.1).abs() < 1e-3);
+        for other in [(9, 20), (30, 200)] {
+            let there = g.roof(&view, other.0, other.1).unwrap();
+            assert!((roof.0 - there.0).abs() > 2.0 || (roof.1 - there.1).abs() > 2.0);
+        }
+        // Every member of a block shares its roof; off the grid there is none.
+        assert_eq!(g.roof(&view, 3, 131), g.roof(&view, 3, 130));
+        assert_eq!(g.roof(&view, 41, 0), None);
+        assert_eq!(g.roof(&view, 0, 256), None);
+    }
+
+    #[test]
+    fn the_camera_stays_in_range_however_long_it_runs() {
+        // Round the block the long way, in both directions: at rest it is
+        // back on one of the four corners, facing the same way.
+        for dir in [1, -1] {
+            let mut cam = still();
+            let y0 = cam.yaw();
+            for _ in 0..10_001 {
+                cam.rotate(dir);
+                for _ in 0..3 {
+                    cam.tick(0.1);
+                }
+            }
+            for _ in 0..200 {
+                cam.tick(0.033);
+            }
+            assert!(cam.settled() && !cam.turning(), "{cam:?}");
+            assert!((0..4).contains(&cam.corner), "{cam:?}");
+            let turned = (cam.yaw() - y0 - dir as f32 * FRAC_PI_2).rem_euclid(2.0 * PI);
+            assert!(turned.min(2.0 * PI - turned) < 0.01, "{cam:?}");
+        }
+        // The sway's clock wraps where both of its sines repeat, so the
+        // view does not jump there and a tick always moves it on.
+        let mut cam = Camera::new();
+        cam.clock = Camera::SWAY_PERIOD - 0.05;
+        let before = cam.yaw();
+        cam.tick(0.1);
+        assert!(cam.clock < 1.0, "{cam:?}");
+        assert!((cam.yaw() - before).abs() < 0.01);
     }
 
     #[test]

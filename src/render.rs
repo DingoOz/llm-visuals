@@ -203,8 +203,10 @@ impl Renderer {
         let show_requests = h >= 22;
         let show_ctx = h >= 16;
         let req_h = if show_requests { 7 } else { 0 };
-        // The landscape is a picture and wants every row it can get.
-        let ctx_h = if !show_ctx || d.view == ViewMode::Landscape {
+        // The landscape is a picture and wants every row it can get. Where
+        // it cannot be drawn the flat map stands in, laid out as `m` is.
+        let landscape = d.view == ViewMode::Landscape && landscape_fits(d, area);
+        let ctx_h = if !show_ctx || landscape {
             0
         } else if d.view == ViewMode::Perf {
             6
@@ -260,8 +262,8 @@ impl Renderer {
         if rows[2].height > 0 {
             match d.view {
                 ViewMode::Heatmap => self.render_layers(frame, rows[2], d),
-                ViewMode::MoE => self.render_experts(frame, rows[2], d),
-                ViewMode::Landscape => self.render_landscape(frame, rows[2], d),
+                ViewMode::Landscape if landscape => self.render_landscape(frame, rows[2], d),
+                ViewMode::MoE | ViewMode::Landscape => self.render_experts(frame, rows[2], d),
                 _ => {
                     let split = Layout::default()
                         .direction(Direction::Horizontal)
@@ -1678,6 +1680,11 @@ impl Renderer {
         let is_moe = n_e > 1;
         let w = area.width.saturating_sub(2) as usize;
         let h = area.height.saturating_sub(2) as usize;
+        // No row inside the border: nothing to draw, and nothing for the
+        // rows-per-slot arithmetic below to divide by.
+        if h == 0 {
+            return;
+        }
         let label_w = 4usize;
         let cols = w.saturating_sub(label_w).max(1);
         // Horizontal: one block per expert when it fits, else `per_block` experts share a block.
@@ -1815,9 +1822,7 @@ impl Renderer {
     fn render_landscape(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
         let f = d.fade;
         let (n_l, n_e) = (f.n_layers, f.n_experts.max(1));
-        // The bridge's output text, a dense model and a panel too small for
-        // a picture all read better as the flat map.
-        if !d.attention.is_empty() || n_e <= 1 || n_l == 0 || area.width < 60 || area.height < 18 {
+        if !landscape_fits(d, area) {
             self.render_experts(frame, area, d);
             return;
         }
@@ -1861,7 +1866,10 @@ impl Renderer {
         let legend = if live {
             Line::from(vec![
                 Span::styled(
-                    format!(" height = hits in {} tokens  ", f.usage_window),
+                    match f.usage_window {
+                        0 => " height = hits per expert  ".to_string(),
+                        n => format!(" height = hits in {n} tokens  "),
+                    },
                     muted,
                 ),
                 Span::styled("█", Style::default().fg(self.theme.map_intensity(1.0))),
@@ -1981,18 +1989,26 @@ impl Renderer {
                 }
             }
         }
-        if let (Some((_, il, e)), Some(peak)) = (tallest, m.peak) {
+        // The tag stands on the tower it names. The name comes from the
+        // server's counts and the heights are eased toward them, so the
+        // tallest tower on screen can be a different one for a moment (or
+        // for as long as two are level).
+        let roof = tallest.and_then(|(_, il, e)| Some((il, e, grid.roof(&view, il, e)?)));
+        if let Some((il, e, roof)) = roof {
             let tag = format!("L{il}·E{e}");
-            let x = (peak.0.round() as i32 - tag.chars().count() as i32 / 2)
+            let x = (roof.0.round() as i32 - tag.chars().count() as i32 / 2)
                 .clamp(0, (canvas.width as i32 - tag.chars().count() as i32).max(0));
-            let y = (peak.1 / 2.0).floor() as i32 - 1;
+            let y = (roof.1 / 2.0).floor() as i32 - 1;
             if y >= 0 {
+                // On its own ground: over a lit roof the letters would take
+                // the picture's colours and wash out.
                 buf.set_string(
                     canvas.x + x as u16,
                     canvas.y + y as u16,
                     tag,
                     Style::default()
                         .fg(pal::c(pal::WHITE))
+                        .bg(pal::c(chrome.bg))
                         .add_modifier(Modifier::BOLD),
                 );
             }
@@ -2003,6 +2019,7 @@ impl Renderer {
             " ←→ turn  ↑↓ tilt  space {}",
             if d.camera.orbit { "hold still" } else { "sway" }
         );
+        let keys_w = keys.chars().count();
         frame.render_widget(Paragraph::new(Span::styled(keys, muted)), row);
         let note = match tallest {
             Some((n, il, e)) => format!(
@@ -2012,7 +2029,8 @@ impl Renderer {
             None if live => "no tokens routed yet ".to_string(),
             None => "start the server with --expert-stats for real heights ".to_string(),
         };
-        if note.chars().count() + 34 <= row.width as usize {
+        // Only beside the key hint, never over it, with a gap between them.
+        if note.chars().count() + keys_w + 2 <= row.width as usize {
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     note,
@@ -4565,6 +4583,19 @@ mod tests {
     /// terminal and return it as text. `routed` feeds real routing; without
     /// it the view has only the stand-in to show.
     fn landscape_text(profile: usize, w: u16, h: u16, routed: bool, turns: i32) -> String {
+        landscape_text_with(profile, w, h, routed, turns, None)
+    }
+
+    /// As `landscape_text`, with a `rival` (layer, expert) routed exactly as
+    /// often as the busiest expert.
+    fn landscape_text_with(
+        profile: usize,
+        w: u16,
+        h: u16,
+        routed: bool,
+        turns: i32,
+        rival: Option<(usize, usize)>,
+    ) -> String {
         use crate::fade::FadeSample;
         use crate::observe::ExpertLayer;
         use ratatui::backend::TestBackend;
@@ -4585,6 +4616,7 @@ mod tests {
                     recent: (0..n_e)
                         .map(|e| match (il, e) {
                             (2, 5) => 90,
+                            _ if rival == Some((il, e)) => 90,
                             _ if e == (il * 3) % n_e => 40,
                             _ => 4,
                         })
@@ -4706,6 +4738,57 @@ mod tests {
         assert!(turned.contains("layers 0 ↖ 40"));
     }
 
+    /// Where the tag naming the busiest expert was drawn: (row, column).
+    /// The list in the corner starts in the first columns; the tag is on
+    /// the picture.
+    fn tag_position(text: &str, tag: &str) -> Option<(usize, usize)> {
+        text.lines().enumerate().find_map(|(y, line)| {
+            let chars: Vec<char> = line.chars().collect();
+            let tag: Vec<char> = tag.chars().collect();
+            (12..chars.len().saturating_sub(tag.len()))
+                .find(|&x| chars[x..x + tag.len()] == tag[..])
+                .map(|x| (y, x))
+        })
+    }
+
+    #[test]
+    fn the_tag_stays_on_the_tower_it_names_when_another_is_as_tall() {
+        let alone = landscape_text(0, 150, 46, true, 0);
+        let at = tag_position(&alone, "L2·E5").expect("the tag is on the picture");
+        // Layer 30's expert 200 is routed exactly as often. The counts rank
+        // the lower layer first, so the name does not change, and neither
+        // may the tower it is written on.
+        let tied = landscape_text_with(0, 150, 46, true, 0, Some((30, 200)));
+        assert!(tied.contains("busiest: layer 2 · expert 5 · 90 of the last 256 tokens"));
+        assert!(tied.contains(" L30·E200"), "the rival is in the list");
+        assert_eq!(tag_position(&tied, "L2·E5"), Some(at));
+    }
+
+    #[test]
+    fn the_flat_map_keeps_the_context_row_when_the_landscape_cannot_draw() {
+        // The picture takes the context panel's rows...
+        let drawn = landscape_text(0, 150, 46, true, 0);
+        assert!(drawn.contains("EXPERT LANDSCAPE") && !drawn.contains("◆ CONTEXT"));
+        // ...and gives them back wherever the flat map stands in for it.
+        let dense = landscape_text(1, 150, 46, true, 0);
+        assert!(dense.contains("EXPERTS  dense model") && dense.contains("◆ CONTEXT"));
+        // Too narrow for the picture, tall enough for the context row.
+        let narrow = landscape_text(0, 58, 40, true, 0);
+        assert!(
+            narrow.contains("◆ EXPERTS  8 of 256") && narrow.contains("◆ CONTEXT"),
+            "{narrow}"
+        );
+    }
+
+    #[test]
+    fn a_terminal_one_or_two_rows_high_draws_nothing_and_does_not_panic() {
+        for h in 1..=4 {
+            for profile in 0..2 {
+                landscape_text(profile, 80, h, true, 0);
+            }
+        }
+    }
+
     #[test]
     fn landscape_without_routing_says_so_and_small_or_dense_falls_back() {
         let text = landscape_text(0, 150, 46, false, 0);
@@ -4769,6 +4852,18 @@ mod tests {
         let tpc = 10 / th;
         assert!(tpr * tpc >= 41, "{tw}x{th} tpr {tpr}");
     }
+}
+
+/// Whether the expert landscape can be drawn in `area`. The bridge's output
+/// text, a dense model and a panel too small for a picture all read better
+/// as the flat map. The layout and the panel both ask here, so the row the
+/// landscape takes from the context panel is only taken when it draws.
+fn landscape_fits(d: &Dashboard, area: Rect) -> bool {
+    d.attention.is_empty()
+        && d.fade.n_experts > 1
+        && d.fade.n_layers > 0
+        && area.width >= 60
+        && area.height >= 18
 }
 
 /// The `n` most-routed experts over the server's window, busiest first:

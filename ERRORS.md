@@ -2,7 +2,7 @@
 
 ## Summary
 
-33 entries (as of 2026-10-12). Recurring themes:
+34 entries (as of 2026-10-12). Recurring themes:
 
 - **Optional or missing telemetry treated as a real value** (Logic, most common): a missing counter read as 0, record close gated on optional TTFT, unknown ctx rendered as full, model ownership derived from an unknown weight estimate. Rule of thumb: keep "unknown" distinct from zero and never gate state or ownership on an optional measurement.
 - **Under-discriminating matches when resolving processes/devices**: docker-proxy matched by IP only, comm-name gating, xe fans keyed by a constant path component, env GPU masks merged with host indices. Match on every discriminating field and prefer authoritative (driver/host) sources over inferred ones.
@@ -342,3 +342,13 @@
 - **Root cause:** `--print-gpu` stops at the first row, which under `powermetrics` arrives before `macmon` has printed, so the row had no temperature, clock, fans or pool. The fix looped inside `collect_powermetrics`, sleeping up to 8 x 300 ms for `macmon`. The dashboard calls the same function from its GPU poll, where the next poll would have filled the row in anyway and the sleep only held the poll up.
 - **Fix applied:** The collector reads `macmon` once per poll again. `print_gpu_once` waits for a row that carries the pool, detects the backend once instead of on every attempt, and polls a backend that is not a stream a single time.
 - **Prevention rule:** Waiting belongs to the caller that has no next poll. Nothing reached from the 200 ms poll sleeps.
+
+### A label's words and its position taken from two different sources — 2026-10-12
+
+- **Severity:** Medium
+- **Category:** Logic
+- **File(s):** `src/render.rs`, `src/landscape.rs`
+- **Pattern:** Two views of one quantity, one raw and one smoothed, each supplying half of the same label.
+- **Root cause:** The landscape's tag named the busiest expert from the server's latest counts and was drawn on the tallest tower of the eased heights. The two agree only while the peak is unique and has finished growing. On a tie the counts rank the lower layer first and the tallest-block search returned the last; after a change of leader the old tower stays tallest while it sinks. In the demo the tag stood on another tower in 23 of 60 samples, and the test only counted how often the string appeared.
+- **Fix applied:** The tag is placed from the expert it names (`Grid::roof`) and the tallest-block search is gone. The same review put the landscape's "can it draw here" test in one helper that the layout asks too, so the flat map that stands in for it keeps its context row.
+- **Prevention rule:** A label takes its text and its position from the same record, and its test checks where it is drawn, not only that it is.
