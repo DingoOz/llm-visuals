@@ -1923,6 +1923,50 @@ GPU Power: 4210 mW
         }
     }
 
+    /// fixtures/powermetrics-m5max.txt: a real `powermetrics --samplers
+    /// gpu_power,cpu_power -i 250 -b 1` stream captured on an M5 Max, the one
+    /// pathway that the hand-built POWERMETRICS_SAMPLE above only imitates.
+    /// It runs the shipped PowermetricsFramer and parser against the bytes the
+    /// sampler actually prints, so the field names and sample framing are
+    /// verified on real hardware, not inferred from the man page. Wall-clock
+    /// timestamps are scrubbed to a constant and the process list is absent
+    /// (this is `-n`-free idle output); the power and residency values are the
+    /// real readings.
+    #[test]
+    fn parses_real_powermetrics_stream() {
+        let txt = std::fs::read_to_string("fixtures/powermetrics-m5max.txt").unwrap();
+        let mut framer = PowermetricsFramer::default();
+        let mut samples = Vec::new();
+        for line in txt.lines() {
+            samples.extend(framer.push(line));
+        }
+        // A sample is only known to be complete once the next opens, so the
+        // last header leaves one sample still open: 5 headers, 4 published
+        // samples, which is exactly what the pump hands to the parser.
+        assert_eq!(samples.len(), 4);
+        // The preamble (model/OS) is not a sample and never reaches one.
+        for sample in &samples {
+            assert!(!sample.contains("Machine model"));
+            assert!(!sample.contains("Sampled system activity"));
+        }
+        // Every real sample parses: the old parser saw none of these and read
+        // a live GPU as idle at 0 W. util is a share, watts are plausible for
+        // an idle M5 Max, and none is a fabricated zero.
+        let mut peak_util = 0.0f32;
+        for sample in &samples {
+            let (util, gpu_w, ane_w) =
+                parse_powermetrics_powers(sample).expect("a real sample parses");
+            assert!(util > 0.0 && util < 100.0, "util {util} out of range");
+            assert!(
+                gpu_w > 0.05 && gpu_w < 60.0,
+                "gpu watts {gpu_w} implausible"
+            );
+            assert!(ane_w >= 0.0);
+            peak_util = peak_util.max(util);
+        }
+        assert!(peak_util > 0.0);
+    }
+
     #[test]
     fn parse_watts_handles_mw_and_w() {
         assert!((parse_watts(" 4210 mW").unwrap() - 4.21).abs() < 0.001);
