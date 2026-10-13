@@ -833,7 +833,7 @@ impl Renderer {
                 .unwrap_or(g.vram_percent() / 100.0);
             let weights = d.fade.weight_frac.get(gi).copied().unwrap_or(0.0).min(used);
             let kv = d.fade.kv_alloc_frac.get(gi).copied().unwrap_or(0.0);
-            let kv_fill = d.fade.kv_frac;
+            let kv_fill = kv_lit_share(g, d.live, d.fade.kv_frac);
             // Same bar, honest name: on unified-memory parts (GB10 / DGX
             // Spark) the pool is system RAM, not VRAM — labelled per
             // "real numbers only".
@@ -4030,6 +4030,14 @@ fn fmt_compact(v: f32) -> String {
     }
 }
 
+/// How much of the bar's KV segment is lit. On a unified part the segment is
+/// the pool a vLLM server declared, and its own gauge says how much of that
+/// holds tokens; elsewhere the segment is everything that is not weights, and
+/// context fill stands in.
+fn kv_lit_share(g: &GpuStats, live: &LiveStats, ctx_fill: f32) -> f32 {
+    live.kv_usage_perc.filter(|_| g.unified).unwrap_or(ctx_fill)
+}
+
 /// VRAM bar: weights ▏ KV filled ▏ KV reserved ▏ other ▏ free, with a pulsing head.
 fn vram_bar(
     width: usize,
@@ -4490,6 +4498,25 @@ mod tests {
         assert_eq!(gpu_split(12, 2, 4), (vec![3, 3], 4, true));
         // Two cards, 8 rows, compact RAM: no gap rather than a 3/2 split.
         assert_eq!(gpu_split(8, 2, 1), (vec![4, 3], 1, false));
+    }
+
+    #[test]
+    fn the_kv_segment_is_lit_by_the_pool_gauge_only_where_it_is_the_pool() {
+        let card = |unified: bool| GpuStats {
+            unified,
+            ..Default::default()
+        };
+        let live = |kv_usage_perc: Option<f32>| LiveStats {
+            kv_usage_perc,
+            ..Default::default()
+        };
+        // GB10 with a vLLM server: 5% of the declared pool holds tokens,
+        // whatever share of its context the one request has filled.
+        assert_eq!(kv_lit_share(&card(true), &live(Some(0.05)), 0.6), 0.05);
+        // No gauge (SGLang, llama.cpp), or a discrete card whose KV segment
+        // is more than the pool: context fill, as before.
+        assert_eq!(kv_lit_share(&card(true), &live(None), 0.6), 0.6);
+        assert_eq!(kv_lit_share(&card(false), &live(Some(0.05)), 0.6), 0.6);
     }
 
     #[test]

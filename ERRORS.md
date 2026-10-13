@@ -2,7 +2,7 @@
 
 ## Summary
 
-35 entries (as of 2026-10-14). Recurring themes:
+36 entries (as of 2026-10-14). Recurring themes:
 
 - **Optional or missing telemetry treated as a real value** (Logic, most common): a missing counter read as 0, record close gated on optional TTFT, unknown ctx rendered as full, model ownership derived from an unknown weight estimate. Rule of thumb: keep "unknown" distinct from zero and never gate state or ownership on an optional measurement.
 - **Under-discriminating matches when resolving processes/devices**: docker-proxy matched by IP only, comm-name gating, xe fans keyed by a constant path component, env GPU masks merged with host indices. Match on every discriminating field and prefer authoritative (driver/host) sources over inferred ones.
@@ -362,3 +362,13 @@
 - **Root cause:** The `nvidia-smi` fallback asks for a `temperature.memory` column that old drivers reject, and gave the column up for the session on the first error of any kind. One failed `nvidia-smi` run, which a busy box has now and then, removed the memory temperature until restart. The same review found the NVML field decoded as 64 bits for every value type the code did not list, signed int and unsigned short among them, and the log's `ALTER TABLE` failing the second of two dashboards that open the same old file together.
 - **Fix applied:** The column is given up only when the base query answers right after the longer one failed. Each `nvmlValue_t` member is read at its own width and an unknown type reads as no value. The migration accepts a column that appeared while it was looking, and the `INSERT` names its columns.
 - **Prevention rule:** Latch only on the observation that singles out the cause. Read a C union by the member its tag names, at that member's size.
+
+### A server's flag read by our convention instead of the server's — 2026-10-14
+
+- **Severity:** Medium
+- **Category:** API Misuse
+- **File(s):** `src/vllm.rs`, `src/main.rs`, `src/render.rs`
+- **Pattern:** A number taken from another program's command line or metrics and given the meaning that looked natural, without reading how that program defines it.
+- **Root cause:** The GB10 fallback for vLLM read `--kv-cache-memory-bytes 16g` with binary multipliers whatever the case. vLLM's `human_readable_int` makes a lowercase suffix decimal, so the pool was 16 x 10^9 bytes and was sized 7% too large. It then counted only `kv_cache_usage_perc` of the pool as occupied, where vLLM allocates the whole pool at start-up: an idle server showed 68.8 G used with about 15 G more really held, while SGLang on the same bar is counted by its whole pool. A box with one server of each kind dropped the vLLM one altogether, because the fallback ran only when no model reported `/v1/loads`.
+- **Fix applied:** The flag is parsed as vLLM parses it, the whole declared pool counts as occupied and the gauge lights the share of it that holds tokens, and each model is counted by its own source. Checked against vLLM's source at 96fc2da (`vllm/utils/argparse_utils.py`, `vllm/v1/worker/utils.py`), not on a GB10.
+- **Prevention rule:** Read the other program's parser and allocator before giving its flag a unit or its gauge a denominator. Two engines drawn on one bar are counted the same way.
