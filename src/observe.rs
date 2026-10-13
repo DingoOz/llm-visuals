@@ -137,6 +137,10 @@ pub struct LiveStats {
     /// Tokens currently occupying the KV pool (`num_used_tokens`). When
     /// set, `ctx_used` prefers this over prompt+decoded.
     pub kv_tokens: Option<usize>,
+    /// vLLM `kv_cache_usage_perc`: fraction (0..1) of the KV pool in use.
+    /// Multiplied by the pool size the server was launched with to size
+    /// the unified-memory bar; no other engine reports it this way.
+    pub kv_usage_perc: Option<f32>,
 }
 
 /// Per-request decode count when `/slots` does not carry `n_decoded`.
@@ -454,6 +458,7 @@ pub fn parse_slots(body: &str) -> Option<LiveStats> {
         kv_cache_gb: None,
         graph_gb: None,
         kv_tokens: None,
+        kv_usage_perc: None,
     })
 }
 

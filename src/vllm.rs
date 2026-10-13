@@ -62,6 +62,9 @@ pub struct VllmCounters {
     /// Served model name from the metrics labels; the identity marker for
     /// the cross-wiring guard.
     pub model_name: Option<String>,
+    /// vllm:kv_cache_usage_perc — fraction (0..1) of the KV pool holding
+    /// live tokens. `None` on builds that do not export the gauge.
+    pub kv_usage_perc: Option<f64>,
 }
 
 /// Parse the Prometheus text exposition for the engine-wide counters we
@@ -100,6 +103,10 @@ pub fn parse_vllm_metrics(body: &str) -> Option<VllmCounters> {
             }
             "prompt_tokens_cached_total" => c.cached_total += val,
             "num_requests_running" => c.running = c.running.max(val),
+            "kv_cache_usage_perc" => {
+                // One gauge per engine; the bar shows the busiest pool.
+                c.kv_usage_perc = Some(c.kv_usage_perc.unwrap_or(0.0).max(val));
+            }
             "request_success_total" => c.succeeded += val,
             "time_to_first_token_seconds_sum" => c.ttft_sum += val,
             "time_to_first_token_seconds_count" => c.ttft_count += val,
@@ -183,6 +190,44 @@ pub(crate) fn cross_wired(
                 && name.len() >= 4
                 && (label == name || label.starts_with(name.as_str()) || name.starts_with(label))
         })
+}
+
+/// KV pool size in bytes from the server's own `--kv-cache-memory-bytes`
+/// launch flag (`16g`, `16GiB`, a bare byte count…). Servers that size the
+/// pool by declaration rather than by profiling free VRAM keep the number
+/// nowhere else; `None` when the flag is absent, so the unified-memory bar
+/// degrades to weight-only rather than inventing a pool.
+pub fn kv_pool_bytes(cmdline: &str) -> Option<u64> {
+    let mut it = cmdline.split_whitespace().peekable();
+    while let Some(tok) = it.next() {
+        let val = match tok.strip_prefix("--kv-cache-memory-bytes=") {
+            Some(v) => v.to_string(),
+            None if tok == "--kv-cache-memory-bytes" => (*it.peek()?).to_string(),
+            None => continue,
+        };
+        return parse_byte_size(&val);
+    }
+    None
+}
+
+/// `16g` / `16 GiB` / `17179869184` → bytes, binary multipliers.
+fn parse_byte_size(val: &str) -> Option<u64> {
+    let v = val.trim().to_ascii_lowercase();
+    let split = v.find(|c: char| !c.is_ascii_digit()).unwrap_or(v.len());
+    let n: u64 = v[..split].parse().ok()?;
+    let mult = match v[split..]
+        .trim_end_matches("b")
+        .trim_end_matches('i')
+        .trim_end()
+    {
+        "" => 1,
+        "k" => 1024,
+        "m" => 1024u64.pow(2),
+        "g" => 1024u64.pow(3),
+        "t" => 1024u64.pow(4),
+        _ => return None,
+    };
+    (n > 0).then_some(n.checked_mul(mult)?)
 }
 
 /// Per-slot reconstruction state: counter baselines + the synthetic task
@@ -354,6 +399,7 @@ impl VllmAdapter {
             kv_cache_gb: None,
             graph_gb: None,
             kv_tokens: None,
+            kv_usage_perc: c.kv_usage_perc.map(|v| v.clamp(0.0, 1.0) as f32),
         };
 
         let spec = spec_active.then(|| SpecMetrics {
@@ -498,6 +544,47 @@ mod tests {
         // from (they do not move until completion).
         assert!(c.ttft_count > 0.0, "fixture carries the TTFT histogram");
         assert!(c.itl_sum > 0.0, "fixture carries the ITL histogram");
+    }
+
+    #[test]
+    fn kv_usage_gauge_parsed_when_present() {
+        let body = "# HELP x\nvllm:prompt_tokens_total{engine=\"0\",model_name=\"m\"} 5.0\nvllm:kv_cache_usage_perc{engine=\"0\",model_name=\"m\"} 0.25\n";
+        let c = parse_vllm_metrics(body).unwrap();
+        assert!((c.kv_usage_perc.unwrap() - 0.25).abs() < 1e-6);
+        // A build without the gauge stays None: no fabricated zero pool fill.
+        let body = "vllm:prompt_tokens_total{model_name=\"m\"} 5.0\n";
+        assert!(parse_vllm_metrics(body).unwrap().kv_usage_perc.is_none());
+        // Multi-engine scrapes report the busiest pool.
+        let body = "vllm:prompt_tokens_total{model_name=\"m\"} 5.0\nvllm:kv_cache_usage_perc{engine=\"0\",model_name=\"m\"} 0.1\nvllm:kv_cache_usage_perc{engine=\"1\",model_name=\"m\"} 0.4\n";
+        let c = parse_vllm_metrics(body).unwrap();
+        assert!((c.kv_usage_perc.unwrap() - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn declared_kv_pool_parsed_from_cmdline() {
+        assert_eq!(
+            kv_pool_bytes("vllm serve /model --kv-cache-memory-bytes 16g"),
+            Some(16 << 30)
+        );
+        assert_eq!(
+            kv_pool_bytes("vllm serve /model --kv-cache-memory-bytes=16GiB"),
+            Some(16 << 30)
+        );
+        assert_eq!(
+            kv_pool_bytes("--kv-cache-memory-bytes 17179869184 --max-model-len 4096"),
+            Some(16 << 30)
+        );
+        assert_eq!(
+            kv_pool_bytes("--kv-cache-memory-bytes 512m"),
+            Some(512 << 20)
+        );
+        // No flag (stock vLLM sizes the pool by profiling): None.
+        assert_eq!(
+            kv_pool_bytes("vllm serve /model --gpu-memory-utilization 0.01"),
+            None
+        );
+        assert_eq!(kv_pool_bytes("--kv-cache-memory-bytes 0g"), None);
+        assert_eq!(kv_pool_bytes("--kv-cache-memory-bytes"), None);
     }
 
     #[test]
