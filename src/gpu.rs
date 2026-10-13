@@ -23,9 +23,8 @@ pub struct GpuStats {
     pub power_watts: f32,
     pub power_max_watts: f32,
     pub temperature: Option<f32>,
-    /// Memory (HBM / GDDR6X) junction temperature, °C. NVIDIA only: the
-    /// sensor and its `temperature.memory` / NVML field exist on parts that
-    /// report it and read as missing everywhere else.
+    /// Memory temperature, °C. NVIDIA only, and only on parts whose driver
+    /// reports the sensor (HBM cards); it reads as missing everywhere else.
     pub temperature_memory: Option<f32>,
     pub clock_sm_mhz: u32,
     pub clock_sm_max_mhz: u32,
@@ -135,9 +134,30 @@ const NVIDIA_QUERY: &str = "--query-gpu=index,name,memory.total,memory.used,memo
 /// `temperature.memory` as an extra trailing column: the one memory-temperature
 /// field NVIDIA exposes to a CLI (NVML's field-value 82 on the in-process
 /// path). R465+ drivers know it; older ones reject the whole `--query-gpu`,
-/// so `collect_nvidia` latches to the base list after the first failure
-/// rather than losing the GPU panel.
+/// so `nvidia_csv` settles on the base list once that is shown to be the
+/// reason, rather than losing the GPU panel.
 const NVIDIA_QUERY_MEM_FIELD: &str = ",temperature.memory";
+
+/// nvidia-smi's CSV, with the memory temperature column while the driver
+/// takes it. `no_mem_temp` is set only when the base query answers where the
+/// longer one just failed: that pair is what an unknown field looks like. A
+/// failure of both is nvidia-smi itself failing, which it does now and then on
+/// a busy box, and must not cost the column for the rest of the session.
+fn nvidia_csv(
+    no_mem_temp: &std::sync::atomic::AtomicBool,
+    run: impl Fn(&str) -> Result<String, String>,
+) -> Result<String, String> {
+    use std::sync::atomic::Ordering;
+    if no_mem_temp.load(Ordering::Relaxed) {
+        return run(NVIDIA_QUERY);
+    }
+    if let Ok(out) = run(&format!("{NVIDIA_QUERY}{NVIDIA_QUERY_MEM_FIELD}")) {
+        return Ok(out);
+    }
+    let out = run(NVIDIA_QUERY)?;
+    no_mem_temp.store(true, Ordering::Relaxed);
+    Ok(out)
+}
 
 /// xpu-smi spelling of the same fields, in the same order as
 /// parse_xpu_csv expects. `clocks.sm` does not exist there (use
@@ -173,27 +193,13 @@ impl GpuMonitor {
 
     /// Parse nvidia-smi CSV output into GpuStats (fallback if NVML is not available).
     ///
-    /// Asks for `temperature.memory` first and latches it off on any failure:
-    /// a pre-R465 nvidia-smi rejects the whole query over the unknown field,
-    /// and an error here would drop the GPU panel entirely.
+    /// Asks for `temperature.memory` as well, until the driver is shown not
+    /// to know the field: a pre-R465 nvidia-smi rejects the whole query over
+    /// it, and an error here would drop the GPU panel entirely.
     pub fn collect_nvidia() -> Result<Vec<GpuStats>, String> {
-        use std::sync::atomic::Ordering;
-        static MEM_TEMP_LATCHED_OFF: std::sync::atomic::AtomicBool =
+        static NO_MEM_TEMP: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
-        if !MEM_TEMP_LATCHED_OFF.load(Ordering::Relaxed) {
-            match run_smi(
-                "nvidia-smi",
-                &format!("{NVIDIA_QUERY}{NVIDIA_QUERY_MEM_FIELD}"),
-            ) {
-                Ok(out) => return Ok(parse_csv(&out)),
-                Err(_) => {
-                    // A machine without NVIDIA GPUs fails either way; retrying
-                    // the base query costs one spawn and keeps the useful error.
-                    MEM_TEMP_LATCHED_OFF.store(true, Ordering::Relaxed);
-                }
-            }
-        }
-        run_smi("nvidia-smi", NVIDIA_QUERY).map(|out| parse_csv(&out))
+        nvidia_csv(&NO_MEM_TEMP, |query| run_smi("nvidia-smi", query)).map(|out| parse_csv(&out))
     }
 
     /// Intel GPUs via xpu-smi, same field order as NVIDIA_QUERY.
@@ -1731,7 +1737,7 @@ impl DemoGpu {
             power_watts: self.power * pmax,
             power_max_watts: pmax,
             temperature: Some(self.temp),
-            // The sensor exists on HBM / GDDR6X parts only: the demo P100 and
+            // The sensor exists on HBM parts only: the demo P100 and
             // A100 rows carry it, the GTX 1070 row shows the absent state.
             temperature_memory: if self.index == 0 {
                 None
@@ -1781,6 +1787,41 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(amd.short_name(), "Navi 31 [Radeon RX 7900 XTX]");
+    }
+
+    #[test]
+    fn the_memory_temp_column_is_given_up_only_when_the_base_query_answers() {
+        use std::cell::RefCell;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let asked = RefCell::new(Vec::new());
+        // `long` / `base`: what nvidia-smi says to the query with and
+        // without the extra column.
+        let run = |long: Result<&str, &str>, base: Result<&str, &str>, off: &AtomicBool| {
+            asked.borrow_mut().clear();
+            nvidia_csv(off, |query| {
+                let with_column = query.ends_with(NVIDIA_QUERY_MEM_FIELD);
+                asked.borrow_mut().push(with_column);
+                let answer = if with_column { long } else { base };
+                answer.map(str::to_string).map_err(str::to_string)
+            })
+        };
+        let unknown = "Field \"temperature.memory\" is not a valid field to query.";
+        let down = "Failed to initialize NVML: Unknown Error";
+
+        // nvidia-smi failing altogether says nothing about the column, and
+        // the error shown is the base query's.
+        let off = AtomicBool::new(false);
+        assert_eq!(run(Err(down), Err(down), &off), Err(down.to_string()));
+        assert!(!off.load(Ordering::Relaxed));
+        assert_eq!(run(Ok("long"), Ok("base"), &off), Ok("long".to_string()));
+        assert_eq!(*asked.borrow(), [true]);
+
+        // An old driver: the long query is refused, the base one answers,
+        // and from then on only the base one is asked.
+        assert_eq!(run(Err(unknown), Ok("base"), &off), Ok("base".to_string()));
+        assert!(off.load(Ordering::Relaxed));
+        assert_eq!(run(Err(unknown), Ok("base"), &off), Ok("base".to_string()));
+        assert_eq!(*asked.borrow(), [false]);
     }
 
     #[test]

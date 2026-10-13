@@ -62,15 +62,18 @@ struct NvmlFieldValue {
 
 const NVML_SUCCESS: u32 = 0;
 const NVML_TEMPERATURE_GPU: u32 = 0;
-/// `nvml.h`: memory (HBM / GDDR6X) temperature, readable only through the
-/// field-value API: `nvmlDeviceGetTemperature` knows a single GPU sensor.
-/// Cards without the memory sensor answer per-field NOT_SUPPORTED.
+/// `nvml.h`: memory temperature, readable only through the field-value API:
+/// `nvmlDeviceGetTemperature` knows a single GPU sensor. Cards without the
+/// memory sensor answer per-field NOT_SUPPORTED.
 const NVML_FI_DEV_MEMORY_TEMP: u32 = 82;
 // nvmlValueType_t: selects which member of the nvmlValue_t union is valid.
 const NVML_VALUE_TYPE_DOUBLE: i32 = 0;
 const NVML_VALUE_TYPE_UNSIGNED_INT: i32 = 1;
 const NVML_VALUE_TYPE_UNSIGNED_LONG: i32 = 2;
 const NVML_VALUE_TYPE_UNSIGNED_LONG_LONG: i32 = 3;
+const NVML_VALUE_TYPE_SIGNED_LONG_LONG: i32 = 4;
+const NVML_VALUE_TYPE_SIGNED_INT: i32 = 5;
+const NVML_VALUE_TYPE_UNSIGNED_SHORT: i32 = 6;
 #[allow(dead_code)]
 const NVML_CLOCK_GRAPHICS: u32 = 0;
 const NVML_CLOCK_SM: u32 = 1;
@@ -478,7 +481,7 @@ impl NvmlSession {
                 None
             };
 
-            // Memory temperature (HBM / GDDR6X) through the field-value API.
+            // Memory temperature through the field-value API.
             // A single extra FFI call per poll; devices without the sensor
             // answer NOT_SUPPORTED at call level or per field, both → None.
             let temperature_memory = self.device_get_field_values_fn.and_then(|field_values_fn| {
@@ -657,16 +660,26 @@ fn telemetry_readable(stats: &[GpuStats]) -> bool {
 /// `nvmlValue_t` decoded per `valueType`. The memory-temperature field has
 /// been seen as both unsigned int and signed long long across driver
 /// generations, so the stored type picks the union member.
+///
+/// Each member is read at its own width: the driver writes that member and
+/// nothing says what the rest of the union holds. The members share their
+/// first byte, which on the little-endian targets this builds for makes a
+/// narrow one the low bytes of `value`.
 fn decode_field_celsius(fv: &NvmlFieldValue) -> Option<f32> {
     if fv.nvml_return != NVML_SUCCESS {
         return None;
     }
     let celsius = match fv.value_type {
         NVML_VALUE_TYPE_DOUBLE => f64::from_bits(fv.value) as f32,
-        NVML_VALUE_TYPE_UNSIGNED_INT => (fv.value & 0xFFFF_FFFF) as u32 as f32,
-        NVML_VALUE_TYPE_UNSIGNED_LONG | NVML_VALUE_TYPE_UNSIGNED_LONG_LONG => fv.value as f32,
-        // NVML_VALUE_TYPE_SIGNED_LONG_LONG and anything future-sized.
-        _ => fv.value as i64 as f32,
+        NVML_VALUE_TYPE_UNSIGNED_INT => fv.value as u32 as f32,
+        // `unsigned long`: 64 bits on Linux, 32 on Windows.
+        NVML_VALUE_TYPE_UNSIGNED_LONG => fv.value as std::ffi::c_ulong as f32,
+        NVML_VALUE_TYPE_UNSIGNED_LONG_LONG => fv.value as f32,
+        NVML_VALUE_TYPE_SIGNED_LONG_LONG => fv.value as i64 as f32,
+        NVML_VALUE_TYPE_SIGNED_INT => fv.value as u32 as i32 as f32,
+        NVML_VALUE_TYPE_UNSIGNED_SHORT => fv.value as u16 as f32,
+        // A type newer than this list has no member here to read it by.
+        _ => return None,
     };
     (celsius > 0.0).then_some(celsius)
 }
@@ -747,6 +760,25 @@ mod tests {
             decode_field_celsius(&fv(NVML_SUCCESS, 4, 83i64 as u64)),
             Some(83.0)
         );
+        // A narrow member is read at its own width, whatever the rest of
+        // the union holds.
+        let junk = 0xDEAD_BEEF_0000_0000u64;
+        for ty in [NVML_VALUE_TYPE_UNSIGNED_INT, NVML_VALUE_TYPE_SIGNED_INT] {
+            assert_eq!(
+                decode_field_celsius(&fv(NVML_SUCCESS, ty, junk | 83)),
+                Some(83.0)
+            );
+        }
+        assert_eq!(
+            decode_field_celsius(&fv(
+                NVML_SUCCESS,
+                NVML_VALUE_TYPE_UNSIGNED_SHORT,
+                junk | 0xFFFF_0000 | 83
+            )),
+            Some(83.0)
+        );
+        // A value type this build has never heard of is not guessed at.
+        assert_eq!(decode_field_celsius(&fv(NVML_SUCCESS, 7, 83)), None);
     }
 
     #[test]

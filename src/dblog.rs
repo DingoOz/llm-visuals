@@ -57,14 +57,23 @@ impl DbLog {
         conn.execute_batch(SCHEMA)?;
         // A log file created before memory temperature shipped still holds the
         // 8-column gpu_samples (CREATE TABLE IF NOT EXISTS does not extend
-        // it), and the positional INSERT below would fail on it forever.
-        let added: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM pragma_table_info('gpu_samples') WHERE name = 'mem_temp_c'",
-            [],
-            |r| r.get(0),
-        )?;
-        if added == 0 {
-            conn.execute("ALTER TABLE gpu_samples ADD COLUMN mem_temp_c REAL", [])?;
+        // it), and the INSERT below would fail on it forever.
+        let has_mem_temp = |conn: &Connection| -> rusqlite::Result<bool> {
+            conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('gpu_samples') WHERE name = 'mem_temp_c'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+        };
+        if !has_mem_temp(&conn)? {
+            if let Err(e) = conn.execute("ALTER TABLE gpu_samples ADD COLUMN mem_temp_c REAL", []) {
+                // Another dashboard opening the same file can add the column
+                // between the look and the ALTER; that is the outcome wanted.
+                if !has_mem_temp(&conn)? {
+                    return Err(e);
+                }
+            }
         }
         Ok(Self {
             conn,
@@ -172,7 +181,11 @@ impl DbLog {
         }
         for g in gpus {
             tx.execute(
-                "INSERT INTO gpu_samples VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                // By name: a build that adds a column to a shared file
+                // must not break the builds that do not know it.
+                "INSERT INTO gpu_samples (ts, gpu, name, util_pct, mem_used_mb, \
+                 mem_total_mb, power_w, temp_c, mem_temp_c) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                 params![
                     ts,
                     g.index,

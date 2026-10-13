@@ -762,8 +762,8 @@ impl Renderer {
             format!("  {temp:>2.0}°"),
             Style::default().fg(temp_col).add_modifier(Modifier::BOLD),
         )];
-        // Memory (HBM / GDDR6X) temperature, NVIDIA only: the second hot spot
-        // on an LLM box, and the one that throttles before the die does.
+        // Memory temperature, on the NVIDIA cards that report it: the second
+        // hot spot on an LLM box, and the one that throttles before the die does.
         if let Some(mt) = g.temperature_memory {
             extras.push(Span::styled(
                 format!("  mem {mt:>2.0}°"),
