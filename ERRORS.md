@@ -2,7 +2,7 @@
 
 ## Summary
 
-34 entries (as of 2026-10-12). Recurring themes:
+35 entries (as of 2026-10-14). Recurring themes:
 
 - **Optional or missing telemetry treated as a real value** (Logic, most common): a missing counter read as 0, record close gated on optional TTFT, unknown ctx rendered as full, model ownership derived from an unknown weight estimate. Rule of thumb: keep "unknown" distinct from zero and never gate state or ownership on an optional measurement.
 - **Under-discriminating matches when resolving processes/devices**: docker-proxy matched by IP only, comm-name gating, xe fans keyed by a constant path component, env GPU masks merged with host indices. Match on every discriminating field and prefer authoritative (driver/host) sources over inferred ones.
@@ -352,3 +352,13 @@
 - **Root cause:** The landscape's tag named the busiest expert from the server's latest counts and was drawn on the tallest tower of the eased heights. The two agree only while the peak is unique and has finished growing. On a tie the counts rank the lower layer first and the tallest-block search returned the last; after a change of leader the old tower stays tallest while it sinks. In the demo the tag stood on another tower in 23 of 60 samples, and the test only counted how often the string appeared.
 - **Fix applied:** The tag is placed from the expert it names (`Grid::roof`) and the tallest-block search is gone. The same review put the landscape's "can it draw here" test in one helper that the layout asks too, so the flat map that stands in for it keeps its context row.
 - **Prevention rule:** A label takes its text and its position from the same record, and its test checks where it is drawn, not only that it is.
+
+### A fallback latched on any failure, not on the one that proves the cause — 2026-10-14
+
+- **Severity:** Low
+- **Category:** Logic
+- **File(s):** `src/gpu.rs`, `src/nvml.rs`, `src/dblog.rs`
+- **Pattern:** A decision that lasts the session, taken from evidence that only sometimes means what it is taken to mean.
+- **Root cause:** The `nvidia-smi` fallback asks for a `temperature.memory` column that old drivers reject, and gave the column up for the session on the first error of any kind. One failed `nvidia-smi` run, which a busy box has now and then, removed the memory temperature until restart. The same review found the NVML field decoded as 64 bits for every value type the code did not list, signed int and unsigned short among them, and the log's `ALTER TABLE` failing the second of two dashboards that open the same old file together.
+- **Fix applied:** The column is given up only when the base query answers right after the longer one failed. Each `nvmlValue_t` member is read at its own width and an unknown type reads as no value. The migration accepts a column that appeared while it was looking, and the `INSERT` names its columns.
+- **Prevention rule:** Latch only on the observation that singles out the cause. Read a C union by the member its tag names, at that member's size.

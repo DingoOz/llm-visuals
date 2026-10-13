@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS model_samples (
 CREATE TABLE IF NOT EXISTS gpu_samples (
     ts REAL NOT NULL, gpu INTEGER NOT NULL, name TEXT NOT NULL,
     util_pct REAL NOT NULL, mem_used_mb INTEGER NOT NULL, mem_total_mb INTEGER NOT NULL,
-    power_w REAL NOT NULL, temp_c REAL);
+    power_w REAL NOT NULL, temp_c REAL, mem_temp_c REAL);
 CREATE TABLE IF NOT EXISTS requests (
     ended_ts REAL NOT NULL, pid INTEGER NOT NULL, model TEXT NOT NULL, id_task INTEGER NOT NULL,
     prompt_tokens INTEGER NOT NULL, cached_tokens INTEGER NOT NULL, decoded INTEGER NOT NULL,
@@ -55,6 +55,26 @@ impl DbLog {
         // one's commit instead of failing and switching logging off.
         conn.busy_timeout(std::time::Duration::from_millis(100))?;
         conn.execute_batch(SCHEMA)?;
+        // A log file created before memory temperature shipped still holds the
+        // 8-column gpu_samples (CREATE TABLE IF NOT EXISTS does not extend
+        // it), and the INSERT below would fail on it forever.
+        let has_mem_temp = |conn: &Connection| -> rusqlite::Result<bool> {
+            conn.query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('gpu_samples') WHERE name = 'mem_temp_c'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+        };
+        if !has_mem_temp(&conn)? {
+            if let Err(e) = conn.execute("ALTER TABLE gpu_samples ADD COLUMN mem_temp_c REAL", []) {
+                // Another dashboard opening the same file can add the column
+                // between the look and the ALTER; that is the outcome wanted.
+                if !has_mem_temp(&conn)? {
+                    return Err(e);
+                }
+            }
+        }
         Ok(Self {
             conn,
             last: None,
@@ -161,7 +181,11 @@ impl DbLog {
         }
         for g in gpus {
             tx.execute(
-                "INSERT INTO gpu_samples VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                // By name: a build that adds a column to a shared file
+                // must not break the builds that do not know it.
+                "INSERT INTO gpu_samples (ts, gpu, name, util_pct, mem_used_mb, \
+                 mem_total_mb, power_w, temp_c, mem_temp_c) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                 params![
                     ts,
                     g.index,
@@ -172,7 +196,8 @@ impl DbLog {
                     if g.unified { 0 } else { g.mem_used_mb as i64 },
                     if g.unified { 0 } else { g.mem_total_mb as i64 },
                     g.power_watts,
-                    g.temperature
+                    g.temperature,
+                    g.temperature_memory
                 ],
             )?;
         }
@@ -418,6 +443,42 @@ mod tests {
         assert_eq!((sum.models[0].requests, sum.models[0].decoded), (1, 10));
         assert_eq!(sum.recent.len(), 1);
         assert_eq!(sum.recent[0].model, model.name);
+        drop(log);
+        for ext in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
+        }
+    }
+
+    #[test]
+    fn old_log_file_gains_the_mem_temp_column() {
+        let path =
+            std::env::temp_dir().join(format!("llm-visuals-dblog-old-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        {
+            // A gpu_samples table exactly as pre-memory-temp builds created it.
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE gpu_samples (
+                    ts REAL NOT NULL, gpu INTEGER NOT NULL, name TEXT NOT NULL,
+                    util_pct REAL NOT NULL, mem_used_mb INTEGER NOT NULL,
+                    mem_total_mb INTEGER NOT NULL, power_w REAL NOT NULL, temp_c REAL);",
+            )
+            .unwrap();
+        }
+        let mut log = DbLog::open(&path, Duration::ZERO, 0).unwrap();
+        let gpus = [GpuStats {
+            name: "NVIDIA A100-SXM4-80GB".into(),
+            mem_total_mb: 81920,
+            temperature: Some(61.0),
+            temperature_memory: Some(71.0),
+            ..Default::default()
+        }];
+        log.tick(std::iter::empty(), &gpus, Instant::now()).unwrap();
+        let mem_temp: f64 = log
+            .conn
+            .query_row("SELECT mem_temp_c FROM gpu_samples", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mem_temp, 71.0);
         drop(log);
         for ext in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{ext}", path.display()));

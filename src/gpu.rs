@@ -23,6 +23,9 @@ pub struct GpuStats {
     pub power_watts: f32,
     pub power_max_watts: f32,
     pub temperature: Option<f32>,
+    /// Memory temperature, °C. NVIDIA only, and only on parts whose driver
+    /// reports the sensor (HBM cards); it reads as missing everywhere else.
+    pub temperature_memory: Option<f32>,
     pub clock_sm_mhz: u32,
     pub clock_sm_max_mhz: u32,
     pub clock_mem_mhz: u32,
@@ -128,6 +131,34 @@ pub struct AmdDevice {
 
 const NVIDIA_QUERY: &str = "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu,utilization.memory,power.draw,power.limit,temperature.gpu,clocks.sm,clocks.max.sm,clocks.mem,fan.speed,pcie.link.gen.current,pcie.link.width.current";
 
+/// `temperature.memory` as an extra trailing column: the one memory-temperature
+/// field NVIDIA exposes to a CLI (NVML's field-value 82 on the in-process
+/// path). R465+ drivers know it; older ones reject the whole `--query-gpu`,
+/// so `nvidia_csv` settles on the base list once that is shown to be the
+/// reason, rather than losing the GPU panel.
+const NVIDIA_QUERY_MEM_FIELD: &str = ",temperature.memory";
+
+/// nvidia-smi's CSV, with the memory temperature column while the driver
+/// takes it. `no_mem_temp` is set only when the base query answers where the
+/// longer one just failed: that pair is what an unknown field looks like. A
+/// failure of both is nvidia-smi itself failing, which it does now and then on
+/// a busy box, and must not cost the column for the rest of the session.
+fn nvidia_csv(
+    no_mem_temp: &std::sync::atomic::AtomicBool,
+    run: impl Fn(&str) -> Result<String, String>,
+) -> Result<String, String> {
+    use std::sync::atomic::Ordering;
+    if no_mem_temp.load(Ordering::Relaxed) {
+        return run(NVIDIA_QUERY);
+    }
+    if let Ok(out) = run(&format!("{NVIDIA_QUERY}{NVIDIA_QUERY_MEM_FIELD}")) {
+        return Ok(out);
+    }
+    let out = run(NVIDIA_QUERY)?;
+    no_mem_temp.store(true, Ordering::Relaxed);
+    Ok(out)
+}
+
 /// xpu-smi spelling of the same fields, in the same order as
 /// parse_xpu_csv expects. `clocks.sm` does not exist there (use
 /// clocks.current.graphics); `clocks.max.mem`, fan and PCIe are missing or
@@ -161,8 +192,14 @@ impl GpuMonitor {
     }
 
     /// Parse nvidia-smi CSV output into GpuStats (fallback if NVML is not available).
+    ///
+    /// Asks for `temperature.memory` as well, until the driver is shown not
+    /// to know the field: a pre-R465 nvidia-smi rejects the whole query over
+    /// it, and an error here would drop the GPU panel entirely.
     pub fn collect_nvidia() -> Result<Vec<GpuStats>, String> {
-        run_smi("nvidia-smi", NVIDIA_QUERY).map(|out| parse_csv(&out))
+        static NO_MEM_TEMP: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        nvidia_csv(&NO_MEM_TEMP, |query| run_smi("nvidia-smi", query)).map(|out| parse_csv(&out))
     }
 
     /// Intel GPUs via xpu-smi, same field order as NVIDIA_QUERY.
@@ -1124,6 +1161,7 @@ fn apple_stats(name: &str, cores: u32, m: MacmonSample) -> GpuStats {
         power_watts: m.gpu_power,
         power_max_watts: apple_power_max(),
         temperature: (m.temp > 0.0).then_some(m.temp),
+        temperature_memory: None,
         clock_sm_mhz: m.freq_mhz,
         clock_sm_max_mhz: 0,
         clock_mem_mhz: 0,
@@ -1291,13 +1329,14 @@ pub fn print_gpu_once(as_json: bool) -> bool {
         for g in &stats {
             println!(
                 "gpu idx={} name='{}' util_gpu={:.1}% power={:.3}W/ceil{:.0}W temp={:?} \
-                 clk={}MHz fan={:?}/{:?} mem={}/{}MB unified={}",
+                 mem_temp={:?} clk={}MHz fan={:?}/{:?} mem={}/{}MB unified={}",
                 g.index,
                 g.name,
                 g.utilization_gpu,
                 g.power_watts,
                 g.power_max_watts,
                 g.temperature,
+                g.temperature_memory,
                 g.clock_sm_mhz,
                 g.fan_pct,
                 g.fan_rpm,
@@ -1403,6 +1442,7 @@ fn amd_stats(index: u32, device: &AmdDevice) -> GpuStats {
         power_watts,
         power_max_watts,
         temperature,
+        temperature_memory: None,
         clock_sm_mhz,
         clock_sm_max_mhz,
         clock_mem_mhz,
@@ -1558,6 +1598,9 @@ pub fn parse_csv(stdout: &str) -> Vec<GpuStats> {
             unified: false,
             pcie_gen: int(14) as u32,
             pcie_width: int(15) as u32,
+            // Column 17: only the NVIDIA query asks for it. N/A on cards
+            // without the sensor, absent for xpu-smi (16 columns).
+            temperature_memory: opt(16),
         });
     }
     stats
@@ -1631,6 +1674,7 @@ pub struct DemoGpu {
     util: f32,
     power: f32,
     temp: f32,
+    mem_temp: f32,
     clock: f32,
     mem_used: f32,
 }
@@ -1643,6 +1687,7 @@ impl DemoGpu {
             util: 20.0,
             power: 0.3,
             temp: 45.0,
+            mem_temp: 47.0,
             clock: 0.5,
             mem_used: 0.0,
         }
@@ -1669,6 +1714,8 @@ impl DemoGpu {
         self.power = self.power.clamp(0.05, 1.0);
         let target_temp = 42.0 + 38.0 * self.power;
         self.temp += (target_temp - self.temp) * 0.03 + jitter(&mut self.seed, 0.3);
+        let target_mem_temp = 46.0 + 40.0 * self.power;
+        self.mem_temp += (target_mem_temp - self.mem_temp) * 0.03 + jitter(&mut self.seed, 0.3);
         let target_clock = if self.util > 8.0 { 0.97 } else { 0.35 };
         self.clock += (target_clock - self.clock) * 0.4 + jitter(&mut self.seed, 0.02);
         self.clock = self.clock.clamp(0.1, 1.0);
@@ -1690,6 +1737,13 @@ impl DemoGpu {
             power_watts: self.power * pmax,
             power_max_watts: pmax,
             temperature: Some(self.temp),
+            // The sensor exists on HBM parts only: the demo P100 and
+            // A100 rows carry it, the GTX 1070 row shows the absent state.
+            temperature_memory: if self.index == 0 {
+                None
+            } else {
+                Some(self.mem_temp)
+            },
             clock_sm_mhz: (self.clock * cmax as f32) as u32,
             clock_sm_max_mhz: cmax,
             clock_mem_mhz: if self.index == 1 { 715 } else { 3802 },
@@ -1724,11 +1778,63 @@ mod tests {
         assert_eq!(s[1].fan_pct, None);
         assert_eq!(s[1].short_name(), "P100");
         assert_eq!(s[0].short_name(), "GTX 1070");
+        // 16-column rows (base query after the mem-temp latch, or xpu-smi):
+        // no memory temperature, not a zero.
+        assert_eq!(s[0].temperature_memory, None);
+        assert_eq!(s[1].temperature_memory, None);
         let amd = GpuStats {
             name: "Advanced Micro Devices, Inc. [AMD/ATI] Navi 31 [Radeon RX 7900 XTX]".into(),
             ..Default::default()
         };
         assert_eq!(amd.short_name(), "Navi 31 [Radeon RX 7900 XTX]");
+    }
+
+    #[test]
+    fn the_memory_temp_column_is_given_up_only_when_the_base_query_answers() {
+        use std::cell::RefCell;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let asked = RefCell::new(Vec::new());
+        // `long` / `base`: what nvidia-smi says to the query with and
+        // without the extra column.
+        let run = |long: Result<&str, &str>, base: Result<&str, &str>, off: &AtomicBool| {
+            asked.borrow_mut().clear();
+            nvidia_csv(off, |query| {
+                let with_column = query.ends_with(NVIDIA_QUERY_MEM_FIELD);
+                asked.borrow_mut().push(with_column);
+                let answer = if with_column { long } else { base };
+                answer.map(str::to_string).map_err(str::to_string)
+            })
+        };
+        let unknown = "Field \"temperature.memory\" is not a valid field to query.";
+        let down = "Failed to initialize NVML: Unknown Error";
+
+        // nvidia-smi failing altogether says nothing about the column, and
+        // the error shown is the base query's.
+        let off = AtomicBool::new(false);
+        assert_eq!(run(Err(down), Err(down), &off), Err(down.to_string()));
+        assert!(!off.load(Ordering::Relaxed));
+        assert_eq!(run(Ok("long"), Ok("base"), &off), Ok("long".to_string()));
+        assert_eq!(*asked.borrow(), [true]);
+
+        // An old driver: the long query is refused, the base one answers,
+        // and from then on only the base one is asked.
+        assert_eq!(run(Err(unknown), Ok("base"), &off), Ok("base".to_string()));
+        assert!(off.load(Ordering::Relaxed));
+        assert_eq!(run(Err(unknown), Ok("base"), &off), Ok("base".to_string()));
+        assert_eq!(*asked.borrow(), [false]);
+    }
+
+    #[test]
+    fn parse_nvidia_line_with_memory_temp() {
+        // NVIDIA_QUERY with the temperature.memory column: real reading on
+        // an HBM card, N/A on a part without the sensor.
+        let csv = "0, NVIDIA A100-SXM4-80GB, 81920, 79112, 2808, 99, 83, 388.41, 400.00, 61, 1410, 1410, 1215, N/A, 3, 16, 67\n\
+                   1, NVIDIA GeForce GTX 1070, 8192, 7885, 307, 26, 12, 148.04, 151.00, 61, 1873, 1911, 3802, 29, 3, 8, N/A\n";
+        let s = parse_csv(csv);
+        assert_eq!(s.len(), 2);
+        assert_eq!(s[0].temperature_memory, Some(67.0));
+        assert_eq!(s[1].temperature_memory, None);
+        assert_eq!(s[1].fan_pct, Some(29.0)); // the extra column shifts nothing
     }
 
     #[test]
