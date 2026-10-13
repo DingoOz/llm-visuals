@@ -38,6 +38,10 @@ impl std::fmt::Display for ViewMode {
 #[command(
     name = "llm-visuals",
     about = "Real-time terminal dashboard for a locally running LLM",
+    // The flag is declared below so that it can answer to `-v` as well as
+    // clap's own `-V`.
+    version,
+    disable_version_flag = true,
     // Saved settings are passed ahead of the real command line, so a flag
     // given twice must take its last value rather than be an error.
     args_override_self = true
@@ -143,6 +147,10 @@ pub struct Args {
     /// Size cap for --log-db in MB; the oldest rows are dropped past it (0 = no cap)
     #[arg(long, default_value_t = 1024)]
     pub log_db_max_mb: u64,
+
+    /// Print the version and exit
+    #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
+    version: Option<bool>,
 }
 
 impl Args {
@@ -240,6 +248,21 @@ impl Args {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_flag_prints_the_package_version_in_every_spelling() {
+        use clap::error::ErrorKind;
+        let version = format!("llm-visuals {}\n", env!("CARGO_PKG_VERSION"));
+        for flag in ["--version", "-v", "-V"] {
+            let err = Args::try_parse_from(["llm-visuals", flag]).unwrap_err();
+            assert_eq!(err.kind(), ErrorKind::DisplayVersion, "{flag}");
+            assert_eq!(err.to_string(), version, "{flag}");
+        }
+        // Saved settings are parsed ahead of the command line
+        // (`settings::launch`); the flag still answers behind them.
+        let err = Args::try_parse_from(["llm-visuals", "--theme=neon", "-v"]).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::DisplayVersion);
+    }
 
     #[test]
     fn endpoint_precedence_and_model_hijack_prevention() {
