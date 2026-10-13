@@ -193,7 +193,7 @@ pub(crate) fn cross_wired(
 }
 
 /// KV pool size in bytes from the server's own `--kv-cache-memory-bytes`
-/// launch flag (`16g`, `16GiB`, a bare byte count…). Servers that size the
+/// launch flag (`16g`, `16G`, a bare byte count…). Servers that size the
 /// pool by declaration rather than by profiling free VRAM keep the number
 /// nowhere else; `None` when the flag is absent, so the unified-memory bar
 /// degrades to weight-only rather than inventing a pool.
@@ -210,24 +210,41 @@ pub fn kv_pool_bytes(cmdline: &str) -> Option<u64> {
     None
 }
 
-/// `16g` / `16 GiB` / `17179869184` → bytes, binary multipliers.
+/// A size as vLLM's own `human_readable_int` reads it: a lowercase suffix
+/// is decimal (`16g` is 16 × 10⁹ bytes), an uppercase one binary (`16G` is
+/// 16 × 2³⁰), only the decimal ones take a fraction (`1.5g`), and anything
+/// else is a plain byte count. A value vLLM would refuse to start with has
+/// no size here either.
 fn parse_byte_size(val: &str) -> Option<u64> {
-    let v = val.trim().to_ascii_lowercase();
-    let split = v.find(|c: char| !c.is_ascii_digit()).unwrap_or(v.len());
-    let n: u64 = v[..split].parse().ok()?;
-    let mult = match v[split..]
-        .trim_end_matches("b")
-        .trim_end_matches('i')
-        .trim_end()
-    {
-        "" => 1,
-        "k" => 1024,
-        "m" => 1024u64.pow(2),
-        "g" => 1024u64.pow(3),
-        "t" => 1024u64.pow(4),
-        _ => return None,
+    let val = val.trim();
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let bytes = match val.chars().last().filter(char::is_ascii_alphabetic) {
+        None => val.parse().ok()?,
+        Some(suffix) => {
+            let number = &val[..val.len() - 1];
+            let power = match suffix.to_ascii_lowercase() {
+                'k' => 1,
+                'm' => 2,
+                'g' => 3,
+                't' => 4,
+                _ => return None,
+            };
+            if suffix.is_ascii_uppercase() {
+                number
+                    .parse::<u64>()
+                    .ok()?
+                    .checked_mul(1024u64.pow(power))?
+            } else {
+                let (whole, fraction) = number.split_once('.').unwrap_or((number, "0"));
+                if !(digits(whole) && digits(fraction)) {
+                    return None;
+                }
+                // int(float(number) * mult), as vLLM computes it.
+                (number.parse::<f64>().ok()? * 1000f64.powi(power as i32)) as u64
+            }
+        }
     };
-    (n > 0).then_some(n.checked_mul(mult)?)
+    (bytes > 0).then_some(bytes)
 }
 
 /// Per-slot reconstruction state: counter baselines + the synthetic task
@@ -562,28 +579,37 @@ mod tests {
 
     #[test]
     fn declared_kv_pool_parsed_from_cmdline() {
+        let pool = |value: &str| kv_pool_bytes(&format!("--kv-cache-memory-bytes {value}"));
+        // vLLM's convention: lowercase is decimal, uppercase is binary.
         assert_eq!(
             kv_pool_bytes("vllm serve /model --kv-cache-memory-bytes 16g"),
-            Some(16 << 30)
+            Some(16_000_000_000)
         );
         assert_eq!(
-            kv_pool_bytes("vllm serve /model --kv-cache-memory-bytes=16GiB"),
+            kv_pool_bytes("vllm serve /model --kv-cache-memory-bytes=16G"),
             Some(16 << 30)
         );
         assert_eq!(
             kv_pool_bytes("--kv-cache-memory-bytes 17179869184 --max-model-len 4096"),
             Some(16 << 30)
         );
-        assert_eq!(
-            kv_pool_bytes("--kv-cache-memory-bytes 512m"),
-            Some(512 << 20)
-        );
+        assert_eq!(pool("512m"), Some(512_000_000));
+        assert_eq!(pool("512M"), Some(512 << 20));
+        // A fraction goes with the decimal suffixes only; `25.6k` is the
+        // example in vLLM's own help text.
+        assert_eq!(pool("25.6k"), Some(25_600));
+        assert_eq!(pool("1.5g"), Some(1_500_000_000));
+        assert_eq!(pool("1.5G"), None);
+        // Spellings vLLM does not start with are not given a size.
+        for refused in ["16GiB", "16gb", "g", ".5g", "1e3k", "-16g"] {
+            assert_eq!(pool(refused), None, "{refused}");
+        }
         // No flag (stock vLLM sizes the pool by profiling): None.
         assert_eq!(
             kv_pool_bytes("vllm serve /model --gpu-memory-utilization 0.01"),
             None
         );
-        assert_eq!(kv_pool_bytes("--kv-cache-memory-bytes 0g"), None);
+        assert_eq!(pool("0g"), None);
         assert_eq!(kv_pool_bytes("--kv-cache-memory-bytes"), None);
     }
 

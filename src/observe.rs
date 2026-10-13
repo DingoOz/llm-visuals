@@ -138,8 +138,9 @@ pub struct LiveStats {
     /// set, `ctx_used` prefers this over prompt+decoded.
     pub kv_tokens: Option<usize>,
     /// vLLM `kv_cache_usage_perc`: fraction (0..1) of the KV pool in use.
-    /// Multiplied by the pool size the server was launched with to size
-    /// the unified-memory bar; no other engine reports it this way.
+    /// On a unified-memory part it is the lit share of the bar's KV
+    /// segment, which there is the pool the server declared; no other
+    /// engine reports it this way.
     pub kv_usage_perc: Option<f32>,
 }
 

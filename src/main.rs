@@ -1227,37 +1227,37 @@ fn server_reported_gb<'a>(lives: impl Iterator<Item = &'a LiveStats>) -> Option<
     })
 }
 
-/// Occupancy for the unified-memory bar when no engine reports `/v1/loads`:
-/// a vLLM server's weights are the safetensors shards it serves (the same
-/// file-size estimate the VRAM split uses), and its KV pool is
-/// `kv_cache_usage_perc` over the `--kv-cache-memory-bytes` it was launched
-/// with — the server's own declared numbers. A llama.cpp-only box, or a
-/// vLLM launched with neither, keeps showing zeros.
+/// What a vLLM server holds, by its own declaration: the safetensors shards
+/// it serves (the same file-size estimate the VRAM split uses) and the
+/// `--kv-cache-memory-bytes` pool it was launched with. vLLM allocates that
+/// pool in one piece at start-up, so all of it is occupied however little of
+/// it holds tokens; `kv_cache_usage_perc` is the share that does, and the
+/// bar lights that much of its KV segment. The flag is per GPU, and a
+/// unified part has one. `None` when neither number is known.
+fn vllm_declared_gb(model: &DetectedModel) -> Option<f32> {
+    if model.engine != "vllm" {
+        return None;
+    }
+    let weights = model
+        .path
+        .as_deref()
+        .filter(|p| p.is_dir())
+        .and_then(dir_model_bytes);
+    let pool = vllm::kv_pool_bytes(&model.cmdline);
+    (weights.is_some() || pool.is_some())
+        .then(|| (weights.unwrap_or(0) + pool.unwrap_or(0)) as f32 / 1024f32.powi(3))
+}
+
+/// Occupancy for the unified-memory bar, summed over the models: what each
+/// server reports through `/v1/loads`, or failing that what a vLLM server
+/// declares. A model with neither adds nothing, and `None` when none has
+/// either: a llama.cpp-only box keeps showing zeros.
 fn unified_occupancy_gb(slots: &[ModelSlot]) -> Option<f32> {
-    server_reported_gb(slots.iter().map(|s| &s.live)).or_else(|| {
-        let gib = |b: u64| b as f32 / (1024u64.pow(3) as f32);
-        slots
-            .iter()
-            .filter(|s| s.model.engine == "vllm")
-            .fold(None, |acc, s| {
-                let weight = s
-                    .model
-                    .path
-                    .as_ref()
-                    .filter(|p| p.is_dir())
-                    .and_then(|p| dir_model_bytes(p))
-                    .map(gib)
-                    .unwrap_or(0.0);
-                let kv = match (s.live.kv_usage_perc, vllm::kv_pool_bytes(&s.model.cmdline)) {
-                    (Some(perc), Some(pool)) => perc * gib(pool),
-                    _ => 0.0,
-                };
-                if weight + kv == 0.0 {
-                    acc
-                } else {
-                    Some(acc.unwrap_or(0.0) + weight + kv)
-                }
-            })
+    slots.iter().fold(None, |acc, s| {
+        server_reported_gb(std::iter::once(&s.live))
+            .or_else(|| vllm_declared_gb(&s.model))
+            .map(|part| acc.unwrap_or(0.0) + part)
+            .or(acc)
     })
 }
 
@@ -1464,18 +1464,40 @@ mod tests {
             s.live.kv_usage_perc = kv;
             s
         };
-        let declared = "vllm serve /model --kv-cache-memory-bytes 16g";
+        let declared = "vllm serve /model --kv-cache-memory-bytes 16G";
         let served = || Some(dir.clone());
+        let shards = 0.00390625; // 4 MiB
 
-        // 4 MiB of shards + 25% of the declared 16 GiB pool.
+        // The shards and the whole declared pool: vLLM allocates it at
+        // start-up, so how much of it holds tokens does not change the sum.
         let a = slot("vllm", served(), declared, Some(0.25));
         let gb = unified_occupancy_gb(std::slice::from_ref(&a)).unwrap();
-        assert!((gb - (0.00390625 + 4.0)).abs() < 1e-4);
+        assert!((gb - (shards + 16.0)).abs() < 1e-4);
+        let idle = slot("vllm", served(), declared, None);
+        let gb = unified_occupancy_gb(std::slice::from_ref(&idle)).unwrap();
+        assert!((gb - (shards + 16.0)).abs() < 1e-4);
+
+        // Drawn on a GB10 row, that leaves the bar's KV segment as exactly
+        // the pool, which is what lets the server's gauge light a share of it.
+        let mut gpus = [GpuStats {
+            name: "NVIDIA GB10".into(),
+            ..Default::default()
+        }];
+        gpu::apply_unified_memory(
+            &mut gpus,
+            124_518, // 121.6 GiB of system RAM
+            unified_occupancy_gb(std::slice::from_ref(&a)),
+        );
+        assert!(gpus[0].unified);
+        let sample = fade_sample_from_live(Some(&a.model), &gpus, &a.live, fade::KV_BUCKETS);
+        let total_gb = gpus[0].vram_total_gb();
+        assert!((sample.weight_frac[0] * total_gb - shards).abs() < 1e-3);
+        assert!((sample.kv_alloc_frac[0] * total_gb - 16.0).abs() < 1e-2);
 
         // No declared pool: weight only, no invented KV.
         let no_pool = slot("vllm", served(), "vllm serve /model", Some(0.25));
         let gb = unified_occupancy_gb(std::slice::from_ref(&no_pool)).unwrap();
-        assert!((gb - 0.00390625).abs() < 1e-4);
+        assert!((gb - shards).abs() < 1e-4);
 
         // Unresolvable served dir and no pool: zeros, not a stand-in.
         let blind = slot(
@@ -1486,13 +1508,20 @@ mod tests {
         );
         assert!(unified_occupancy_gb(std::slice::from_ref(&blind)).is_none());
 
-        // A server that reports /v1/loads wins over the fallback.
+        // The flag is vLLM's: another engine's command line is not read for it.
+        let other = slot("llama.cpp", served(), declared, None);
+        assert!(unified_occupancy_gb(std::slice::from_ref(&other)).is_none());
+
+        // Each model counts by its own source: a server that reports
+        // /v1/loads beside a vLLM one, and the bar holds both.
         let mut sglang = slot("sglang", served(), "sglang --model-path m", None);
         sglang.live.weight_gb = Some(82.172);
         sglang.live.kv_cache_gb = Some(10.457);
         sglang.live.graph_gb = Some(0.234);
-        let gb = unified_occupancy_gb(&[a, sglang]).unwrap();
+        let gb = unified_occupancy_gb(std::slice::from_ref(&sglang)).unwrap();
         assert!((gb - 92.863).abs() < 1e-3);
+        let gb = unified_occupancy_gb(&[a, sglang, blind]).unwrap();
+        assert!((gb - (92.863 + shards + 16.0)).abs() < 1e-3);
 
         std::fs::remove_dir_all(&root).ok();
     }
