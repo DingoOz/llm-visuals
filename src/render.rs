@@ -762,6 +762,16 @@ impl Renderer {
             format!("  {temp:>2.0}°"),
             Style::default().fg(temp_col).add_modifier(Modifier::BOLD),
         )];
+        // Memory temperature, on the NVIDIA cards that report it: the second
+        // hot spot on an LLM box, and the one that throttles before the die does.
+        if let Some(mt) = g.temperature_memory {
+            extras.push(Span::styled(
+                format!("  mem {mt:>2.0}°"),
+                Style::default()
+                    .fg(pal::gradient_color(pal::TEMP, (mt - 30.0) / 65.0))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         if g.clock_sm_mhz > 0 {
             extras.push(Span::styled(
                 format!("  {:>4}MHz", g.clock_sm_mhz),

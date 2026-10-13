@@ -46,8 +46,34 @@ pub struct NvmlUtilization {
     pub memory: u32,
 }
 
+/// `nvmlFieldValue_t` from nvml.h. The union is held as raw bits; see
+/// `decode_field_celsius` for the typed read.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+struct NvmlFieldValue {
+    field_id: u32,
+    scope_id: u32,
+    timestamp: i64,
+    latency_usec: i64,
+    value_type: i32,
+    nvml_return: u32,
+    value: u64,
+}
+
 const NVML_SUCCESS: u32 = 0;
 const NVML_TEMPERATURE_GPU: u32 = 0;
+/// `nvml.h`: memory temperature, readable only through the field-value API:
+/// `nvmlDeviceGetTemperature` knows a single GPU sensor. Cards without the
+/// memory sensor answer per-field NOT_SUPPORTED.
+const NVML_FI_DEV_MEMORY_TEMP: u32 = 82;
+// nvmlValueType_t: selects which member of the nvmlValue_t union is valid.
+const NVML_VALUE_TYPE_DOUBLE: i32 = 0;
+const NVML_VALUE_TYPE_UNSIGNED_INT: i32 = 1;
+const NVML_VALUE_TYPE_UNSIGNED_LONG: i32 = 2;
+const NVML_VALUE_TYPE_UNSIGNED_LONG_LONG: i32 = 3;
+const NVML_VALUE_TYPE_SIGNED_LONG_LONG: i32 = 4;
+const NVML_VALUE_TYPE_SIGNED_INT: i32 = 5;
+const NVML_VALUE_TYPE_UNSIGNED_SHORT: i32 = 6;
 #[allow(dead_code)]
 const NVML_CLOCK_GRAPHICS: u32 = 0;
 const NVML_CLOCK_SM: u32 = 1;
@@ -67,6 +93,8 @@ type FnNvmlDeviceGetMemoryInfoV2 = unsafe extern "C" fn(*mut c_void, *mut NvmlMe
 type FnNvmlDeviceGetUtilizationRates =
     unsafe extern "C" fn(*mut c_void, *mut NvmlUtilization) -> u32;
 type FnNvmlDeviceGetTemperature = unsafe extern "C" fn(*mut c_void, u32, *mut u32) -> u32;
+type FnNvmlDeviceGetFieldValues =
+    unsafe extern "C" fn(*mut c_void, std::ffi::c_int, *mut NvmlFieldValue) -> u32;
 type FnNvmlDeviceGetPowerUsage = unsafe extern "C" fn(*mut c_void, *mut u32) -> u32;
 type FnNvmlDeviceGetPowerLimit = unsafe extern "C" fn(*mut c_void, *mut u32) -> u32;
 type FnNvmlDeviceGetClockInfo = unsafe extern "C" fn(*mut c_void, u32, *mut u32) -> u32;
@@ -180,6 +208,7 @@ pub struct NvmlSession {
     device_get_memory_info_v2_fn: Option<FnNvmlDeviceGetMemoryInfoV2>,
     device_get_utilization_rates_fn: FnNvmlDeviceGetUtilizationRates,
     device_get_temperature_fn: FnNvmlDeviceGetTemperature,
+    device_get_field_values_fn: Option<FnNvmlDeviceGetFieldValues>,
     device_get_power_usage_fn: FnNvmlDeviceGetPowerUsage,
     device_get_power_limit_fn: Option<FnNvmlDeviceGetPowerLimit>,
     device_get_clock_info_fn: Option<FnNvmlDeviceGetClockInfo>,
@@ -269,6 +298,11 @@ impl NvmlSession {
             b"nvmlDeviceGetTemperature\0",
             FnNvmlDeviceGetTemperature
         );
+        let device_get_field_values_fn = opt_sym!(
+            lib,
+            b"nvmlDeviceGetFieldValues\0",
+            FnNvmlDeviceGetFieldValues
+        );
         let device_get_power_usage_fn: FnNvmlDeviceGetPowerUsage =
             sym!(lib, b"nvmlDeviceGetPowerUsage\0", FnNvmlDeviceGetPowerUsage);
 
@@ -333,6 +367,7 @@ impl NvmlSession {
             device_get_memory_info_v2_fn,
             device_get_utilization_rates_fn,
             device_get_temperature_fn,
+            device_get_field_values_fn,
             device_get_power_usage_fn,
             device_get_power_limit_fn,
             device_get_clock_info_fn,
@@ -446,6 +481,20 @@ impl NvmlSession {
                 None
             };
 
+            // Memory temperature through the field-value API.
+            // A single extra FFI call per poll; devices without the sensor
+            // answer NOT_SUPPORTED at call level or per field, both → None.
+            let temperature_memory = self.device_get_field_values_fn.and_then(|field_values_fn| {
+                let mut fv = NvmlFieldValue {
+                    field_id: NVML_FI_DEV_MEMORY_TEMP,
+                    ..Default::default()
+                };
+                if unsafe { field_values_fn(handle, 1, &mut fv) } != NVML_SUCCESS {
+                    return None;
+                }
+                decode_field_celsius(&fv)
+            });
+
             // Power
             let mut power_mw = 0u32;
             let power_watts = if unsafe { (self.device_get_power_usage_fn)(handle, &mut power_mw) }
@@ -517,6 +566,7 @@ impl NvmlSession {
                 power_watts,
                 power_max_watts,
                 temperature,
+                temperature_memory,
                 clock_sm_mhz: sm_clock,
                 clock_sm_max_mhz: sm_clock_max,
                 clock_mem_mhz: mem_clock,
@@ -607,6 +657,33 @@ fn telemetry_readable(stats: &[GpuStats]) -> bool {
     })
 }
 
+/// `nvmlValue_t` decoded per `valueType`. The memory-temperature field has
+/// been seen as both unsigned int and signed long long across driver
+/// generations, so the stored type picks the union member.
+///
+/// Each member is read at its own width: the driver writes that member and
+/// nothing says what the rest of the union holds. The members share their
+/// first byte, which on the little-endian targets this builds for makes a
+/// narrow one the low bytes of `value`.
+fn decode_field_celsius(fv: &NvmlFieldValue) -> Option<f32> {
+    if fv.nvml_return != NVML_SUCCESS {
+        return None;
+    }
+    let celsius = match fv.value_type {
+        NVML_VALUE_TYPE_DOUBLE => f64::from_bits(fv.value) as f32,
+        NVML_VALUE_TYPE_UNSIGNED_INT => fv.value as u32 as f32,
+        // `unsigned long`: 64 bits on Linux, 32 on Windows.
+        NVML_VALUE_TYPE_UNSIGNED_LONG => fv.value as std::ffi::c_ulong as f32,
+        NVML_VALUE_TYPE_UNSIGNED_LONG_LONG => fv.value as f32,
+        NVML_VALUE_TYPE_SIGNED_LONG_LONG => fv.value as i64 as f32,
+        NVML_VALUE_TYPE_SIGNED_INT => fv.value as u32 as i32 as f32,
+        NVML_VALUE_TYPE_UNSIGNED_SHORT => fv.value as u16 as f32,
+        // A type newer than this list has no member here to read it by.
+        _ => return None,
+    };
+    (celsius > 0.0).then_some(celsius)
+}
+
 pub(crate) fn decode_device_name(buf: &[u8]) -> String {
     let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
     String::from_utf8_lossy(&buf[..len]).trim().to_string()
@@ -649,6 +726,83 @@ mod tests {
         assert_eq!(kb_to_mb(0), 0.0);
         assert_eq!(kb_to_mb(1024), 1.0);
         assert_eq!(kb_to_mb(2560), 2.5);
+    }
+
+    #[test]
+    fn field_value_struct_matches_nvml_h() {
+        // nvmlFieldValue_t: u32, u32, i64, i64, enum(4), enum(4), 8-byte union.
+        assert_eq!(std::mem::size_of::<NvmlFieldValue>(), 40);
+        assert_eq!(std::mem::align_of::<NvmlFieldValue>(), 8);
+        let fv = NvmlFieldValue::default();
+        let base = &fv as *const NvmlFieldValue as usize;
+        assert_eq!(&fv.value_type as *const i32 as usize - base, 24);
+        assert_eq!(&fv.value as *const u64 as usize - base, 32);
+    }
+
+    #[test]
+    fn memory_temp_field_decodes_by_value_type() {
+        let fv = |ret: u32, ty: i32, bits: u64| NvmlFieldValue {
+            nvml_return: ret,
+            value_type: ty,
+            value: bits,
+            ..Default::default()
+        };
+        assert_eq!(
+            decode_field_celsius(&fv(NVML_SUCCESS, NVML_VALUE_TYPE_DOUBLE, 83.5f64.to_bits())),
+            Some(83.5)
+        );
+        assert_eq!(
+            decode_field_celsius(&fv(NVML_SUCCESS, NVML_VALUE_TYPE_UNSIGNED_INT, 83)),
+            Some(83.0)
+        );
+        // signed long long (the type DCGM documents for this field)
+        assert_eq!(
+            decode_field_celsius(&fv(NVML_SUCCESS, 4, 83i64 as u64)),
+            Some(83.0)
+        );
+        // A narrow member is read at its own width, whatever the rest of
+        // the union holds.
+        let junk = 0xDEAD_BEEF_0000_0000u64;
+        for ty in [NVML_VALUE_TYPE_UNSIGNED_INT, NVML_VALUE_TYPE_SIGNED_INT] {
+            assert_eq!(
+                decode_field_celsius(&fv(NVML_SUCCESS, ty, junk | 83)),
+                Some(83.0)
+            );
+        }
+        assert_eq!(
+            decode_field_celsius(&fv(
+                NVML_SUCCESS,
+                NVML_VALUE_TYPE_UNSIGNED_SHORT,
+                junk | 0xFFFF_0000 | 83
+            )),
+            Some(83.0)
+        );
+        // A value type this build has never heard of is not guessed at.
+        assert_eq!(decode_field_celsius(&fv(NVML_SUCCESS, 7, 83)), None);
+    }
+
+    #[test]
+    fn memory_temp_field_rejects_bad_rows() {
+        // Per-field NOT_SUPPORTED (MIG, pre-HBM cards): value is undefined.
+        assert_eq!(
+            decode_field_celsius(&NvmlFieldValue {
+                nvml_return: 3,
+                value_type: NVML_VALUE_TYPE_UNSIGNED_INT,
+                value: 42,
+                ..Default::default()
+            }),
+            None
+        );
+        // 0° is "no reading" on this panel, not an idle temperature.
+        assert_eq!(
+            decode_field_celsius(&NvmlFieldValue {
+                nvml_return: NVML_SUCCESS,
+                value_type: NVML_VALUE_TYPE_UNSIGNED_INT,
+                value: 0,
+                ..Default::default()
+            }),
+            None
+        );
     }
 
     #[test]
