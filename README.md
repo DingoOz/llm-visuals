@@ -662,6 +662,7 @@ concurrent request traces.
 --log-db auto|off|FILE  SQLite log of samples and requests (default: auto)
 --log-every 1.0      seconds between --log-db sample rows
 --log-db-max-mb 1024 size cap for --log-db; oldest rows are dropped (0 = none)
+--version, -v        print the version and exit
 ```
 
 `llm-visuals --help` lists everything.
