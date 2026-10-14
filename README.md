@@ -563,6 +563,16 @@ A Strata server started with a key answers `/metrics` and `/v1/models` with
 its `/health` is open and names the server, the model and the context. The
 live numbers come from `/metrics`, so they need the key.
 
+An SGLang server started with a key leaves `/metrics` open but answers
+`/v1/loads`, where its numbers come from, with 401. vLLM checks its key only
+on `/v1` and similar API routes, so its `/metrics` needs none. A refused server
+would show the same zeros as an idle one, so when an SGLang, Strata, vLLM or
+NInfer server's numbers are refused three polls running the status line says
+so, with the code the server sent:
+`attached to … — HTTP 401: no valid API key (--api-key-file)`. That happens
+when the key is not on the server's command line, for example an SGLang server
+that reads it from a config file.
+
 LM Studio starts every model it loads as such a llama-server, with its own
 port and key, so press `r` after it loads a different model. It has no switch
 for `--metrics`, but the llama-server it starts inherits its environment:
@@ -755,11 +765,10 @@ plus the `--kv-cache-memory-bytes` pool from its command line, all of which
 vLLM allocates at start-up, and `kv_cache_usage_perc` lights the part of the
 pool that holds tokens. A vLLM server launched without that flag sizes its
 pool by profiling, and only its weights are counted. llama.cpp reports
-neither, so its bar shows zeros. A key-guarded server (SGLang or vLLM with `--api-key`) answers the poller
-401 without one; `llm-visuals --api-key …` (or `--api-key-file …`) fixes it,
-and the status line says `401: needs --api-key or --api-key-file` rather
-than letting the zeros pose as an idle box. Fan and `VRAM busy %` read as absent, not
-as errors. The two bars show the same pool at different
+neither, so its bar shows zeros. An SGLang server whose key the dashboard does
+not have shows zeros too, and the status line says `HTTP 401` (see
+[API keys and LM Studio](#api-keys-and-lm-studio)). Fan and `VRAM busy %` read
+as absent, not as errors. The two bars show the same pool at different
 units and different scopes: `UNIFIED` is GiB like every VRAM bar and counts
 only what the servers report as model occupancy; the `RAM` row is decimal GB
 (`/ 1e9`) and counts the whole system (`MemTotal − MemAvailable`). The same

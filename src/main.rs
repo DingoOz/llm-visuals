@@ -352,8 +352,7 @@ async fn poll_server(
                 if misses == 3 {
                     // A key-guarded server looks identical to a dead one from
                     // here; name the difference so the UNIFIED zeros say why.
-                    let denied =
-                        observe::rejected_unauthorized(&model.host, port, &auth, "/v1/loads").await;
+                    let denied = observe::auth_refusal(&model.host, port, &auth, "/v1/loads").await;
                     let stats = LiveStats {
                         ctx_max: model.ctx_max.unwrap_or(0),
                         auth_denied: denied,
@@ -390,8 +389,7 @@ async fn poll_server(
             } else {
                 misses = misses.saturating_add(1);
                 if misses == 3 {
-                    let denied =
-                        observe::rejected_unauthorized(&model.host, port, &auth, "/metrics").await;
+                    let denied = observe::auth_refusal(&model.host, port, &auth, "/metrics").await;
                     let stats = LiveStats {
                         ctx_max: model.ctx_max.unwrap_or(0),
                         auth_denied: denied,
@@ -440,8 +438,7 @@ async fn poll_server(
             } else {
                 misses = misses.saturating_add(1);
                 if misses == 3 {
-                    let denied =
-                        observe::rejected_unauthorized(&model.host, port, &auth, "/metrics").await;
+                    let denied = observe::auth_refusal(&model.host, port, &auth, "/metrics").await;
                     let stats = LiveStats {
                         ctx_max,
                         auth_denied: denied,
@@ -535,34 +532,41 @@ fn open_db(args: &Args) -> Result<Option<dblog::DbLog>, String> {
 fn status_for(slots: &[ModelSlot], rescanned: bool) -> String {
     let prefix = if rescanned { "re-scanned: " } else { "" };
     // A refused server must not pass for an idle one: the same zeros have a
-    // different remedy, and the remedy is a flag on this very command.
-    let denied: Vec<String> = slots
-        .iter()
-        .filter(|s| s.live.auth_denied)
-        .map(|s| s.model.short_name())
-        .collect();
+    // different remedy, and the remedy is a flag on this very command. The
+    // code shown is the one the server sent.
+    const REMEDY: &str = "no valid API key (--api-key-file)";
     match slots.len() {
         0 => format!(
             "{prefix}no running LLM found (llama-server / ollama / vLLM / SGLang / Strata) — press r to rescan"
         ),
         1 => {
-            let mut note = String::new();
-            if !denied.is_empty() {
-                note = " — 401: needs --api-key or --api-key-file".to_string();
-            }
-            format!("{prefix}attached to {}{}", slots[0].model, note)
+            let note = slots[0]
+                .live
+                .auth_denied
+                .map(|code| format!(" — HTTP {code}: {REMEDY}"))
+                .unwrap_or_default();
+            format!("{prefix}attached to {}{note}", slots[0].model)
         }
         n => {
-            let mut note = String::new();
-            if !denied.is_empty() {
-                note = format!(" — {} answered 401: needs --api-key", denied.join(", "));
-            }
+            let refused: Vec<String> = slots
+                .iter()
+                .filter_map(|s| {
+                    let code = s.live.auth_denied?;
+                    Some(format!("{} HTTP {code}", s.model.short_name()))
+                })
+                .collect();
+            let note = if refused.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}: {REMEDY}", refused.join(", "))
+            };
             format!(
-                "{}watching {} models: {}{}",
-                prefix,
-                n,
-                slots.iter().map(|s| s.model.short_name()).collect::<Vec<_>>().join(", "),
-                note
+                "{prefix}watching {n} models: {}{note}",
+                slots
+                    .iter()
+                    .map(|s| s.model.short_name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )
         }
     }
@@ -766,9 +770,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let empty_live = LiveStats::default();
     let empty_fade = FadeState::new();
 
-    // Whether the last status line was written for refused (401) servers;
-    // recomputed only when a server starts or stops refusing.
-    let mut auth_denied = false;
     let mut view_mode = ViewMode::All;
     let mut camera = landscape::Camera::new();
     let mut idle_frame = 0u8;
@@ -1070,26 +1071,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        let mut live_drained = false;
+        let mut refusal_changed = false;
         while let Ok((pid, s)) = live_rx.try_recv() {
             ui_changed = true;
             if let Some(slot) = slot_of.get(&pid).and_then(|i| slots.get_mut(*i)) {
                 if s.ctx_max > 0 {
                     slot.ctx_max = s.ctx_max;
                 }
+                // Compared slot by slot, so a second server refusing, or one
+                // that comes back after `r` and refuses again, is news too.
+                refusal_changed |= slot.live.auth_denied != s.auth_denied;
                 slot.perf.observe(&s, now);
                 slot.live = s;
-                live_drained = true;
             }
         }
-        if live_drained {
-            // A server newly refusing (or newly accepting) our key changes
-            // the story the status line tells; say it while it is news.
-            let denied = slots.iter().any(|s| s.live.auth_denied);
-            if denied != auth_denied {
-                auth_denied = denied;
-                status = status_for(&slots, false);
-            }
+        if refusal_changed {
+            // A server starting or stopping to refuse our key changes the
+            // story the status line tells; say it while it is news.
+            status = status_for(&slots, false);
         }
 
         while let Ok(event) = events_rx.try_recv() {
@@ -1590,18 +1589,32 @@ mod tests {
             tensors: None,
             vision: None,
         };
-        let mut denied = ModelSlot::new(model("sglang"));
-        denied.live.auth_denied = true;
+        let mut refused = ModelSlot::new(model("sglang"));
+        refused.live.auth_denied = Some(401);
         let ok = ModelSlot::new(model("vllm"));
 
-        let one = status_for(std::slice::from_ref(&denied), false);
-        assert!(one.contains("401") && one.contains("--api-key"), "{one}");
+        let one = status_for(std::slice::from_ref(&refused), false);
+        assert!(
+            one.ends_with(" — HTTP 401: no valid API key (--api-key-file)"),
+            "{one}"
+        );
         let one = status_for(std::slice::from_ref(&ok), false);
-        assert!(!one.contains("401"), "{one}");
+        assert!(!one.contains("HTTP"), "{one}");
 
-        let many = status_for(&[denied, ok], false);
-        assert!(many.contains("watching 2 models"), "{many}");
-        assert!(many.contains("answered 401"), "{many}");
+        // The code is the one the server sent, and only a refusing model is named.
+        refused.live.auth_denied = Some(403);
+        let many = status_for(&[refused, ok], false);
+        assert!(
+            many.starts_with("watching 2 models: m-sglang, m-vllm"),
+            "{many}"
+        );
+        assert!(
+            many.ends_with(" — m-sglang HTTP 403: no valid API key (--api-key-file)"),
+            "{many}"
+        );
+
+        // The remedy is an option this command has.
+        assert!(Args::try_parse_from(["llm-visuals", "--api-key-file", "key"]).is_ok());
     }
 
     #[test]
