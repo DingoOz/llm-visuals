@@ -749,12 +749,16 @@ memory-controller counter there. The GPU panel stays on in-process NVML for
 utilisation, power, temperature and clocks; the VRAM bar becomes `UNIFIED` with
 system RAM as the denominator and the SGLang server's own
 `memory.weight_gb + kv_cache_gb + graph_gb` from `/v1/loads` as the fill.
+
 vLLM reports no `/v1/loads`; its fill is the served directory's shard sizes
 plus the `--kv-cache-memory-bytes` pool from its command line, all of which
 vLLM allocates at start-up, and `kv_cache_usage_perc` lights the part of the
 pool that holds tokens. A vLLM server launched without that flag sizes its
 pool by profiling, and only its weights are counted. llama.cpp reports
-neither, so its bar shows zeros. Fan and `VRAM busy %` read as absent, not
+neither, so its bar shows zeros. A key-guarded server (SGLang or vLLM with `--api-key`) answers the poller
+401 without one; `llm-visuals --api-key …` (or `--api-key-file …`) fixes it,
+and the status line says `401: needs --api-key or --api-key-file` rather
+than letting the zeros pose as an idle box. Fan and `VRAM busy %` read as absent, not
 as errors. The two bars show the same pool at different
 units and different scopes: `UNIFIED` is GiB like every VRAM bar and counts
 only what the servers report as model occupancy; the `RAM` row is decimal GB
