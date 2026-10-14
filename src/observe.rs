@@ -142,6 +142,10 @@ pub struct LiveStats {
     /// segment, which there is the pool the server declared; no other
     /// engine reports it this way.
     pub kv_usage_perc: Option<f32>,
+    /// The status (401 or 403) the server refused the poller with: every
+    /// number it owns is unreachable, so the panels show zeros. The status
+    /// line names this instead of letting zeros pose as "nothing loaded".
+    pub auth_denied: Option<u16>,
 }
 
 /// Per-request decode count when `/slots` does not carry `n_decoded`.
@@ -460,6 +464,7 @@ pub fn parse_slots(body: &str) -> Option<LiveStats> {
         graph_gb: None,
         kv_tokens: None,
         kv_usage_perc: None,
+        auth_denied: None,
     })
 }
 
@@ -470,6 +475,13 @@ pub enum HttpError {
     Write(std::io::Error),
     ReadTimeout,
     Read(std::io::Error),
+    /// The server answered but refused the request (401/403). A key-guarded
+    /// endpoint (SGLang's `/v1/loads`, Strata's `/metrics`) otherwise looks
+    /// like a silent parse failure: counters stop, occupancy reads zero,
+    /// nothing says "you needed a key". Only refusal codes surface; other
+    /// statuses keep returning the body, which fails to parse and decays the
+    /// same way.
+    Status(u16),
 }
 
 impl std::fmt::Display for HttpError {
@@ -480,6 +492,7 @@ impl std::fmt::Display for HttpError {
             Self::Write(e) => write!(f, "write error: {e}"),
             Self::ReadTimeout => write!(f, "read timeout"),
             Self::Read(e) => write!(f, "read error: {e}"),
+            Self::Status(code) => write!(f, "HTTP {code}"),
         }
     }
 }
@@ -529,12 +542,37 @@ async fn http_fetch(
         .map_err(|_| HttpError::ReadTimeout)?
         .map_err(HttpError::Read)?;
     let text = String::from_utf8_lossy(&buf);
+    if let Some(code) = http_status_code(&text) {
+        if code == 401 || code == 403 {
+            return Err(HttpError::Status(code));
+        }
+    }
     let body = text
         .split("\r\n\r\n")
         .nth(1)
         .or_else(|| text.split("\n\n").nth(1))
         .unwrap_or(&text);
     Ok(body.trim().to_string())
+}
+
+/// The status (401/403) the server refuses this path with, if it does. A
+/// once-per-stall probe so a key-guarded server says an API key is wanted
+/// instead of posing as idle.
+pub async fn auth_refusal(host: &str, port: u16, auth: &HttpAuth, path: &str) -> Option<u16> {
+    match http_get(host, port, path, auth).await {
+        Err(HttpError::Status(code)) => Some(code),
+        _ => None,
+    }
+}
+
+/// Status code from the response's status line (`HTTP/1.1 401 Unauthorized`).
+fn http_status_code(text: &str) -> Option<u16> {
+    let line = text.lines().next()?;
+    line.strip_prefix("HTTP/")?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]
@@ -774,5 +812,65 @@ mod tests {
         assert_eq!(s.id_task, 2);
         assert_eq!(s.slots_busy, 1);
         assert_eq!(s.n_slots, 2);
+    }
+
+    #[tokio::test]
+    async fn guarded_server_says_why_it_shows_zeros() {
+        // A key-guarded SGLang answers 401 on /v1/loads, where its numbers
+        // come from. That must surface as a named refusal, with the code the
+        // server sent, not as an unparseable body decaying to idle.
+        use tokio::net::TcpListener;
+        let guarded = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let plain = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let gport = guarded.local_addr().unwrap().port();
+        let pport = plain.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = guarded.accept().await.unwrap();
+                let mut req = [0u8; 512];
+                let n = sock.read(&mut req).await.unwrap_or(0);
+                let reply: &[u8] = if req[..n].starts_with(b"GET /v1/loads ") {
+                    b"HTTP/1.1 401 Unauthorized\r\n\r\n{\"error\":\"Unauthorized\"}"
+                } else {
+                    b"HTTP/1.1 403 Forbidden\r\n\r\nforbidden"
+                };
+                let _ = sock.write_all(reply).await;
+            }
+        });
+        tokio::spawn(async move {
+            // A llama.cpp server answering /metrics with its 404 page: the
+            // vLLM adapter must still get the body and reject it itself.
+            loop {
+                let (mut sock, _) = plain.accept().await.unwrap();
+                let mut req = [0u8; 512];
+                let _ = sock.read(&mut req).await;
+                let _ = sock.write_all(b"HTTP/1.1 404 Not Found\r\n\r\nnope").await;
+            }
+        });
+
+        let err = http_get("127.0.0.1", gport, "/v1/loads", &HttpAuth::default())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, HttpError::Status(401)), "{err}");
+        assert_eq!(format!("{err}"), "HTTP 401");
+        let none = HttpAuth::default();
+        assert_eq!(
+            auth_refusal("127.0.0.1", gport, &none, "/v1/loads").await,
+            Some(401)
+        );
+        assert_eq!(
+            auth_refusal("127.0.0.1", gport, &none, "/admin").await,
+            Some(403)
+        );
+
+        // Non-refusal statuses keep returning the body.
+        assert_eq!(
+            auth_refusal("127.0.0.1", pport, &none, "/metrics").await,
+            None
+        );
+        let body = http_get("127.0.0.1", pport, "/metrics", &none)
+            .await
+            .unwrap();
+        assert_eq!(body, "nope");
     }
 }

@@ -2,7 +2,7 @@
 
 ## Summary
 
-36 entries (as of 2026-10-14). Recurring themes:
+37 entries (as of 2026-10-14). Recurring themes:
 
 - **Optional or missing telemetry treated as a real value** (Logic, most common): a missing counter read as 0, record close gated on optional TTFT, unknown ctx rendered as full, model ownership derived from an unknown weight estimate. Rule of thumb: keep "unknown" distinct from zero and never gate state or ownership on an optional measurement.
 - **Under-discriminating matches when resolving processes/devices**: docker-proxy matched by IP only, comm-name gating, xe fans keyed by a constant path component, env GPU masks merged with host indices. Match on every discriminating field and prefer authoritative (driver/host) sources over inferred ones.
@@ -372,3 +372,13 @@
 - **Root cause:** The GB10 fallback for vLLM read `--kv-cache-memory-bytes 16g` with binary multipliers whatever the case. vLLM's `human_readable_int` makes a lowercase suffix decimal, so the pool was 16 x 10^9 bytes and was sized 7% too large. It then counted only `kv_cache_usage_perc` of the pool as occupied, where vLLM allocates the whole pool at start-up: an idle server showed 68.8 G used with about 15 G more really held, while SGLang on the same bar is counted by its whole pool. A box with one server of each kind dropped the vLLM one altogether, because the fallback ran only when no model reported `/v1/loads`.
 - **Fix applied:** The flag is parsed as vLLM parses it, the whole declared pool counts as occupied and the gauge lights the share of it that holds tokens, and each model is counted by its own source. Checked against vLLM's source at 96fc2da (`vllm/utils/argparse_utils.py`, `vllm/v1/worker/utils.py`), not on a GB10.
 - **Prevention rule:** Read the other program's parser and allocator before giving its flag a unit or its gauge a denominator. Two engines drawn on one bar are counted the same way.
+
+### A remedy that names an option the command does not have — 2026-10-14
+
+- **Severity:** Medium
+- **Category:** Logic
+- **File(s):** `src/main.rs`, `src/observe.rs`, `README.md`
+- **Pattern:** A hint written from memory of what such tools usually offer, and a claim about another program's behaviour taken from one engine and given to its neighbour.
+- **Root cause:** The new status line for a server that refuses the poller told the user to pass `--api-key`, which llm-visuals does not have: the token is kept out of the command line on purpose and only `--api-key-file` exists, so following the hint failed with an argument error. The README said vLLM refuses the poller too, but vLLM checks its key only on `/v1`, `/v2`, `/inference` and `/cohere`, never on `/metrics`. The line said `401` for a `403` as well, and it was redrawn only when "some server refuses" flipped, so a second refusing server, or one that came back after `r` with a new PID and refused again, was never named.
+- **Fix applied:** The hint names `--api-key-file`, and a test parses it with the real argument parser. The refusal carries the status the server sent. The status line is redrawn whenever any slot's refusal changes. The README describes SGLang (`/v1/loads` guarded, `/metrics` open) and vLLM (`/metrics` open) as their sources say, checked at sglang e00754b (`python/sglang/srt/utils/auth.py`) and vllm 02d69c6 (`vllm/entrypoints/serve/middleware/authenticate.py`).
+- **Prevention rule:** A hint that names a flag is tested against the parser that must accept it. A state shown to the user is recomputed when any of its parts changes, not when a summary of them flips.
