@@ -52,6 +52,7 @@ impl StrataRequest {
             prefill_secs: Some(self.prompt_ms / 1000.0),
             ttft_secs: self.prompt_ms / 1000.0,
             itl_sum: self.decode_ms / 1000.0,
+            cached_unknown: false,
         }
     }
 }
