@@ -210,6 +210,25 @@ pub fn kv_pool_bytes(cmdline: &str) -> Option<u64> {
     None
 }
 
+/// The share of the device a server budgets itself at start-up, from
+/// `--gpu-memory-utilization`: the fraction vLLM takes (weights and KV pool
+/// together) when no explicit pool size was declared. `None` when the flag
+/// is absent — its 0.9 default lives in the CLI's parser, not on the
+/// command line, and an undeclared default is not a declared number — or
+/// when the value is not a fraction of (0, 1].
+pub fn gpu_mem_util(cmdline: &str) -> Option<f32> {
+    let mut it = cmdline.split_whitespace().peekable();
+    while let Some(tok) = it.next() {
+        let val = match tok.strip_prefix("--gpu-memory-utilization=") {
+            Some(v) => v,
+            None if tok == "--gpu-memory-utilization" => *it.peek()?,
+            None => continue,
+        };
+        return val.parse::<f32>().ok().filter(|f| *f > 0.0 && *f <= 1.0);
+    }
+    None
+}
+
 /// A size as vLLM's own `human_readable_int` reads it: a lowercase suffix
 /// is decimal (`16g` is 16 × 10⁹ bytes), an uppercase one binary (`16G` is
 /// 16 × 2³⁰), only the decimal ones take a fraction (`1.5g`), and anything
@@ -612,6 +631,39 @@ mod tests {
         );
         assert_eq!(pool("0g"), None);
         assert_eq!(kv_pool_bytes("--kv-cache-memory-bytes"), None);
+    }
+
+    #[test]
+    fn gpu_mem_util_parsed_from_cmdline() {
+        // The usual docker launch: the cache sized by fraction, not bytes.
+        assert_eq!(
+            gpu_mem_util("vllm serve /model --gpu-memory-utilization 0.75 --max-model-len 32768"),
+            Some(0.75)
+        );
+        assert_eq!(
+            gpu_mem_util("vllm serve --gpu-memory-utilization=0.5"),
+            Some(0.5)
+        );
+        assert_eq!(gpu_mem_util("--gpu-memory-utilization 1"), Some(1.0));
+        // Absent is not 0.9: an undeclared default is not a declared number.
+        assert_eq!(
+            gpu_mem_util("vllm serve /model --kv-cache-memory-bytes 16g"),
+            None
+        );
+        assert_eq!(
+            gpu_mem_util("vllm serve /model --gpu-memory-utilization"),
+            None
+        );
+        // Not a fraction of (0, 1] is refused.
+        for refused in ["0", "0.0", "1.5", "-0.5", "abc", "1e3"] {
+            assert_eq!(
+                gpu_mem_util(&format!(
+                    "vllm serve /model --gpu-memory-utilization {refused}"
+                )),
+                None,
+                "{refused}"
+            );
+        }
     }
 
     #[test]
