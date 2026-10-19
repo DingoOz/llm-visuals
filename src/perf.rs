@@ -178,6 +178,114 @@ impl RateWindow {
     }
 }
 
+/// Plausibility guard for one rate channel (decode or prefill).
+///
+/// Engines emit garbage: a slot counter jumps and the window divides a
+/// whole request's tokens by one poll interval, or a self-reported rate is
+/// simply wrong — a 1500 t/s sample from a model that tops out at 75. Left
+/// alone, one such poll latches the session peak and flattens the
+/// sparklines until restart, so samples are vetted before they become
+/// display state. A rate passes when it is physically possible (finite and
+/// below `impossible`) and plausible for this engine: not more than
+/// [`GUARD_RATIO`]× the median of the accepted samples *and* not more than
+/// [`GUARD_MARGIN`] above it. Zeros (idle) always pass: nothing scales to
+/// a dropped rate. A rejected sample holds the last accepted reading; if
+/// rejections run for [`GUARD_REBASE`] positive polls in a row the higher
+/// level is the engine's new normal (faster model, new speculative depth),
+/// and the reference re-anchors onto it.
+#[derive(Debug, Clone)]
+struct RateGuard {
+    /// Accepted positive samples: the reference the next one is checked against.
+    refs: VecDeque<f32>,
+    /// Reading the display keeps while samples are rejected.
+    last: f32,
+    /// Consecutive plausible-but-outlier rejections awaiting a re-anchor.
+    streak: u32,
+    /// Above this no engine is producing it: the leftovers of dividing a
+    /// token count by a broken (near-zero) duration.
+    impossible: f32,
+}
+
+impl RateGuard {
+    fn new(impossible: f32) -> Self {
+        Self {
+            refs: VecDeque::new(),
+            last: 0.0,
+            streak: 0,
+            impossible,
+        }
+    }
+
+    /// The value to display: the sample when it passes, else the last
+    /// accepted reading.
+    fn filter(&mut self, v: f32) -> f32 {
+        // Physically impossible samples are cut outright; they never join
+        // the rejection streak, so a continuously broken rate is never
+        // mistaken for a new normal.
+        if v.is_finite() && v <= self.impossible && self.accept(v) {
+            self.last = v;
+        }
+        self.last
+    }
+
+    fn accept(&mut self, v: f32) -> bool {
+        if self.refs.is_empty() || v <= self.ceiling() {
+            // Only a positive rate proves the level moved on; an idle poll
+            // between requests must not erase the streak, or an engine
+            // that reports rates only at completion could never re-anchor.
+            if v > 0.0 {
+                self.streak = 0;
+            }
+            self.remember(v);
+            return true;
+        }
+        self.streak += 1;
+        if self.streak >= GUARD_REBASE {
+            self.refs.clear();
+            self.streak = 0;
+            self.remember(v);
+            return true;
+        }
+        false
+    }
+
+    fn ceiling(&self) -> f32 {
+        let med = median(&self.refs);
+        (med * GUARD_RATIO).max(med + GUARD_MARGIN)
+    }
+
+    fn remember(&mut self, v: f32) {
+        if v > 0.0 {
+            if self.refs.len() >= GUARD_REFS {
+                self.refs.pop_front();
+            }
+            self.refs.push_back(v);
+        }
+    }
+}
+
+/// Reference window: accepted samples a new one is compared against
+/// (~one minute of decode polls at the default rate).
+const GUARD_REFS: usize = 48;
+/// A sample above this multiple of the reference median is an outlier,
+/// generously loose: batch changes and speculative bursts stay far below.
+const GUARD_RATIO: f32 = 4.0;
+/// …and only when also this many tokens/sec above it, so a fast move on a
+/// slow model (5 → 15 t/s) is never held back.
+const GUARD_MARGIN: f32 = 20.0;
+/// Outlier rejections in a row after which the level is taken as real.
+const GUARD_REBASE: u32 = 6;
+/// Absurd-sample ceilings: beyond anything hardware produces, so they
+/// only ever catch division artifacts.
+const DECODE_IMPOSSIBLE_TPS: f32 = 1_000_000.0;
+const PREFILL_IMPOSSIBLE_TPS: f32 = 10_000_000.0;
+
+fn median(vals: &VecDeque<f32>) -> f32 {
+    let mut v: Vec<f32> = vals.iter().copied().collect();
+    v.sort_unstable_by(f32::total_cmp);
+    v[v.len() / 2]
+}
+
 #[derive(Debug)]
 pub struct PerfTracker {
     pub started: Instant,
@@ -185,6 +293,8 @@ pub struct PerfTracker {
     last_gpu: Option<Instant>,
     decode_win: RateWindow,
     prefill_win: RateWindow,
+    decode_guard: RateGuard,
+    prefill_guard: RateGuard,
     pub phase: Phase,
     /// Instantaneous (last-interval) rates.
     pub decode_tps: f32,
@@ -558,6 +668,8 @@ impl PerfTracker {
             last_gpu: None,
             decode_win: RateWindow::new(Duration::from_millis(1000)),
             prefill_win: RateWindow::new(Duration::from_millis(600)),
+            decode_guard: RateGuard::new(DECODE_IMPOSSIBLE_TPS),
+            prefill_guard: RateGuard::new(PREFILL_IMPOSSIBLE_TPS),
             phase: Phase::Idle,
             decode_tps: 0.0,
             prefill_tps: 0.0,
@@ -750,25 +862,33 @@ impl PerfTracker {
             self.decode_win.clear();
             self.prefill_win.clear();
         }
-        self.decode_tps = self.decode_win.rate(now);
-        self.prefill_tps = self.prefill_win.rate(now);
+        let mut decode_tps = self.decode_win.rate(now);
+        let mut prefill_tps = self.prefill_win.rate(now);
         // vLLM reports token deltas only at completion, so the windowed
         // prefill rate would divide the whole prompt by one poll
         // interval. When a request closes in this window, use its
         // measured TTFT as the denominator instead (tokens / TTFT).
         if !s.processing && s.ttft_secs > 0.0 && d_pre > 0 {
-            self.prefill_tps = self.prefill_tps.max(d_pre as f32 / s.ttft_secs as f32);
+            prefill_tps = prefill_tps.max(d_pre as f32 / s.ttft_secs as f32);
         }
         if let Some(rate) = s.prefill_tps {
-            self.prefill_tps = rate;
+            prefill_tps = rate;
         }
         // Same for decode: vLLM's generation counter moves only on the
         // completion poll — which is exactly when the window above was
         // cleared — so use the measured ITL sum (one sample per decode
         // step, i.e. decoded - 1 of them).
         if !s.processing && s.itl_sum > 0.0 && d_dec > 1 {
-            self.decode_tps = self.decode_tps.max((d_dec - 1) as f32 / s.itl_sum as f32);
+            decode_tps = decode_tps.max((d_dec - 1) as f32 / s.itl_sum as f32);
         }
+        // Every source above can carry an impossible sample — a slot
+        // counter that jumped, a TTFT/ITL sum that read ~0, a self-
+        // reported rate that is simply wrong. Cut those here, before the
+        // numerals, the session peaks, the sparklines and the meters
+        // consume them: one bad poll must not rescale the display until
+        // restart. A rejected sample holds the last accepted reading.
+        self.decode_tps = self.decode_guard.filter(decode_tps);
+        self.prefill_tps = self.prefill_guard.filter(prefill_tps);
         let ema = |prev: f32, x: f32, up: f32, down: f32| -> f32 {
             let a = if x > prev { up } else { down };
             prev + (x - prev) * a
@@ -1175,6 +1295,113 @@ mod tests {
             w.push(ms(i * 200), ms(i * 200 + 200), 0);
         }
         assert_eq!(w.rate(ms(2400)), 0.0);
+    }
+
+    /// The incident this guard exists for: a 75 t/s engine emits one
+    /// impossible sample, and the panel must not scale to it — ever.
+    #[test]
+    fn one_glitch_poll_never_latches_the_scale() {
+        let mut p = PerfTracker::new();
+        let t0 = Instant::now();
+        let step = Duration::from_millis(500);
+        p.observe(&slot(1, false, 0, 0, 0), t0);
+        // One request, prefill done, decoding at ~75 t/s: 37–38 tokens
+        // per 500 ms poll.
+        p.observe(&slot(2, true, 400, 400, 0), t0 + step);
+        let mut decoded = 0usize;
+        for i in 0..12u32 {
+            decoded += 37 + (i % 2) as usize;
+            p.observe(&slot(2, true, 400, 400, decoded), t0 + step * (2 + i));
+        }
+        assert!(p.peak_decode_tps < 90.0, "{}", p.peak_decode_tps);
+        // The glitch: the engine's counter jumps by 3000 in one poll.
+        p.observe(&slot(2, true, 400, 400, decoded + 3000), t0 + step * 14);
+        assert!(
+            p.decode_tps < 90.0,
+            "holds the last accepted reading: {}",
+            p.decode_tps
+        );
+        assert!(
+            p.peak_decode_tps < 90.0,
+            "peak untouched: {}",
+            p.peak_decode_tps
+        );
+        assert!(p.bw.decode.max_seen < 90.0, "meter scale intact");
+        assert!(
+            p.decode_hist.iter().all(|v| *v < 100.0),
+            "sparkline sees no spike"
+        );
+        // Normal traffic continues from the jumped counter. The glitch
+        // also poisons the rate window for its own span; both cut.
+        let mut after = decoded + 3000;
+        for i in 0..4u32 {
+            after += 37;
+            p.observe(&slot(2, true, 400, 400, after), t0 + step * (15 + i));
+        }
+        assert!(p.peak_decode_tps < 90.0, "{}", p.peak_decode_tps);
+        assert!(
+            (p.decode_tps - 74.0).abs() < 2.0,
+            "back to real traffic: {}",
+            p.decode_tps
+        );
+    }
+
+    /// The guard must not hide a real change of level: a faster model or
+    /// new speculative depth is held for a few polls, then becomes the
+    /// reference itself.
+    #[test]
+    fn sustained_faster_engine_reanchors() {
+        let mut p = PerfTracker::new();
+        let t0 = Instant::now();
+        let step = Duration::from_millis(500);
+        p.observe(&slot(1, false, 0, 0, 0), t0);
+        p.observe(&slot(2, true, 400, 400, 0), t0 + step);
+        let mut decoded = 0usize;
+        for i in 0..8u32 {
+            decoded += 38;
+            p.observe(&slot(2, true, 400, 400, decoded), t0 + step * (2 + i));
+        }
+        // Same engine, now really ~500 t/s: 250 tokens per poll.
+        for i in 0..8u32 {
+            decoded += 250;
+            p.observe(&slot(2, true, 400, 400, decoded), t0 + step * (10 + i));
+        }
+        assert!(
+            (p.decode_tps - 500.0).abs() < 3.0,
+            "re-anchored: {}",
+            p.decode_tps
+        );
+        assert!(p.peak_decode_tps > 400.0, "{}", p.peak_decode_tps);
+    }
+
+    /// A self-reported rate beyond what hardware produces, or not a number
+    /// at all, is cut even before a reference median exists.
+    #[test]
+    fn absurd_engine_rates_are_cut() {
+        let mut p = PerfTracker::new();
+        let t0 = Instant::now();
+        let step = Duration::from_millis(500);
+        let pre = |tok: usize, rate: f32| LiveStats {
+            ctx_max: 4096,
+            id_task: 3,
+            processing: true,
+            prompt_tokens: 8000,
+            prompt_processed: tok,
+            prefill_tps: Some(rate),
+            ..Default::default()
+        };
+        p.observe(&slot(1, false, 0, 0, 0), t0);
+        p.observe(&pre(1600, 1.0e9), t0 + step);
+        assert!(p.prefill_tps < 1.0, "absurd rate cut: {}", p.prefill_tps);
+        assert!(p.peak_prefill_tps < 1.0);
+        p.observe(&pre(3200, 6400.0), t0 + step * 2);
+        assert!((p.prefill_tps - 6400.0).abs() < 1.0);
+        p.observe(&pre(4800, f32::NAN), t0 + step * 3);
+        assert!(
+            (p.prefill_tps - 6400.0).abs() < 1.0,
+            "NaN holds the last rate"
+        );
+        assert!(p.peak_prefill_tps < 7000.0, "{}", p.peak_prefill_tps);
     }
 
     #[test]
