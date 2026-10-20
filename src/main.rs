@@ -1235,18 +1235,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// their target's size, since an HF cache snapshot is all symlinks into
 /// `blobs/`; unreadable entries are skipped. Some checkpoints keep the
 /// shards one level down — the b12x FP4 repos ship them under `tensors/`
-/// — so one subdirectory level is scanned too.
+/// — so when the directory itself holds none, one subdirectory level is
+/// scanned instead. Only then: a repo with shards at the root may also
+/// carry another copy or quantisation in a subfolder, which is not what
+/// the server loaded.
 fn dir_model_bytes(dir: &std::path::Path) -> Option<u64> {
-    let mut acc = (0u64, false);
-    scan_model_dir(dir, 1, &mut acc);
-    acc.1.then_some(acc.0)
+    scan_model_dir(dir, 1)
 }
 
-fn scan_model_dir(dir: &std::path::Path, depth: u8, acc: &mut (u64, bool)) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
+fn scan_model_dir(dir: &std::path::Path, depth: u8) -> Option<u64> {
+    let mut total = 0u64;
+    let mut any = false;
+    let mut subdirs = Vec::new();
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let is_model = name.ends_with(".safetensors")
             || name.ends_with(".gguf")
@@ -1255,8 +1256,8 @@ fn scan_model_dir(dir: &std::path::Path, depth: u8, acc: &mut (u64, bool)) {
             // DirEntry::metadata does not follow symlinks on Unix.
             if let Ok(meta) = std::fs::metadata(entry.path()) {
                 if meta.is_file() {
-                    acc.0 += meta.len();
-                    acc.1 = true;
+                    total += meta.len();
+                    any = true;
                     continue;
                 }
             }
@@ -1265,9 +1266,16 @@ fn scan_model_dir(dir: &std::path::Path, depth: u8, acc: &mut (u64, bool)) {
         // directories are themselves links cannot lead the walk out of
         // the model dir, and the depth budget keeps it finite either way.
         if depth > 0 && entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            scan_model_dir(&entry.path(), depth - 1, acc);
+            subdirs.push(entry.path());
         }
     }
+    if any {
+        return Some(total);
+    }
+    subdirs
+        .iter()
+        .filter_map(|d| scan_model_dir(d, depth - 1))
+        .fold(None, |acc, b| Some(acc.unwrap_or(0) + b))
 }
 
 /// Weight + KV + CUDA-graph GiB as reported by the servers themselves,
@@ -1728,6 +1736,10 @@ mod tests {
         std::fs::create_dir_all(nested.join("extra/deeper")).unwrap();
         std::fs::write(nested.join("extra/deeper/hidden.safetensors"), vec![0u8; 7]).unwrap();
         assert_eq!(dir_model_bytes(&nested), Some(1000));
+        // Shards at the root keep a subfolder's copy out of the sum: it is
+        // another variant of the checkpoint, not what was loaded.
+        std::fs::write(nested.join("model.safetensors"), vec![0u8; 300]).unwrap();
+        assert_eq!(dir_model_bytes(&nested), Some(300));
 
         // HF cache layout: snapshot entries are symlinks into blobs/.
         #[cfg(unix)]
