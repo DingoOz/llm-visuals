@@ -1022,7 +1022,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             gpu::apply_unified_memory(
                 &mut latest_gpu,
                 sys_ram_total_mb.unwrap_or(0),
-                unified_occupancy_gb(&slots),
+                unified_occupancy_gb(&slots, sys_ram_total_mb.unwrap_or(0)),
             );
             // The cards are shared, so every model sees the same samples.
             for slot in &mut slots {
@@ -1233,27 +1233,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Total bytes of the model weight files inside a served directory
 /// (`*.safetensors`, `*.gguf`, `pytorch_model*.bin`). Symlinks count at
 /// their target's size, since an HF cache snapshot is all symlinks into
-/// `blobs/`; unreadable entries are skipped.
+/// `blobs/`; unreadable entries are skipped. Some checkpoints keep the
+/// shards one level down — the b12x FP4 repos ship them under `tensors/`
+/// — so when the directory itself holds none, one subdirectory level is
+/// scanned instead. Only then: a repo with shards at the root may also
+/// carry another copy or quantisation in a subfolder, which is not what
+/// the server loaded.
 fn dir_model_bytes(dir: &std::path::Path) -> Option<u64> {
+    scan_model_dir(dir, 1)
+}
+
+fn scan_model_dir(dir: &std::path::Path, depth: u8) -> Option<u64> {
     let mut total = 0u64;
     let mut any = false;
+    let mut subdirs = Vec::new();
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let is_model = name.ends_with(".safetensors")
             || name.ends_with(".gguf")
             || (name.ends_with(".bin") && name.starts_with("pytorch_model"));
-        if !is_model {
-            continue;
-        }
-        // DirEntry::metadata does not follow symlinks on Unix.
-        if let Ok(meta) = std::fs::metadata(entry.path()) {
-            if meta.is_file() {
-                total += meta.len();
-                any = true;
+        if is_model {
+            // DirEntry::metadata does not follow symlinks on Unix.
+            if let Ok(meta) = std::fs::metadata(entry.path()) {
+                if meta.is_file() {
+                    total += meta.len();
+                    any = true;
+                    continue;
+                }
             }
         }
+        // file_type() does not resolve symlinks, so a snapshot whose
+        // directories are themselves links cannot lead the walk out of
+        // the model dir, and the depth budget keeps it finite either way.
+        if depth > 0 && entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            subdirs.push(entry.path());
+        }
     }
-    any.then_some(total)
+    if any {
+        return Some(total);
+    }
+    subdirs
+        .iter()
+        .filter_map(|d| scan_model_dir(d, depth - 1))
+        .fold(None, |acc, b| Some(acc.unwrap_or(0) + b))
 }
 
 /// Weight + KV + CUDA-graph GiB as reported by the servers themselves,
@@ -1274,9 +1296,15 @@ fn server_reported_gb<'a>(lives: impl Iterator<Item = &'a LiveStats>) -> Option<
 /// `--kv-cache-memory-bytes` pool it was launched with. vLLM allocates that
 /// pool in one piece at start-up, so all of it is occupied however little of
 /// it holds tokens; `kv_cache_usage_perc` is the share that does, and the
-/// bar lights that much of its KV segment. The flag is per GPU, and a
-/// unified part has one. `None` when neither number is known.
-fn vllm_declared_gb(model: &DetectedModel) -> Option<f32> {
+/// bar lights that much of its KV segment. The flags are per GPU, and a
+/// unified part has one.
+///
+/// With no explicit pool — the usual docker launch, sizing the cache by
+/// `--gpu-memory-utilization` instead — that fraction of the pool the server
+/// budgets itself for, weights included, stands in for weight + pool. The
+/// weights stay the floor: a smaller budget than the files on disk is not
+/// shown. `None` when neither number is known.
+fn vllm_declared_gb(model: &DetectedModel, system_ram_mb: u64) -> Option<f32> {
     if model.engine != "vllm" {
         return None;
     }
@@ -1285,19 +1313,26 @@ fn vllm_declared_gb(model: &DetectedModel) -> Option<f32> {
         .as_deref()
         .filter(|p| p.is_dir())
         .and_then(dir_model_bytes);
-    let pool = vllm::kv_pool_bytes(&model.cmdline);
-    (weights.is_some() || pool.is_some())
-        .then(|| (weights.unwrap_or(0) + pool.unwrap_or(0)) as f32 / 1024f32.powi(3))
+    let gib = |b: u64| b as f32 / 1024f32.powi(3);
+    match (weights, vllm::kv_pool_bytes(&model.cmdline)) {
+        (Some(w), Some(p)) => Some(gib(w) + gib(p)),
+        (Some(w), None) => vllm::gpu_mem_util(&model.cmdline)
+            .filter(|_| system_ram_mb > 0)
+            .map(|u| gib(w).max(u * system_ram_mb as f32 / 1024.0))
+            .or(Some(gib(w))),
+        (None, Some(p)) => Some(gib(p)),
+        (None, None) => None,
+    }
 }
 
 /// Occupancy for the unified-memory bar, summed over the models: what each
 /// server reports through `/v1/loads`, or failing that what a vLLM server
 /// declares. A model with neither adds nothing, and `None` when none has
 /// either: a llama.cpp-only box keeps showing zeros.
-fn unified_occupancy_gb(slots: &[ModelSlot]) -> Option<f32> {
+fn unified_occupancy_gb(slots: &[ModelSlot], system_ram_mb: u64) -> Option<f32> {
     slots.iter().fold(None, |acc, s| {
         server_reported_gb(std::iter::once(&s.live))
-            .or_else(|| vllm_declared_gb(&s.model))
+            .or_else(|| vllm_declared_gb(&s.model, system_ram_mb))
             .map(|part| acc.unwrap_or(0.0) + part)
             .or(acc)
     })
@@ -1509,14 +1544,15 @@ mod tests {
         let declared = "vllm serve /model --kv-cache-memory-bytes 16G";
         let served = || Some(dir.clone());
         let shards = 0.00390625; // 4 MiB
+        const RAM: u64 = 124_518; // MiB, the GB10's whole 121.6 GiB pool
 
         // The shards and the whole declared pool: vLLM allocates it at
         // start-up, so how much of it holds tokens does not change the sum.
         let a = slot("vllm", served(), declared, Some(0.25));
-        let gb = unified_occupancy_gb(std::slice::from_ref(&a)).unwrap();
+        let gb = unified_occupancy_gb(std::slice::from_ref(&a), RAM).unwrap();
         assert!((gb - (shards + 16.0)).abs() < 1e-4);
         let idle = slot("vllm", served(), declared, None);
-        let gb = unified_occupancy_gb(std::slice::from_ref(&idle)).unwrap();
+        let gb = unified_occupancy_gb(std::slice::from_ref(&idle), RAM).unwrap();
         assert!((gb - (shards + 16.0)).abs() < 1e-4);
 
         // Drawn on a GB10 row, that leaves the bar's KV segment as exactly
@@ -1528,7 +1564,7 @@ mod tests {
         gpu::apply_unified_memory(
             &mut gpus,
             124_518, // 121.6 GiB of system RAM
-            unified_occupancy_gb(std::slice::from_ref(&a)),
+            unified_occupancy_gb(std::slice::from_ref(&a), RAM),
         );
         assert!(gpus[0].unified);
         let sample = fade_sample_from_live(Some(&a.model), &gpus, &a.live, fade::KV_BUCKETS);
@@ -1538,7 +1574,42 @@ mod tests {
 
         // No declared pool: weight only, no invented KV.
         let no_pool = slot("vllm", served(), "vllm serve /model", Some(0.25));
-        let gb = unified_occupancy_gb(std::slice::from_ref(&no_pool)).unwrap();
+        let gb = unified_occupancy_gb(std::slice::from_ref(&no_pool), RAM).unwrap();
+        assert!((gb - shards).abs() < 1e-4);
+
+        // The usual docker launch: no byte pool, the cache sized by
+        // fraction. The server budgeted 0.75 of the pool for itself at
+        // start-up — weights included — so that is the declared occupancy.
+        let by_frac = slot(
+            "vllm",
+            served(),
+            "vllm serve nvidia/X --gpu-memory-utilization 0.75",
+            Some(0.0),
+        );
+        let gb = unified_occupancy_gb(std::slice::from_ref(&by_frac), RAM).unwrap();
+        assert!((gb - 0.75 * RAM as f32 / 1024.0).abs() < 1e-3);
+
+        // The bytes flag wins over the fraction, and without a known RAM
+        // total the fraction is a number for nothing: weight only.
+        let both = slot(
+            "vllm",
+            served(),
+            "vllm serve /model --gpu-memory-utilization 0.75 --kv-cache-memory-bytes 16G",
+            None,
+        );
+        let gb = unified_occupancy_gb(std::slice::from_ref(&both), RAM).unwrap();
+        assert!((gb - (shards + 16.0)).abs() < 1e-4);
+        let gb = unified_occupancy_gb(std::slice::from_ref(&by_frac), 0).unwrap();
+        assert!((gb - shards).abs() < 1e-4);
+        // A budget below the files on disk is not shown: the weights stay
+        // the floor.
+        let stingy = slot(
+            "vllm",
+            served(),
+            "vllm serve /model --gpu-memory-utilization 0.000001",
+            None,
+        );
+        let gb = unified_occupancy_gb(std::slice::from_ref(&stingy), RAM).unwrap();
         assert!((gb - shards).abs() < 1e-4);
 
         // Unresolvable served dir and no pool: zeros, not a stand-in.
@@ -1548,11 +1619,19 @@ mod tests {
             "vllm serve /model",
             Some(0.25),
         );
-        assert!(unified_occupancy_gb(std::slice::from_ref(&blind)).is_none());
+        assert!(unified_occupancy_gb(std::slice::from_ref(&blind), RAM).is_none());
+        // The fraction alone, with no weights to stand it up, is not shown.
+        let blind_frac = slot(
+            "vllm",
+            Some(PathBuf::from("/nonexistent-llm-visuals")),
+            "vllm serve nvidia/X --gpu-memory-utilization 0.75",
+            None,
+        );
+        assert!(unified_occupancy_gb(std::slice::from_ref(&blind_frac), RAM).is_none());
 
         // The flag is vLLM's: another engine's command line is not read for it.
         let other = slot("llama.cpp", served(), declared, None);
-        assert!(unified_occupancy_gb(std::slice::from_ref(&other)).is_none());
+        assert!(unified_occupancy_gb(std::slice::from_ref(&other), RAM).is_none());
 
         // Each model counts by its own source: a server that reports
         // /v1/loads beside a vLLM one, and the bar holds both.
@@ -1560,9 +1639,9 @@ mod tests {
         sglang.live.weight_gb = Some(82.172);
         sglang.live.kv_cache_gb = Some(10.457);
         sglang.live.graph_gb = Some(0.234);
-        let gb = unified_occupancy_gb(std::slice::from_ref(&sglang)).unwrap();
+        let gb = unified_occupancy_gb(std::slice::from_ref(&sglang), RAM).unwrap();
         assert!((gb - 92.863).abs() < 1e-3);
-        let gb = unified_occupancy_gb(&[a, sglang, blind]).unwrap();
+        let gb = unified_occupancy_gb(&[a, sglang, blind], RAM).unwrap();
         assert!((gb - (92.863 + shards + 16.0)).abs() < 1e-3);
 
         std::fs::remove_dir_all(&root).ok();
@@ -1641,6 +1720,27 @@ mod tests {
         std::fs::write(dir.join("notes.bin"), b"x").unwrap();
         assert_eq!(dir_model_bytes(&dir), Some(5500));
 
+        // b12x layout: the shards live one level down in `tensors/`, with
+        // only the index at the snapshot root.
+        let nested = root.join("nested");
+        std::fs::create_dir_all(nested.join("tensors")).unwrap();
+        std::fs::write(
+            nested.join("tensors/model-00001-of-00001.safetensors"),
+            vec![0u8; 1000],
+        )
+        .unwrap();
+        std::fs::write(nested.join("model.safetensors.index.json"), "{}").unwrap();
+        assert_eq!(dir_model_bytes(&nested), Some(1000));
+        // Two levels down stays out of reach: the scan is one deep, and a
+        // directory beyond it is not its excuse to keep going.
+        std::fs::create_dir_all(nested.join("extra/deeper")).unwrap();
+        std::fs::write(nested.join("extra/deeper/hidden.safetensors"), vec![0u8; 7]).unwrap();
+        assert_eq!(dir_model_bytes(&nested), Some(1000));
+        // Shards at the root keep a subfolder's copy out of the sum: it is
+        // another variant of the checkpoint, not what was loaded.
+        std::fs::write(nested.join("model.safetensors"), vec![0u8; 300]).unwrap();
+        assert_eq!(dir_model_bytes(&nested), Some(300));
+
         // HF cache layout: snapshot entries are symlinks into blobs/.
         #[cfg(unix)]
         {
@@ -1652,6 +1752,16 @@ mod tests {
             std::os::unix::fs::symlink(blobs.join("abc123"), snap.join("model.safetensors"))
                 .unwrap();
             assert_eq!(dir_model_bytes(&snap), Some(4096));
+
+            // A symlinked directory is never followed: the walk stays
+            // inside the model dir, whatever it links out to.
+            let outside = root.join("outside");
+            std::fs::create_dir_all(&outside).unwrap();
+            std::fs::write(outside.join("model-1.safetensors"), vec![0u8; 999]).unwrap();
+            let linked = root.join("linked");
+            std::fs::create_dir_all(&linked).unwrap();
+            std::os::unix::fs::symlink(&outside, linked.join("shards")).unwrap();
+            assert_eq!(dir_model_bytes(&linked), None);
         }
 
         // Empty dir (no weight files) → None so the mem_used fallback fires.
