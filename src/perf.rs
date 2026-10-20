@@ -28,6 +28,9 @@ pub struct RequestRecord {
     pub ended: Option<Instant>,
     pub prompt_tokens: usize,
     pub cached_tokens: usize,
+    /// The engine could not attribute cached tokens to this request
+    /// (vLLM window shared under concurrency): the row shows `—`.
+    pub cached_unknown: bool,
     pub decoded: usize,
     /// Prompt tokens actually pushed through prefill (prompt minus cache hits).
     pub prefill_tokens: usize,
@@ -49,6 +52,7 @@ impl RequestRecord {
             ended: None,
             prompt_tokens: s.prompt_tokens,
             cached_tokens: s.cache_tokens,
+            cached_unknown: s.cache_unknown,
             decoded: s.decoded,
             prefill_tokens: 0,
             prefill_secs: 0.0,
@@ -660,6 +664,7 @@ impl PerfTracker {
                     if done.prefill_tokens == 0 && done.decoded == 0 {
                         done.prompt_tokens = close.prompt;
                         done.cached_tokens = close.cached;
+                        done.cached_unknown = close.cached_unknown;
                         done.prefill_tokens = close.prompt.saturating_sub(close.cached);
                         done.decoded = close.gen;
                         if close.ttft_secs > 0.0 {
@@ -686,6 +691,7 @@ impl PerfTracker {
                         self.session_decoded += close.gen.saturating_sub(done.decoded) as u64;
                         done.prompt_tokens = close.prompt;
                         done.cached_tokens = close.cached;
+                        done.cached_unknown = close.cached_unknown;
                         done.decoded = done.decoded.max(close.gen);
                         done.set_prefill_timing(tokens, secs);
                         if close.ttft_secs > 0.0 {
@@ -795,6 +801,7 @@ impl PerfTracker {
             // the first sample, so always take the latest value.
             cur.prompt_tokens = s.prompt_tokens;
             cur.cached_tokens = s.cache_tokens;
+            cur.cached_unknown = s.cache_unknown;
             cur.decoded = cur.decoded.max(s.decoded);
             if d_pre > 0 {
                 cur.prefill_tokens += d_pre;
@@ -1084,6 +1091,7 @@ mod tests {
                     prefill_secs: None,
                     ttft_secs: 2.0,
                     itl_sum: 0.05,
+                    cached_unknown: false,
                 }),
             ),
             t0 + step + Duration::from_secs(17),
@@ -1148,6 +1156,7 @@ mod tests {
                     prefill_secs: None,
                     ttft_secs: 0.0,
                     itl_sum: 0.0,
+                    cached_unknown: false,
                 }),
             ),
             t0 + step * 2,

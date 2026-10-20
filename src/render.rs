@@ -1092,7 +1092,14 @@ impl Renderer {
         );
         // Fact items, most useful first; trailing ones are shed when space is short.
         let mut items: Vec<Span> = Vec::new();
-        if d.live.cache_unknown {
+        if let Some(frac) = d.live.cache_hit_override {
+            // Engine-level prefix-cache ratio: exact even when the
+            // window held several requests (vLLM).
+            items.push(Span::styled(
+                format!("cache hit {:.0}%", frac * 100.0),
+                Style::default().fg(pal::c(pal::VIOLET)),
+            ));
+        } else if d.live.cache_unknown {
             items.push(Span::styled(
                 "cache hit —",
                 Style::default().fg(pal::c(pal::VIOLET)),
@@ -2186,8 +2193,13 @@ impl Renderer {
                 format!("{:>9}", fmt_int(r.prompt_tokens)),
                 base,
             ));
+            let cached_cell = if r.cached_unknown {
+                "—".to_string()
+            } else {
+                fmt_int(r.cached_tokens)
+            };
             spans.push(Span::styled(
-                format!("{:>9}", fmt_int(r.cached_tokens)),
+                format!("{:>9}", cached_cell),
                 Style::default().fg(pal::c(pal::VIOLET)),
             ));
             spans.push(Span::styled(

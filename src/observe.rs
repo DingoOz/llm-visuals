@@ -107,15 +107,16 @@ pub struct LiveStats {
 
     /// Server-measured time-to-first-token (seconds) for the request
     /// whose counters closed in this window. vLLM only: its token and
-    /// latency counters all move at completion, so this stays 0.0 while
-    /// a request is in flight and carries the request's real prefill
-    /// time on the poll that closed it. Always 0.0 on llama.cpp.
+    /// latency counters move per scheduler iteration, so with one
+    /// request in flight the window is its lifetime; with several the
+    /// window blends them. Always 0.0 on llama.cpp.
     pub ttft_secs: f64,
 
     /// Total inter-token time of the requests closed in this window
     /// (vLLM): vLLM samples one ITL per decode step, so this is each
     /// request's whole decode span, not a mean gap — the decode rate is
-    /// `(decoded - 1) / itl_sum`. Always 0.0 on llama.cpp.
+    /// `(decoded - 1) / itl_sum`. Blended across requests when the
+    /// window held several. Always 0.0 on llama.cpp.
     pub itl_sum: f64,
 
     /// The finishing request's full counters (vLLM or Strata). Set on the poll
@@ -126,8 +127,15 @@ pub struct LiveStats {
     pub closing: Option<ClosingRequest>,
 
     /// SGLang without `--enable-metrics` does not report prefix-cache
-    /// hits; the context panel shows "—" instead of 0%.
+    /// hits, and a vLLM window that held several requests cannot say
+    /// which request its cached tokens belong to: the context panel
+    /// shows "—" instead of a wrong number.
     pub cache_unknown: bool,
+    /// Engine-level cache-hit fraction for the current window, from
+    /// counters that stay exact under concurrency (vLLM's
+    /// `prefix_cache_queries/hits` deltas). Where present it replaces
+    /// the per-request `cache_hit_frac` in the header.
+    pub cache_hit_override: Option<f32>,
     /// Server-reported weight occupancy in GiB (`/v1/loads` memory.weight_gb).
     pub weight_gb: Option<f32>,
     /// Server-reported KV-cache occupancy in GiB (`memory.kv_cache_gb`).
@@ -204,6 +212,9 @@ pub struct ClosingRequest {
     pub ttft_secs: f64,
     /// Sum of per-request inter-token latencies (see LiveStats).
     pub itl_sum: f64,
+    /// The window blended several requests (vLLM under concurrency):
+    /// `cached` belongs to no single request and the row shows `—`.
+    pub cached_unknown: bool,
 }
 
 impl LiveStats {
@@ -459,6 +470,7 @@ pub fn parse_slots(body: &str) -> Option<LiveStats> {
         itl_sum: 0.0,
         closing: None,
         cache_unknown: false,
+        cache_hit_override: None,
         weight_gb: None,
         kv_cache_gb: None,
         graph_gb: None,
