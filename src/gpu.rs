@@ -2136,8 +2136,10 @@ mod tests {
 
         // A server declaring its own occupancy does not overwrite the
         // driver-measured pool: the heaps already count every process.
-        apply_unified_memory(&mut [stats.clone()], 15_195, Some(12.1));
-        assert_eq!(stats.mem_used_mb, 14_704);
+        let mut gpus = [stats];
+        apply_unified_memory(&mut gpus, 15_195, Some(12.1));
+        assert_eq!(gpus[0].mem_used_mb, 14_704);
+        assert_eq!(gpus[0].mem_total_mb, 15_707);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
