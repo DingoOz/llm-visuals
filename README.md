@@ -300,9 +300,11 @@ whole request's tokens, or a self-reported rate is simply wrong — 1500 tok/s
 from a model that tops out at 75. Untreated, that single poll latches the
 session peak and squashes the sparklines into a flat line until restart. A
 rate is now shown only when it is physically possible (finite, under a
-ceiling no hardware reaches) and plausible for that server: above both 4× the
-median of the recently accepted samples and that median + 20 tok/s, it is
-glitch, and the panel holds the last real reading. A genuine change of level
+ceiling no hardware reaches) and, for decode, plausible for that server: above
+both 4× the median of the recently accepted samples and that median + 20
+tok/s, it is glitch, and the panel holds the last real reading. Prefill gets
+only the ceiling, since a cold prompt after cached follow-ups really is that
+much faster. A genuine change of level
 — faster model, deeper speculation — is held for a few polls at most: six
 rejected in a row (≈3 s at the default poll rate) re-anchor the reference,
 and the new speed is shown as fact.
@@ -511,7 +513,7 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | decode tok/s | llama.cpp: delta of `n_decoded` from `GET /slots`. When that field is absent, delta of `llamacpp:tokens_predicted_total` from `GET /metrics`, anchored at the start of the request. vLLM: `/metrics` generation counter. SGLang: `decode_moments[5]` from `GET /v1/loads`. Strata: `live.generated` from `GET /metrics`. 1 s sliding window. Polls go to the server's `--host` (loopback when it bound `0.0.0.0`) |
 | prefill tok/s | llama.cpp: `n_prompt_tokens_processed`. vLLM: prompt-token counter. SGLang: `total_prefill_uncached_tokens`, or `sglang:realtime_tokens_total{mode="prefill_compute"}` with `--enable-metrics`. Strata: engine-measured `live.prefill_tok_s_mean`, then uncached tokens / `prompt_ms` at completion, from JSON `GET /metrics` |
 | time to first token | slot turning busy → first decoded token, quantised to the poll interval. Strata: the finished request's `prompt_ms`, the server's time reading the new prompt tokens (time spent queued is not in it) |
-| impossible tok/s samples | a displayed rate is finite, under 10⁶ (decode) / 10⁷ (prefill) tok/s, and not above both 4× the median of the recently accepted samples of that server and that median + 20 tok/s; glitch polls are cut and the display holds the last real reading, six rejections in a row re-anchor to a genuinely faster engine |
+| impossible tok/s samples | a displayed rate is finite, under 10⁶ (decode) / 10⁷ (prefill) tok/s, and (decode only) not above both 4× the median of the recently accepted samples of that server and that median + 20 tok/s; glitch polls are cut and the display holds the last real reading, six rejections in a row re-anchor to a genuinely faster engine |
 | tok/J | decode tok/s ÷ summed GPU power draw |
 | cache hit | llama.cpp: `n_prompt_tokens_cache / n_prompt_tokens`. SGLang without `--enable-metrics` is unknown (shown as "—"). Strata: the finished request's `reused`, unknown ("—") while it runs |
 | request log | one record per `id_task`; averages from accumulated deltas |
@@ -828,8 +830,8 @@ need the file.
 may be using a different slot; the dashboard follows the busy slot when there
 is one. Check `GET /slots` on the server.
 
-**The rate holds its last value for a second while the server is clearly
-faster or slower.** That is the glitch guard: a rate more than 4× (and 20
+**The decode rate holds its last value for a second while the server is clearly
+faster.** That is the glitch guard: a rate more than 4× (and 20
 tok/s above) the recent median of the same server is not shown until it has
 repeated for six polls in a row, because single-poll spikes of that size are
 engine bugs, not speed — and one accepted spike rescales the whole
