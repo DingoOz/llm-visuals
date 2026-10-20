@@ -294,6 +294,21 @@ decoders land tokens in bursts, and a per-poll rate flickers. On a test request
 the server reported 24.3 tok/s and 412 ms prompt time; the dashboard showed
 23.8 tok/s and a 0.38 s time to first token.
 
+Impossible samples are cut before they reach the display. An engine
+occasionally emits one: a slot counter jumps and one poll appears to carry a
+whole request's tokens, or a self-reported rate is simply wrong — 1500 tok/s
+from a model that tops out at 75. Untreated, that single poll latches the
+session peak and squashes the sparklines into a flat line until restart. A
+rate is now shown only when it is physically possible (finite, under a
+ceiling no hardware reaches) and, for decode, plausible for that server: above
+both 4× the median of the recently accepted samples and that median + 20
+tok/s, it is glitch, and the panel holds the last real reading. Prefill gets
+only the ceiling, since a cold prompt after cached follow-ups really is that
+much faster. A genuine change of level
+— faster model, deeper speculation — is held for a few polls at most: six
+rejected in a row (≈3 s at the default poll rate) re-anchor the reference,
+and the new speed is shown as fact.
+
 ### GPUs
 
 One card per device: utilisation gauge with a VU-style peak-hold notch, power
@@ -498,6 +513,7 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | decode tok/s | llama.cpp: delta of `n_decoded` from `GET /slots`. When that field is absent, delta of `llamacpp:tokens_predicted_total` from `GET /metrics`, anchored at the start of the request. vLLM: `/metrics` generation counter. SGLang: `decode_moments[5]` from `GET /v1/loads`. Strata: `live.generated` from `GET /metrics`. 1 s sliding window. Polls go to the server's `--host` (loopback when it bound `0.0.0.0`) |
 | prefill tok/s | llama.cpp: `n_prompt_tokens_processed`. vLLM: prompt-token counter minus `prompt_tokens_cached_total` (its prompt counter is the whole prompt, cached included). SGLang: `total_prefill_uncached_tokens`, or `sglang:realtime_tokens_total{mode="prefill_compute"}` with `--enable-metrics`. Strata: engine-measured `live.prefill_tok_s_mean`, then uncached tokens / `prompt_ms` at completion, from JSON `GET /metrics` |
 | time to first token | slot turning busy → first decoded token, quantised to the poll interval. Strata: the finished request's `prompt_ms`, the server's time reading the new prompt tokens (time spent queued is not in it) |
+| impossible tok/s samples | a displayed rate is finite, under 10⁶ (decode) / 10⁷ (prefill) tok/s, and (decode only) not above both 4× the median of the recently accepted samples of that server and that median + 20 tok/s; glitch polls are cut and the display holds the last real reading, six rejections in a row re-anchor to a genuinely faster engine |
 | tok/J | decode tok/s ÷ summed GPU power draw |
 | cache hit | llama.cpp: `n_prompt_tokens_cache / n_prompt_tokens`. vLLM: the window's `prefix_cache_hits_total / prefix_cache_queries_total` delta — exact even when several requests share the poll window, since both counters move in the same scheduler step; a request row whose window held more than one request shows its own cached count as `—` instead of a blend. SGLang without `--enable-metrics` is unknown (shown as "—"). Strata: the finished request's `reused`, unknown ("—") while it runs |
 | request log | one record per `id_task`; averages from accumulated deltas |
@@ -824,6 +840,15 @@ need the file.
 **Throughput reads zero while the model is clearly working.** Another client
 may be using a different slot; the dashboard follows the busy slot when there
 is one. Check `GET /slots` on the server.
+
+**The decode rate holds its last value for a second while the server is clearly
+faster.** That is the glitch guard: a rate more than 4× (and 20
+tok/s above) the recent median of the same server is not shown until it has
+repeated for six polls in a row, because single-poll spikes of that size are
+engine bugs, not speed — and one accepted spike rescales the whole
+throughput graph until restart. If a legitimate engine really runs at more
+than 4× the speed of the last one it measured, the graph follows after a
+few seconds, and the peak then tracks the real numbers.
 
 **Context, cache-hit and decoded counters sit at zero on a multi-slot server.**
 Known limitation. `llama-server` started with more than one slot (`-np`, or the
