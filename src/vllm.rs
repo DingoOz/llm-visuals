@@ -407,7 +407,11 @@ impl VllmAdapter {
                         self.pending_close = Some(close);
                     }
                     self.task_seq = c.succeeded as i64 + 1;
-                    self.window_contended = multi_running;
+                    // A successor that shared the closing window already had
+                    // its first chunks (its prefix hit among them) counted
+                    // into the predecessor's record: its own window starts
+                    // short, so its cached count is not its own either.
+                    self.window_contended = multi_running || close_contended;
                 } else {
                     // The last request finished and nothing followed: keep
                     // the old baseline so the closing sample still carries
@@ -707,12 +711,18 @@ mod tests {
         let close = s3.closing.as_ref().expect("A's closing view");
         assert_eq!(close.cached, 1800);
         assert!(close.cached_unknown, "the window held two requests");
-        // B's window starts at the re-anchor and is exclusive from here on.
-        assert!(!s3.cache_unknown);
+        // B's prefix hit landed in A's window before the re-anchor, so B's
+        // own window starts short: its cached count stays unknown.
+        assert!(s3.cache_unknown);
         let (s4, _) = a.observe(&cached_counters(2500.0, 2300.0, 100.0, 1.0, 1.0));
-        assert!(!s4.cache_unknown);
-        assert_eq!(s4.cache_tokens, 500);
+        assert!(s4.cache_unknown);
+        assert_eq!(s4.cache_tokens, 0);
         assert!((s4.cache_hit_override.unwrap() - 1.0).abs() < 1e-6);
+        // B finishes; the next request admitted from idle owns its window.
+        a.observe(&cached_counters(2500.0, 2300.0, 120.0, 0.0, 2.0));
+        let (s5, _) = a.observe(&cached_counters(3500.0, 3200.0, 120.0, 1.0, 2.0));
+        assert!(!s5.cache_unknown);
+        assert_eq!(s5.cache_tokens, 900);
     }
 
     #[test]
