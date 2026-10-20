@@ -41,6 +41,13 @@ pub struct GpuStats {
     /// (GB10 / DGX Spark) and by the Apple backend, whose only memory is
     /// system RAM. Never by a driver that reports device memory.
     pub unified: bool,
+    /// The unified pool is measured by the driver itself rather than
+    /// synthesised: the amdgpu backend sets it on APUs (BC-250 / Cyan
+    /// Skillfish class), whose real device memory is the VRAM + GTT heap sum
+    /// sysfs reports. `apply_unified_memory` leaves such rows alone — the
+    /// driver's own count of every GPU process outranks one server's
+    /// self-declared occupancy.
+    pub unified_measured: bool,
 }
 
 impl GpuStats {
@@ -1173,6 +1180,7 @@ fn apple_stats(name: &str, cores: u32, m: MacmonSample) -> GpuStats {
         },
         util_estimated: false,
         unified: mem_total_mb > 0,
+        unified_measured: false,
         pcie_gen: 0,
         pcie_width: 0,
     }
@@ -1417,10 +1425,32 @@ fn collect_amd(_devices: &[AmdDevice]) -> Result<Vec<GpuStats>, String> {
     Err("AMD GPU telemetry is available on Linux only".into())
 }
 
+/// The fixed VRAM carve-out every AMD APU reports: the driver sizes its
+/// device-local TTM zone at 512 MiB on FUSION parts and works out of the
+/// GTT heap, which spans the shared RAM pool.
+const APU_VRAM_CARVEOUT_BYTES: u64 = 512 * 1024 * 1024;
+
 fn amd_stats(index: u32, device: &AmdDevice) -> GpuStats {
     let path = &device.path;
-    let mem_total_mb = read_u64(path.join("mem_info_vram_total")) / 1024 / 1024;
-    let mem_used_mb = read_u64(path.join("mem_info_vram_used")) / 1024 / 1024;
+    let vram_total = read_u64(path.join("mem_info_vram_total"));
+    let vram_used = read_u64(path.join("mem_info_vram_used"));
+    let gtt_total = read_u64(path.join("mem_info_gtt_total"));
+    let gtt_used = read_u64(path.join("mem_info_gtt_used"));
+    // On an APU (BC-250 / Cyan Skillfish, Strix Halo — what nvtop marks
+    // "Integrated GPU") the memory a Vulkan workload really draws is the sum
+    // of the two heaps; reading only the carve-out shows a 16 GB part as a
+    // 512 MiB card that is nearly full. No discrete GPU reports a VRAM heap
+    // that small (the smallest ships with 1 GiB), so the carve-out size is
+    // the sysfs-visible APU tell: the same vram+gtt sum nvtop applies once
+    // libdrm answers `AMDGPU_IDS_FLAGS_FUSION`, a flag sysfs does not carry.
+    let apu = vram_total > 0 && vram_total <= APU_VRAM_CARVEOUT_BYTES && gtt_total > 0;
+    let (pool, used) = if apu {
+        (vram_total + gtt_total, vram_used + gtt_used)
+    } else {
+        (vram_total, vram_used)
+    };
+    let mem_total_mb = pool / 1024 / 1024;
+    let mem_used_mb = used / 1024 / 1024;
     let (clock_sm_mhz, clock_sm_max_mhz) = read_dpm_clocks(path.join("pp_dpm_sclk"));
     let (clock_mem_mhz, _) = read_dpm_clocks(path.join("pp_dpm_mclk"));
     let (temperature, power_watts, power_max_watts, fan_pct) = amd_hwmon(device.hwmon.as_deref());
@@ -1449,7 +1479,8 @@ fn amd_stats(index: u32, device: &AmdDevice) -> GpuStats {
         fan_pct,
         fan_rpm: None,
         util_estimated: false,
-        unified: false,
+        unified: apu,
+        unified_measured: apu,
         pcie_gen,
         pcie_width,
     }
@@ -1596,6 +1627,7 @@ pub fn parse_csv(stdout: &str) -> Vec<GpuStats> {
             fan_rpm: None,
             util_estimated: false,
             unified: false,
+            unified_measured: false,
             pcie_gen: int(14) as u32,
             pcie_width: int(15) as u32,
             // Column 17: only the NVIDIA query asks for it. N/A on cards
@@ -1621,12 +1653,21 @@ pub fn parse_csv(stdout: &str) -> Vec<GpuStats> {
 ///
 /// An Apple row arrives already unified, its pool filled with macmon's
 /// system-wide RAM use. It keeps that total and takes the server's
-/// occupancy in place of the system-wide figure.
+/// occupancy in place of the system-wide figure. An amdgpu APU row (BC-250
+/// / Cyan Skillfish class) also arrives unified, but its pool is measured
+/// from the driver's own VRAM + GTT heaps: that count covers every GPU
+/// process and outranks one server's declaration, so it is left alone.
 pub fn apply_unified_memory(gpus: &mut [GpuStats], system_ram_mb: u64, model_gb: Option<f32>) {
     let Some(model_gb) = model_gb.filter(|gb| *gb > 0.0) else {
         return;
     };
     for g in gpus.iter_mut() {
+        // A driver-measured unified pool (an amdgpu APU's VRAM + GTT heaps)
+        // is the device's own truth: it already counts every GPU process,
+        // not just this server's weights. It stays exactly as read.
+        if g.unified_measured {
+            continue;
+        }
         if !(g.unified && g.mem_total_mb > 0) {
             if system_ram_mb == 0 || g.mem_total_mb > 0 || !is_unified_part(&g.name) {
                 continue;
@@ -1755,6 +1796,7 @@ impl DemoGpu {
                 Some((20.0 + 60.0 * self.power).clamp(0.0, 100.0))
             },
             unified: false,
+            unified_measured: false,
             pcie_gen: 3,
             pcie_width: if self.index == 0 { 8 } else { 16 },
         }
@@ -2022,6 +2064,8 @@ mod tests {
         write("mem_busy_percent", "41\n");
         write("mem_info_vram_total", "25769803776\n");
         write("mem_info_vram_used", "17179869184\n");
+        write("mem_info_gtt_total", "51539607552\n");
+        write("mem_info_gtt_used", "1048576\n");
         write("pp_dpm_sclk", "0: 500Mhz\n1: 2500Mhz *\n");
         write("pp_dpm_mclk", "0: 96Mhz *\n1: 1249Mhz\n");
         write("current_link_speed", "16.0 GT/s PCIe\n");
@@ -2054,6 +2098,48 @@ mod tests {
         assert!(stats.fan_pct.is_some_and(|fan| (fan - 50.2).abs() < 0.1));
         assert_eq!(stats.pcie_gen, 4);
         assert_eq!(stats.pcie_width, 16);
+        // A discrete card with a GTT heap beside it is no APU: the VRAM
+        // heap is its own and the GTT stays out of the bar.
+        assert!(!stats.unified);
+        assert!(!stats.unified_measured);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn amd_apu_heaps_sum_into_one_measured_pool() {
+        // A BC-250 development board (Cyan Skillfish), read live: a 512 MiB
+        // VRAM carve-out and a 14.84 GiB GTT heap, with a llama-server
+        // pinned into the GTT. nvtop shows this part as
+        // `MEM[14.360Gi/15.339Gi]` — the sum of both heaps.
+        let dir =
+            std::env::temp_dir().join(format!("llm-visuals-amd-apu-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, value: &str| std::fs::write(dir.join(name), value).unwrap();
+        write("device", "0x13fe\n");
+        write("mem_info_vram_total", "536870912\n");
+        write("mem_info_vram_used", "442773504\n");
+        write("mem_info_gtt_total", "15933288448\n");
+        write("mem_info_gtt_used", "14976356352\n");
+
+        let device = AmdDevice {
+            hwmon: find_amd_hwmon(&dir),
+            name: amd_name(&dir, 0),
+            path: dir.clone(),
+        };
+        let stats = amd_stats(0, &device);
+        assert_eq!(stats.mem_total_mb, 15_707); // 15.339 GiB
+        assert_eq!(stats.mem_used_mb, 14_704); // 14.360 GiB
+        assert_eq!(stats.mem_free_mb, 1_003);
+        assert!((stats.vram_percent() - 93.6).abs() < 0.1);
+        assert!(stats.unified);
+        assert!(stats.unified_measured);
+
+        // A server declaring its own occupancy does not overwrite the
+        // driver-measured pool: the heaps already count every process.
+        let mut gpus = [stats];
+        apply_unified_memory(&mut gpus, 15_195, Some(12.1));
+        assert_eq!(gpus[0].mem_used_mb, 14_704);
+        assert_eq!(gpus[0].mem_total_mb, 15_707);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

@@ -193,8 +193,18 @@ impl DbLog {
                     g.utilization_gpu,
                     // Device memory only: a unified part's bar is built
                     // from system RAM and the servers' report, not the card.
-                    if g.unified { 0 } else { g.mem_used_mb as i64 },
-                    if g.unified { 0 } else { g.mem_total_mb as i64 },
+                    // An amdgpu APU's pool is the driver's own heap count,
+                    // so it is device memory and is logged.
+                    if g.unified && !g.unified_measured {
+                        0
+                    } else {
+                        g.mem_used_mb as i64
+                    },
+                    if g.unified && !g.unified_measured {
+                        0
+                    } else {
+                        g.mem_total_mb as i64
+                    },
                     g.power_watts,
                     g.temperature,
                     g.temperature_memory
