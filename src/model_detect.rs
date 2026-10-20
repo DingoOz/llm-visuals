@@ -1185,6 +1185,44 @@ pub fn api_key_from(cmdline: &str) -> Option<String> {
     None
 }
 
+/// Strata names its config file `--config <file.json>` on the command line
+/// and keeps the API key inside that file, not in the cmdline — from 0.2.1
+/// the upgrade tooling puts a key there, every unauthenticated `/metrics`
+/// poll answers 401, and all throughput falls to zero while `/health` (the
+/// one open endpoint) keeps the server discovered. Read the key from that
+/// config: an `api_key` string (llama.cpp-style `"a,b"` lists allowed, the
+/// first counts) or a JSON list of keys. None whenever anything about that
+/// path does not hold — an unreadable or unparseable file must degrade to
+/// today's behavior, never poison the other auth sources.
+pub fn config_key_from(cmdline: &str) -> Option<String> {
+    let tokens: Vec<&str> = cmdline.split_whitespace().collect();
+    let path = tokens.iter().enumerate().find_map(|(i, t)| {
+        t.strip_prefix("--config=").or_else(|| {
+            (*t == "--config")
+                .then(|| tokens.get(i + 1).copied())
+                .flatten()
+        })
+    })?;
+    // A server config is small; never slurp a whole directory tree's worth
+    // because a flag pointed at something enormous.
+    if std::fs::metadata(path).ok()?.len() > 4 << 20 {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let first = |s: &str| {
+        s.split(',')
+            .next()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(str::to_string)
+    };
+    match v.get("api_key")? {
+        serde_json::Value::String(s) => first(s),
+        serde_json::Value::Array(list) => list.first()?.as_str().and_then(first),
+        _ => None,
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn walk_proc_llms() -> Vec<(u32, String, String)> {
     let mut out = Vec::new();
@@ -2264,6 +2302,45 @@ mod tests {
         );
         assert_eq!(api_key_from("llama-server --port 8080"), None);
         assert_eq!(api_key_from("llama-server --api-key"), None);
+    }
+
+    #[test]
+    fn config_key_from_names_the_key_held_in_the_server_config() {
+        let dir = std::env::temp_dir().join(format!("lv-cfgkey-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, body: &str| {
+            let p = dir.join(name);
+            std::fs::write(&p, body).unwrap();
+            p
+        };
+        let stringy = write("s.json", r#"{"api_key": "k1, k2", "host": "0.0.0.0"}"#);
+        let listy = write("l.json", r#"{"api_key": ["a", "b"]}"#);
+        let empty = write("e.json", r#"{"api_key": ""}"#);
+        let absent = write("n.json", r#"{"host": "0.0.0.0"}"#);
+        let junk = write("j.json", "not json at all {{{");
+        let cmd = |p: &std::path::Path| {
+            format!(
+                "/venv/bin/python server.py --engine strata --config {} --port 8080",
+                p.display()
+            )
+        };
+        assert_eq!(
+            config_key_from(&cmd(&stringy)).as_deref(),
+            Some("k1"),
+            "comma list: the first key counts"
+        );
+        assert_eq!(config_key_from(&cmd(&listy)).as_deref(), Some("a"));
+        assert_eq!(config_key_from(&cmd(&empty)), None);
+        assert_eq!(config_key_from(&cmd(&absent)), None);
+        assert_eq!(config_key_from(&cmd(&junk)), None);
+        assert_eq!(config_key_from(&cmd(&dir.join("missing.json"))), None);
+        assert_eq!(
+            config_key_from(&format!("python server.py --config={}", stringy.display())).as_deref(),
+            Some("k1"),
+            "the = form"
+        );
+        assert_eq!(config_key_from("llama-server --port 8080"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

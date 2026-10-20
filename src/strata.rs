@@ -5,9 +5,11 @@
 //! child that holds the GPU memory. `GET /metrics` is one JSON document
 //! with the engine's facts, the request in flight and the last finished
 //! requests; from 0.1.40.2 a client that accepts `text/plain` gets a
-//! Prometheus rendering of it instead, so this asks for JSON. One sequence runs
-//! at a time unless the engine batches (`live.parallel` slots); then `live`
-//! describes the newest request in flight.
+//! Prometheus rendering of it instead, so this asks for JSON. One sequence
+//! runs at a time unless the engine batches (`live.parallel` slots); then
+//! `live` describes the newest request in flight. From 0.2.1 the server may
+//! hold an `api_key` in the JSON config named by `--config` on its cmdline;
+//! the dashboard finds it there (`model_detect::config_key_from`).
 //!
 //! The in-flight request carries its prompt size, prefill progress
 //! (`prompt_read`), measured prefill rate (`prefill_tok_s_mean`, newer

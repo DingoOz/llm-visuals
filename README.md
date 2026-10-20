@@ -575,7 +575,11 @@ every server.
 A Strata server started with a key answers `/metrics` and `/v1/models` with
 401 as well. Reached by `--endpoint` without the key it is still recognised:
 its `/health` is open and names the server, the model and the context. The
-live numbers come from `/metrics`, so they need the key.
+live numbers come from `/metrics`, so they need the key. Strata keeps that key
+in the JSON config its command line names (`--config server.json`, key
+`api_key` — as Strata 0.2.1's upgrade tooling started writing on every
+server, not only keyed launches): the dashboard reads it from that file too,
+first string or list entry, so a Strata server needs no setup either.
 
 An SGLang server started with a key leaves `/metrics` open but answers
 `/v1/loads`, where its numbers come from, with 401. vLLM checks its key only

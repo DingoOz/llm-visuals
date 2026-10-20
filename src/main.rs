@@ -101,9 +101,15 @@ impl ModelSlot {
     }
 }
 
-/// Cmdline `--api-key` / `--api-key-file` wins; otherwise the launch key file.
+/// Cmdline `--api-key` / `--api-key-file` wins; otherwise the launch key
+/// file; as a last resort the `api_key` inside the JSON config the server
+/// names on its own command line (Strata's form of a keyed server).
 fn auth_for(model: &DetectedModel, fallback: &HttpAuth) -> HttpAuth {
-    HttpAuth::from_token(model_detect::api_key_from(&model.cmdline)).or(fallback)
+    HttpAuth::from_token(model_detect::api_key_from(&model.cmdline))
+        .or(fallback)
+        .or(&HttpAuth::from_token(model_detect::config_key_from(
+            &model.cmdline,
+        )))
 }
 
 /// The servers to watch: everything detected, minus anything the `--pid`
