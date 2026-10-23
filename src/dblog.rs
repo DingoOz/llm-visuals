@@ -248,7 +248,7 @@ pub struct LogSummary {
     pub recent: Vec<LoggedRequest>,
 }
 
-fn open_read_only(path: &Path) -> Result<Connection, String> {
+pub(crate) fn open_read_only(path: &Path) -> Result<Connection, String> {
     let err = |e: rusqlite::Error| format!("{}: {e}", path.display());
     // Open fails on a missing file instead of creating it.
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;

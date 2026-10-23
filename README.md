@@ -32,6 +32,7 @@ a Tesla P100 under llama.cpp, mid-request.</sub>
 - [Where every number comes from](#where-every-number-comes-from)
 - [Server setup: metrics and real expert routing](#server-setup-metrics-and-real-expert-routing)
 - [Command-line options](#command-line-options)
+- [Replay](#replay)
 - [Troubleshooting](#troubleshooting)
 - [How it works](#how-it-works)
 - [Contributing and license](#contributing-and-license)
@@ -498,6 +499,17 @@ watched and `--pid A,B` restricts it to named processes.
 | `c` | decode speed vs context length from the SQLite log, one model at a time (`←` `→` switch model, `r` refreshes) |
 | `q` / `Esc` | quit |
 
+Under `--replay` (see [Replay](#replay)) a few more keys drive playback, in
+every view:
+
+| Key | Action |
+|-----|--------|
+| `space` | pause / resume (at the end of the log: play it again) |
+| `[` / `]` | seek back / forward 10 s |
+| `{` / `}` | seek back / forward 60 s |
+| `Home` | back to the start |
+| `<` / `>` (also `,` `.` `-` `+`) | playback speed: 1×, 2×, 4×, 10×, 30× |
+
 Layouts adapt: the model strip is the first thing shed on a short terminal,
 then the request log, then the context and MTP row, and on narrow terminals
 the GPU line sheds PCIe, fan, clock and temperatures before the gauge shrinks,
@@ -688,6 +700,9 @@ concurrent request traces.
 --log-db auto|off|FILE  SQLite log of samples and requests (default: auto)
 --log-every 1.0      seconds between --log-db sample rows
 --log-db-max-mb 1024 size cap for --log-db; oldest rows are dropped (0 = none)
+--replay [FILE]      play a session back from a --log-db file (default: the auto one)
+--replay-from TIME   start of the range: Unix time, -2h, 'YYYY-MM-DD HH:MM', 'HH:MM'
+--replay-to TIME     end of the range, in the same forms
 --version, -v        print the version and exit
 ```
 
@@ -748,6 +763,69 @@ For anything else, query it directly:
 ```sh
 sqlite3 ~/.local/share/llm-visuals/llm.db "SELECT model, AVG(avg_decode_tps) FROM requests GROUP BY model"
 ```
+
+---
+
+## Replay
+
+`--replay` plays a logged session back through the dashboard: the
+throughput numerals and sparklines, the GPU cards, the context bar, the
+models strip and comparison view, and the request table, as they were.
+
+```sh
+llm-visuals --replay                         # newest session in the default log
+llm-visuals --replay ~/old.db                # another file
+llm-visuals --replay --replay-from -2h       # the last two hours
+llm-visuals --replay --replay-from "2026-10-21 14:00" --replay-to "2026-10-21 15:30"
+llm-visuals --replay --replay-to 09:00       # the session running before 9 this morning
+```
+
+A *session* is a run of samples with no hole longer than five minutes — one
+sitting of the dashboard. With no range, the newest one plays; with only an
+end, the newest one that began before it, cut there. A longer range can span
+several; playback steps over the holes between them (the status line says how
+much was skipped) and starts every tracker afresh at each, as a new
+dashboard run would. Times are local; `-90s`, `-30m`, `-2h` and `-1d` count
+back from now, and a bare `HH:MM` is today's (yesterday's if today's has not
+come yet).
+
+The header shows `REPLAY` with the logged time, the speed and ▶ / ⏸, and its
+bottom border fills as the range plays. Keys are listed under [Keys](#keys).
+A seek restarts the trackers and feeds them the minute before the new
+position at once, so the sparklines have their history; the requests that
+minute held are back in the table.
+
+**How the numbers are rebuilt.** The log is not redrawn; it is turned back
+into the samples a live poller would have produced — one per model every
+0.2 s of logged time, the GPU rows at their logged times — and fed to the
+same trackers as live data, on a clock that runs in logged seconds at any
+playback speed. Tokens come from the cumulative `session_decoded` /
+`session_prefilled` columns, spread evenly within each logged second (the
+log's resolution); each request's start, first token, end and token counts
+come from its `requests` row. A request still running when the dashboard
+quit has no row and is rebuilt from the busy samples instead. So the rates
+are the logged ones at one-second grain, and a TTFT or duration lands within
+a poll (0.2 s) of the logged figure.
+
+**What a replay cannot show.** The log keeps rates, context fill, request
+rows and GPU utilisation, VRAM, power and temperatures. It does not keep
+expert routing, speculative acceptance, host counters (disk, RAM, PCIe,
+memory controller), clocks, fans, power limits or the model's shape and
+placement, so the layers, experts, speculative and memory-pipeline panels
+say `not in log` rather than drawing a stand-in. The GPU cards show the
+logged utilisation, power draw, VRAM and temperatures: with no power limit
+logged the power gauge stays empty and the power history scales to itself,
+the VRAM bar is not split into weights and KV, and a model's own VRAM reads
+`—`. The GPU histories advance once per logged second rather than per poll,
+so they cover five times the span they do live. Concurrent requests on one
+model replay as one at a time: the newest request is followed, as a
+single-slot poller would.
+
+Nothing is written during a replay — `--log-db` is off, whatever it is set to
+— so the file being played can be the one another dashboard is still
+logging to. `l` and `c` read the replayed file. Opening is quick on a
+full-size log: the tables are appended in time order, so a time is found by
+a binary search over row ids and only the session played is read.
 
 ---
 

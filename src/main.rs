@@ -16,6 +16,7 @@ mod observe;
 mod perf;
 mod pipeline;
 mod render;
+mod replay;
 mod safetensors;
 mod settings;
 mod sglang;
@@ -592,7 +593,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut theme_name = args.theme.clone();
     let theme = colors::get_theme(&theme_name);
 
-    let (discovered, endpoint_err) = if args.demo {
+    // Loaded before raw mode, so a missing file or an empty range is a
+    // readable error rather than a blank dashboard.
+    let mut replay = match &args.replay {
+        None => None,
+        Some(_) => {
+            let path = args
+                .replay_path()
+                .ok_or("--replay: no home directory for the default log; name a file")?;
+            Some(replay::Replay::open(
+                &path,
+                args.replay_from.as_deref(),
+                args.replay_to.as_deref(),
+            )?)
+        }
+    };
+
+    let (discovered, endpoint_err) = if let Some(r) = &replay {
+        (r.models(), None)
+    } else if args.demo {
         (demo::demo_models(DEMO_CTX, args.demo_models), None)
     } else {
         discover(&args, &auth).await
@@ -686,6 +705,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (gpu_backend, nvml_host, backend_name) = if args.demo {
         (None, None, "demo")
+    } else if replay.is_some() {
+        (None, None, "log")
     } else {
         let nvml = if args.no_nvml {
             None
@@ -717,7 +738,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             n,
             &models,
         );
-    } else {
+    } else if replay.is_none() {
         pollers = spawn_pollers(
             &slots.iter().map(|s| s.model.clone()).collect::<Vec<_>>(),
             &live_tx,
@@ -776,7 +797,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_frame = Instant::now();
     let mut running = true;
     let mut done = false;
-    let mut status = if args.demo {
+    let mut status = if let Some(r) = &replay {
+        r.describe()
+    } else if args.demo {
         format!(
             "demo: {} synthetic server(s), two synthetic GPUs",
             slots.len()
@@ -791,15 +814,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut log_view: Option<Result<dblog::LogSummary, String>> = None;
     // The context-speed screen (`c`) and the model it shows.
     let mut ctx_view: Option<(Result<Vec<dblog::ContextSpeed>, String>, usize)> = None;
-    // The file being logged to, else the default one from earlier sessions.
+    // The file being replayed or logged to, else the default one from
+    // earlier sessions.
     let log_path = |args: &Args| {
-        args.log_db_path()
+        args.replay_path()
+            .or_else(|| args.log_db_path())
             .or_else(settings::default_db_path)
             .ok_or_else(|| "no home directory for the log database".to_string())
     };
     let read_log = |args: &Args| log_path(args).and_then(|p| dblog::summarize(&p));
     let read_ctx = |args: &Args| log_path(args).and_then(|p| dblog::context_speed(&p));
     let mut last_visual_activity = Instant::now();
+    let mut last_replay_step = Instant::now();
 
     loop {
         tokio::task::yield_now().await;
@@ -837,6 +863,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         || new.log_every != args.log_every
                                         || new.log_db_max_mb != args.log_db_max_mb;
                                     rescan = !new.demo
+                                        && replay.is_none()
                                         && (new.poll_ms != args.poll_ms
                                             || new.max_models != args.max_models
                                             || new.pid != args.pid);
@@ -883,6 +910,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Left | KeyCode::BackTab => *sel = (*sel + n - 1) % n,
                         _ => {}
                     }
+                } else if key.kind == KeyEventKind::Press
+                    && replay.as_mut().is_some_and(|r| r.handle_key(key.code))
+                {
+                    // Pause, seek and speed. Ahead of the view keys, so space
+                    // pauses in every view, the landscape's included.
                 } else if key.kind == KeyEventKind::Press {
                     let n = slots.len().max(1);
                     match key.code {
@@ -912,7 +944,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 focus = i;
                             }
                         }
-                        KeyCode::Char('r') if !args.demo => rescan = true,
+                        KeyCode::Char('r') if !args.demo && replay.is_none() => rescan = true,
                         KeyCode::Char('s') => {
                             settings_form = Some(settings::SettingsForm::new(&args))
                         }
@@ -997,6 +1029,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let now = Instant::now();
         let mut gpu_updated = false;
+        if let Some(r) = replay.as_mut() {
+            // The log stands in for every poller: its samples go to the same
+            // trackers, stamped with the trackers' clock at their logged time.
+            let events = r.step(now - last_replay_step);
+            for event in events {
+                ui_changed = true;
+                match event {
+                    replay::Event::Reset => {
+                        for slot in &mut slots {
+                            slot.perf = PerfTracker::new();
+                            slot.fade = FadeState::new();
+                            slot.live = LiveStats {
+                                ctx_max: slot.ctx_max,
+                                ..Default::default()
+                            };
+                        }
+                        latest_gpu.clear();
+                    }
+                    replay::Event::Gpu { ts, gpus } => {
+                        latest_gpu = gpus;
+                        for slot in &mut slots {
+                            slot.perf.observe_gpu(&latest_gpu, r.instant(ts));
+                        }
+                    }
+                    replay::Event::Live { ts, pid, stats } => {
+                        if let Some(slot) = slot_of.get(&pid).and_then(|i| slots.get_mut(*i)) {
+                            if stats.ctx_max > 0 {
+                                slot.ctx_max = stats.ctx_max;
+                            }
+                            slot.perf.observe(&stats, r.instant(ts));
+                            slot.live = stats;
+                        }
+                    }
+                }
+            }
+            if let Some(note) = r.take_note() {
+                status = note;
+                ui_changed = true;
+            }
+        }
+        last_replay_step = now;
         while let Ok(sample) = gpu_rx.try_recv() {
             ui_changed = true;
             match sample {
@@ -1168,7 +1241,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 slot.live.ctx_max = slot.ctx_max;
             }
             let layout = bandwidth::weight_layout(Some(&slot.model), &latest_gpu);
-            slot.perf.tick_bandwidth(&layout, now, frame_dt);
+            let clock = replay.as_ref().map_or(now, |r| r.hud().now);
+            slot.perf.tick_bandwidth(&layout, clock, frame_dt);
             let mut sample =
                 fade_sample_from_live(Some(&slot.model), &latest_gpu, &slot.live, fade::KV_BUCKETS);
             sample.routing = slot.routing.take();
@@ -1215,6 +1289,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             settings: settings_form.as_ref(),
             log: log_view.as_ref(),
             ctx_speed: ctx_view.as_ref().map(|(s, i)| (s, *i)),
+            replay: replay.as_ref().map(replay::Replay::hud),
         };
         renderer.render_frame(&mut terminal, &dash);
 
