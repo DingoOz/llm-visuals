@@ -19,7 +19,7 @@ is put together.
 - SGLang: `/v1/loads` poller, `/server_info`, worker folding, safetensors
   `config.json` architecture fields (also used by vLLM).
 - Decode speed vs context length (`c`), from the logged samples.
-- Alerts (`--alerts`): VRAM full, GPU / memory hot, slow decode against the
+- Alerts (`--alerts`): VRAM growth past its settled level, GPU / memory hot, slow decode against the
   model's own baseline, server gone; banner, bell or desktop notification.
 
 ## Ideas not yet done

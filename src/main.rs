@@ -1012,6 +1012,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             slots = kept;
+            // What the models now on the cards preallocated is the new normal.
+            alert_state.rebaseline_vram();
             focus = focus.min(slots.len().saturating_sub(1));
             slot_of = slots
                 .iter()

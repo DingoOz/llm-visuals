@@ -65,11 +65,28 @@ pub const DEFAULT_TEMP_C: f32 = 85.0;
 /// The memory alert for an HBM sensor without a reported limit.
 pub const DEFAULT_MEM_TEMP_C: f32 = 95.0;
 
-/// VRAM must stay over its threshold this long: a load or a long prompt's
-/// KV allocation passes through the top of the bar on its way somewhere.
+/// A card's memory has settled once its high-water mark has not grown by
+/// more than [`vram_slack`] for this long. Servers preallocate (vLLM, SGLang
+/// and Strata take their KV pool up front, llama.cpp users fit to ~95 %),
+/// so a full card is usually the intended configuration; only growth past
+/// where it settled is pressure toward an out-of-memory failure.
+const VRAM_SETTLE: Duration = Duration::from_secs(20);
+/// The VRAM condition must hold this long before it is raised.
 const VRAM_HOLD: Duration = Duration::from_secs(3);
-/// …and fall this many points under it to clear.
+/// Points under `--alert-vram-pct` that clear a raised alert.
 const VRAM_CLEAR_MARGIN: f32 = 3.0;
+
+/// Noise in a settled card's memory, and the free memory below which it is
+/// about to fail an allocation: 1 % of the card, at least 256 MB.
+fn vram_slack(total_mb: u64) -> u64 {
+    (total_mb / 100).max(256)
+}
+
+/// Growth past the settled level that, over the threshold, is news: 2 %
+/// of the card, at least 512 MB — more than a first request's workspace.
+fn vram_rise(total_mb: u64) -> u64 {
+    (total_mb / 50).max(512)
+}
 const TEMP_HOLD: Duration = Duration::from_secs(3);
 /// Degrees under the limit that count as cooled down.
 const TEMP_CLEAR_MARGIN: f32 = 5.0;
@@ -268,11 +285,55 @@ impl Baseline {
     }
 }
 
+/// Where a card's memory settled: its high-water mark, once that has
+/// stopped growing. Fixed from then on until [`Alerts::rebaseline_vram`]:
+/// a model swapped out and back in returns to the same level and is not
+/// news, while a load the card has not held before is.
+#[derive(Debug)]
+struct VramLevel {
+    high_mb: u64,
+    /// The level the settling clock last restarted at…
+    mark_mb: u64,
+    /// …and when: use more than the slack above the mark restarts it, so
+    /// a steady climb in small steps restarts it too.
+    grew: Instant,
+    settled_mb: Option<u64>,
+}
+
+impl VramLevel {
+    fn new(used_mb: u64, now: Instant) -> Self {
+        Self {
+            high_mb: used_mb,
+            mark_mb: used_mb,
+            grew: now,
+            settled_mb: None,
+        }
+    }
+
+    /// The settled level, once there is one. A card still loading keeps
+    /// raising its mark and so never settles mid-load; one whose use
+    /// swings with load settles at the top of the swing.
+    fn observe(&mut self, used_mb: u64, slack_mb: u64, now: Instant) -> Option<u64> {
+        if self.settled_mb.is_none() {
+            if used_mb > self.mark_mb + slack_mb {
+                self.mark_mb = used_mb;
+                self.grew = now;
+            }
+            self.high_mb = self.high_mb.max(used_mb);
+            if now.duration_since(self.grew) >= VRAM_SETTLE {
+                self.settled_mb = Some(self.high_mb);
+            }
+        }
+        self.settled_mb
+    }
+}
+
 #[derive(Default)]
 pub struct Alerts {
     limits: Limits,
     conds: HashMap<(Kind, Subject), Cond>,
     baselines: HashMap<u32, Baseline>,
+    vram: HashMap<u32, VramLevel>,
     active: Vec<Alert>,
 }
 
@@ -288,6 +349,14 @@ impl Alerts {
     /// baselines carry over.
     pub fn set_limits(&mut self, limits: Limits) {
         self.limits = limits;
+    }
+
+    /// Let every card settle again: after a rescan the models on them may
+    /// be new, and what they preallocated is the new normal.
+    pub fn rebaseline_vram(&mut self) {
+        self.vram.clear();
+        self.conds.retain(|(k, _), _| *k != Kind::Vram);
+        self.active.retain(|a| a.kind != Kind::Vram);
     }
 
     /// Forget everything: alerts were switched off.
@@ -318,17 +387,39 @@ impl Alerts {
             // A synthesised unified pool is a server's own reservation over
             // system RAM (vLLM fills ~90 % by design), not a card filling up.
             if g.mem_total_mb > 0 && (!g.unified || g.unified_measured) {
+                let (total, used) = (g.mem_total_mb, g.mem_used_mb.min(g.mem_total_mb));
+                let free = total - used;
+                let (slack, rise) = (vram_slack(total), vram_rise(total));
+                let settled = self
+                    .vram
+                    .entry(g.index)
+                    .or_insert_with(|| VramLevel::new(used, now))
+                    .observe(used, slack, now);
                 let pct = g.vram_percent();
-                let r = if pct >= l.vram_pct {
-                    Reading::Bad
-                } else if pct < l.vram_pct - VRAM_CLEAR_MARGIN {
-                    Reading::Ok
-                } else {
-                    Reading::Hold
+                // Raised by growth past the settled level: over the
+                // threshold by a real margin, or into the last sliver of
+                // free memory. Cleared once back near the settled level or
+                // comfortably under the threshold. Until the card settles
+                // there is nothing to measure growth from.
+                let r = match settled {
+                    None => Reading::Hold,
+                    Some(base) => {
+                        let grown = used.saturating_sub(base);
+                        if (pct >= l.vram_pct && grown >= rise) || (free < slack && grown > slack) {
+                            Reading::Bad
+                        } else if pct < l.vram_pct - VRAM_CLEAR_MARGIN || grown <= slack {
+                            Reading::Ok
+                        } else {
+                            Reading::Hold
+                        }
+                    }
                 };
+                let up = fmt_mb(used.saturating_sub(settled.unwrap_or(used)));
                 self.judge(Kind::Vram, s, r, VRAM_HOLD, now, &mut out, || {
                     (
-                        format!("{label}: VRAM {pct:.0}% full (alert at {:.0}%)", l.vram_pct),
+                        format!(
+                            "{label}: VRAM {pct:.0}% full, {free} MB free — up {up} from where it settled"
+                        ),
                         format!("VRAM G{}", g.index),
                     )
                 });
@@ -445,6 +536,7 @@ impl Alerts {
         };
         self.conds.retain(|(_, s), _| known(s));
         self.baselines.retain(|k, _| model_known(*k));
+        self.vram.retain(|i, _| gpu_known(*i));
         let before = self.active.len();
         self.active.retain(|a| known(&a.subject));
         out.changed |= self.active.len() != before;
@@ -510,6 +602,14 @@ impl Alerts {
             }
             Step::Same => {}
         }
+    }
+}
+
+fn fmt_mb(mb: u64) -> String {
+    if mb >= 1024 {
+        format!("{:.1} GB", mb as f32 / 1024.0)
+    } else {
+        format!("{mb} MB")
     }
 }
 
@@ -625,10 +725,16 @@ mod tests {
         got
     }
 
+    /// 25 s of `cards` unchanged: long enough for each to settle there.
+    fn settle(a: &mut Alerts, t: &mut Instant, cards: &[GpuStats]) {
+        assert!(run(a, t, 25.0, cards, &[]).is_empty());
+    }
+
     #[test]
     fn vram_must_stay_full_before_it_is_raised() {
         let mut a = Alerts::new(Limits::default());
         let mut t = Instant::now();
+        settle(&mut a, &mut t, &[card(1, 19_200, 50.0)]);
         // 96 % for two seconds: a pass through the top, not news.
         assert!(run(&mut a, &mut t, 2.0, &[card(1, 23_040, 50.0)], &[]).is_empty());
         assert!(run(&mut a, &mut t, 1.0, &[card(1, 12_000, 50.0)], &[]).is_empty());
@@ -638,13 +744,102 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].kind, Kind::Vram);
         assert_eq!(got[0].tag, "VRAM G1");
-        assert!(got[0].text.contains("96% full"), "{}", got[0].text);
+        assert!(
+            got[0].text.contains("96% full, 960 MB free — up 3.8 GB"),
+            "{}",
+            got[0].text
+        );
+    }
+
+    #[test]
+    fn preallocated_at_97_percent_from_the_start_never_fires() {
+        let mut a = Alerts::new(Limits::default());
+        let mut t = Instant::now();
+        // A vLLM-style KV pool: full from the first sample, a few MB of
+        // jitter, for ten minutes.
+        for i in 0..300 {
+            let used = 23_280 + (i % 3) * 40;
+            assert!(run(&mut a, &mut t, 2.0, &[card(0, used, 50.0)], &[]).is_empty());
+        }
+        assert!(a.active().is_empty());
+    }
+
+    #[test]
+    fn settled_at_90_percent_then_climbing_to_97_fires() {
+        let mut a = Alerts::new(Limits::default());
+        let mut t = Instant::now();
+        settle(&mut a, &mut t, &[card(0, 21_600, 50.0)]);
+        // A second process takes 1.7 GB.
+        let got = run(&mut a, &mut t, 4.0, &[card(0, 23_280, 50.0)], &[]);
+        assert_eq!(got.len(), 1, "{:?}", a.active());
+        assert!(got[0].text.contains("up 1.6 GB"), "{}", got[0].text);
+    }
+
+    #[test]
+    fn a_card_still_loading_settles_where_the_load_ends() {
+        let mut a = Alerts::new(Limits::default());
+        let mut t = Instant::now();
+        // First seen at 2 GB, a model streams in to 97 % over a minute.
+        for step in 0..240u64 {
+            let used = 2_000 + step * 89;
+            assert!(run(&mut a, &mut t, 0.25, &[card(0, used, 50.0)], &[]).is_empty());
+        }
+        settle(&mut a, &mut t, &[card(0, 23_300, 50.0)]);
+        assert!(a.active().is_empty());
+    }
+
+    #[test]
+    fn a_card_that_swings_with_load_settles_at_the_top_of_the_swing() {
+        let mut a = Alerts::new(Limits::default());
+        let mut t = Instant::now();
+        for _ in 0..8 {
+            assert!(run(&mut a, &mut t, 2.0, &[card(0, 17_000, 50.0)], &[]).is_empty());
+            assert!(run(&mut a, &mut t, 2.0, &[card(0, 21_000, 50.0)], &[]).is_empty());
+        }
+        assert_eq!(
+            run(&mut a, &mut t, 4.0, &[card(0, 23_500, 50.0)], &[]).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_last_sliver_of_free_memory_fires_under_the_rise() {
+        let mut a = Alerts::new(Limits::default());
+        let mut t = Instant::now();
+        // The V100 here: settled at 96.8 % with 530 MB free.
+        let v100 = |used| GpuStats {
+            mem_total_mb: 16_384,
+            ..card(1, used, 50.0)
+        };
+        settle(&mut a, &mut t, &[v100(15_854)]);
+        // +200 MB leaves 330 MB: still clear of the floor.
+        assert!(run(&mut a, &mut t, 10.0, &[v100(16_054)], &[]).is_empty());
+        // +350 MB leaves 180 MB, under the 256 MB floor: one allocation
+        // from failing, though well under the 512 MB rise.
+        let got = run(&mut a, &mut t, 4.0, &[v100(16_204)], &[]);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].text.contains("180 MB free"), "{}", got[0].text);
+    }
+
+    #[test]
+    fn a_rescan_takes_the_new_level_as_settled() {
+        let mut a = Alerts::new(Limits::default());
+        let mut t = Instant::now();
+        settle(&mut a, &mut t, &[card(0, 19_200, 50.0)]);
+        assert_eq!(
+            run(&mut a, &mut t, 4.0, &[card(0, 23_500, 50.0)], &[]).len(),
+            1
+        );
+        a.rebaseline_vram();
+        assert!(a.active().is_empty());
+        assert!(run(&mut a, &mut t, 120.0, &[card(0, 23_500, 50.0)], &[]).is_empty());
     }
 
     #[test]
     fn vram_clears_only_comfortably_below_the_threshold() {
         let mut a = Alerts::new(Limits::default());
         let mut t = Instant::now();
+        settle(&mut a, &mut t, &[card(0, 19_200, 50.0)]);
         run(&mut a, &mut t, 4.0, &[card(0, 23_040, 50.0)], &[]);
         assert_eq!(a.active().len(), 1);
         // 93 % is inside the band: still raised however long it lasts.
@@ -663,6 +858,7 @@ mod tests {
         let mut t = Instant::now();
         let full = [card(0, 23_500, 50.0)];
         let fine = [card(0, 12_000, 50.0)];
+        settle(&mut a, &mut t, &[card(0, 19_200, 50.0)]);
         // A long episode is announced once.
         assert_eq!(run(&mut a, &mut t, 40.0, &full, &[]).len(), 1);
         // It clears, comes back 10 s later: raised, but silently.
@@ -681,6 +877,11 @@ mod tests {
     fn cooldown_is_per_card() {
         let mut a = Alerts::new(Limits::default());
         let mut t = Instant::now();
+        settle(
+            &mut a,
+            &mut t,
+            &[card(0, 19_200, 50.0), card(1, 19_200, 50.0)],
+        );
         let got = run(
             &mut a,
             &mut t,
@@ -695,6 +896,7 @@ mod tests {
     fn banner_lasts_a_while_then_leaves_the_badge() {
         let mut a = Alerts::new(Limits::default());
         let mut t = Instant::now();
+        settle(&mut a, &mut t, &[card(0, 19_200, 50.0)]);
         run(&mut a, &mut t, 4.0, &[card(0, 23_500, 50.0)], &[]);
         assert!(a.banner(t).is_some());
         run(&mut a, &mut t, 31.0, &[card(0, 23_500, 50.0)], &[]);
@@ -754,11 +956,22 @@ mod tests {
     fn a_servers_own_unified_reservation_is_not_a_full_card() {
         let mut a = Alerts::new(Limits::default());
         let mut t = Instant::now();
-        let mut g = card(0, 23_500, 50.0);
+        let mut g = card(0, 19_200, 50.0);
         g.unified = true;
+        settle(&mut a, &mut t, &[g.clone()]);
+        g.mem_used_mb = 23_500;
         assert!(run(&mut a, &mut t, 10.0, &[g.clone()], &[]).is_empty());
         // A pool the driver measures (an APU) is real and does count.
+        let mut a = Alerts::new(Limits::default());
         g.unified_measured = true;
+        settle(
+            &mut a,
+            &mut t,
+            &[GpuStats {
+                mem_used_mb: 19_200,
+                ..g.clone()
+            }],
+        );
         assert_eq!(run(&mut a, &mut t, 4.0, &[g], &[]).len(), 1);
     }
 

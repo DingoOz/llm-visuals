@@ -293,7 +293,7 @@ impl SettingsForm {
                 "alert-vram-pct",
                 Kind::Number,
                 args.alert_vram_pct.to_string(),
-                "Raised when a card's memory stays this full for 3 s".into(),
+                "Raised when a card past this has grown 2 % beyond where it settled".into(),
             ),
             field(
                 "Temperature alert (°C)",

@@ -486,11 +486,23 @@ dashboard. Each is judged four times a second from numbers already on screen:
 
 | Alert | Raised when | Clears when |
 |---|---|---|
-| VRAM full | a card's memory stays at or above `--alert-vram-pct` (95 %) for 3 s | it is 3 points under for 2 s |
+| VRAM pressure | for 3 s, a card's memory has grown past where it settled **and** either is at or above `--alert-vram-pct` (95 %) having grown by at least 2 % of the card (512 MB minimum), or has less than 1 % (256 MB minimum) left having grown by more than that | it is back within 1 % (256 MB) of the settled level, or 3 points under the threshold, for 2 s |
 | GPU hot | the die stays at or above its limit for 3 s: `--alert-temp-c` if given, else the first threshold the NVIDIA driver acts on (the lower of NVML's slowdown and max-operating temperatures), else 85 °C | it is 5 °C under for 2 s |
 | memory hot | the HBM sensor stays at or above the driver's memory max-operating temperature (95 °C if it names none) for 3 s | 5 °C under for 2 s |
 | slow decode | while decoding, the rate stays under `--alert-slow-pct` (50 %) of the model's usual rate for 5 s | it is back above that share + 10 points for 2 s, or the request ends |
 | server gone | the server has not answered its poller for 10 s | the next answer |
+
+A full card is usually the intended configuration — vLLM, SGLang and Strata
+preallocate their KV pool, and llama.cpp users fit to ~95 % — so the VRAM
+alert is about *growth*: another process taking memory, a second model
+loading, a leak. A card **settles** at its high-water mark once that has not
+grown by more than 1 % (256 MB) for 20 s; a card still loading keeps raising
+the mark and so settles where the load ends, and one whose use swings with
+load settles at the top of the swing. Nothing is judged before that, so a
+card already at 97 % when the dashboard starts never fires for being full.
+The settled level then stays put — a model swapped out and back in returns
+to it — until a rescan (`r`), after which every card settles afresh at what
+the models now on it hold.
 
 "Usual" is the median of the model's own decode rate, one sample a second
 over its last ten minutes of decoding, taken only from samples within a
@@ -502,6 +514,8 @@ new usual. A zero rate is not judged at all (an engine that reports rates
 only at completion would otherwise always be "slow"). A synthesised unified
 pool (GB10 / DGX Spark, where the bar is a server's own reservation over
 system RAM) does not raise the VRAM alert; a driver-measured APU pool does.
+The NVML temperature limits were read on a P100 (82 °C) and a V100 (83 °C
+die, 85 °C memory).
 Ollama, whose poller reports only once, and a server refusing the API key,
 which the status line already names, are not watched for silence.
 
@@ -521,8 +535,9 @@ notifier here) the status line says so once and the bell carries on alone.
 `--alerts off` turns the lot off. All four settings are on the settings
 screen.
 
-In `--demo` the second card's memory fills to 97 % for half a minute every
-four minutes, starting 50 s in, so the VRAM alert can be seen.
+In `--demo` the second card settles at about 90 % in its first half
+minute, then fills to 97 % for half a minute every four minutes, starting
+50 s in, so the VRAM alert can be seen.
 
 ---
 
@@ -738,7 +753,8 @@ concurrent request traces.
 --log-every 1.0      seconds between --log-db sample rows
 --log-db-max-mb 1024 size cap for --log-db; oldest rows are dropped (0 = none)
 --alerts banner      off | banner | bell | notify (see Alerts)
---alert-vram-pct 95  VRAM alert threshold, percent of a card's memory
+--alert-vram-pct 95  VRAM alert threshold, percent of a card's memory, for
+                     growth past where it settled (see Alerts)
 --alert-temp-c auto  GPU temperature alert, °C; auto = the card's own limit
 --alert-slow-pct 50  slow-decode alert, percent of the model's usual rate
 --version, -v        print the version and exit

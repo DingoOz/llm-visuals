@@ -153,7 +153,8 @@ pub struct Args {
     #[arg(long, default_value = "banner", value_parser = ["off", "banner", "bell", "notify"])]
     pub alerts: String,
 
-    /// VRAM alert: percent of a card's memory in use
+    /// VRAM alert: percent of a card's memory in use, once it has grown
+    /// past the level it settled at
     #[arg(long, default_value_t = 95.0, value_parser = parse_percent)]
     pub alert_vram_pct: f32,
 
