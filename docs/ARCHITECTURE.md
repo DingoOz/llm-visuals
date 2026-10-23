@@ -129,6 +129,15 @@ above the PCIe link cap (`pcie_link_mb_s(gen, width)`) is dropped.
 `spec.steps_per_sec` when `/metrics` is served, else decode tok/s; during
 prefill it is `prefill tok/s ÷ ubatch`.
 
+**Peak memory bandwidth** is driver arithmetic, not an estimate:
+`bus width / 8 × max memory clock × 2` from NVML
+(`nvmlDeviceGetMemoryBusWidth`, `nvmlDeviceGetMaxClockInfo(MEM)`), read once
+per card. The VRAM stream's ceiling combines the cards that hold weights:
+`Σ bytes_i / Σ (bytes_i / peak_i)` under llama.cpp's layer split, where the
+cards read their shares one after another, and `Σ bytes_i / max (bytes_i /
+peak_i)` under a parallel one (tensor-parallel safetensors servers,
+`--split-mode row`). It is unknown unless every such card has a peak.
+
 ## Timing model
 
 - Pollers run on their own tasks and push into bounded channels.

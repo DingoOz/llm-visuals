@@ -803,8 +803,19 @@ impl Renderer {
         while !extras.is_empty() && fixed + width_of(&extras) + min_bar > w {
             extras.pop();
         }
-        tail.extend(extras);
         let bar_w = w.saturating_sub(fixed).clamp(4, 30);
+        // The card's peak memory bandwidth, only where it fits whole beside
+        // the bar: every card's bar keeps the same width so they line up.
+        if let Some(peak) = g.mem_peak_gb_s.filter(|_| !g.unified) {
+            let peak = Span::styled(
+                format!("  {}GB/s", fmt_compact(peak)),
+                Style::default().fg(pal::c(pal::TEXT_MUTED)),
+            );
+            if fixed + bar_w + width_of(&extras) + width_of(std::slice::from_ref(&peak)) <= w {
+                extras.push(peak);
+            }
+        }
+        tail.extend(extras);
         // Highlight cards the focused model is pinned to (affinity /
         // gpu_indices): white for its cards, grey for everyone else's.
         let affinity = d
@@ -3460,6 +3471,18 @@ impl Renderer {
                 missing: None,
             });
         } else {
+            // With the cards' peak known, the first bar is the weight stream
+            // against it, and the reading is GB/s of peak; the controllers'
+            // busy % stay beside it.
+            let peak = bw.vram_peak_gb_s.filter(|_| layout.known);
+            if let Some(peak) = peak {
+                channels.push(Channel {
+                    label: "bw".into(),
+                    meter: &bw.vram,
+                    text: format!("{:.0}%", bw.vram_gb_s / peak * 100.0),
+                });
+                facts[0] = fact("peak", format!("{} GB/s", fmt_compact(peak)), pal::TEAL);
+            }
             for g in d.gpus {
                 let i = g.index as usize;
                 if let Some(m) = bw.vram_busy.get(i) {
@@ -3471,14 +3494,26 @@ impl Renderer {
                     });
                 }
             }
-            facts.push(dim("mem ctrl busy %".into()));
+            let (value, unit, tag) = match peak {
+                Some(peak) => (
+                    format!("{}/{}", fmt_compact(bw.vram_gb_s), fmt_compact(peak)),
+                    "GB/s",
+                    "est",
+                ),
+                None => (format!("{busiest:.0}"), "%", "busy"),
+            };
+            facts.push(dim(if peak.is_some() {
+                "% of peak, ctrl busy".into()
+            } else {
+                "mem ctrl busy %".into()
+            }));
             stages.push(Stage {
                 id: StageId::Vram,
                 title: "VRAM",
                 accent: pal::TEAL,
-                value: format!("{busiest:.0}"),
-                unit: "%",
-                tag: "busy",
+                value,
+                unit,
+                tag,
                 channels,
                 facts,
                 missing: if d.gpus.is_empty() {
