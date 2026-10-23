@@ -148,6 +148,33 @@ pub struct Args {
     #[arg(long, default_value_t = 1024)]
     pub log_db_max_mb: u64,
 
+    /// Benchmark the focused server while the dashboard shows it: fixed
+    /// prompts at each --bench-ctx length, streamed through /v1/completions
+    #[arg(long)]
+    pub bench: bool,
+
+    /// Prompt lengths in tokens the benchmark measures (k = ×1024); lengths
+    /// that do not fit the server's context are skipped
+    #[arg(long, default_value = "512,2k,8k,16k,32k", value_name = "LIST")]
+    pub bench_ctx: String,
+
+    /// Requests per prompt length
+    #[arg(long, default_value_t = 3, value_name = "N")]
+    pub bench_repeat: usize,
+
+    /// Tokens each benchmark request generates
+    #[arg(long, default_value_t = 256, value_name = "N")]
+    pub bench_gen: usize,
+
+    /// Name for this benchmark run in the log (default: model and time)
+    #[arg(long, value_name = "NAME")]
+    pub bench_tag: Option<String>,
+
+    /// Compare logged benchmark runs by tag (default: the last four tags)
+    /// and exit
+    #[arg(long, num_args = 0.., value_name = "TAG")]
+    pub bench_report: Option<Vec<String>>,
+
     /// Print the version and exit
     #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
     version: Option<bool>,

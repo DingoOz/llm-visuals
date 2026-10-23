@@ -1,4 +1,5 @@
 mod bandwidth;
+mod bench;
 mod colors;
 mod config;
 mod dblog;
@@ -587,6 +588,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let launch = settings::launch();
     let mut args = launch.args.clone();
+    // `--bench-report`: a table on stdout, no terminal takeover.
+    if let Some(tags) = &args.bench_report {
+        let path = args
+            .log_db_path()
+            .or_else(settings::default_db_path)
+            .ok_or("no home directory for the log database")?;
+        let runs = dblog::bench_runs(&path)?;
+        let picked = bench::select_runs(&runs, tags)?;
+        println!("bench report — {}\n", path.display());
+        print!("{}", bench::format_report(&picked));
+        return Ok(());
+    }
+    // Checked before the terminal is taken over, so a mistake reads plainly.
+    let bench_config = if args.bench {
+        if args.demo {
+            return Err("--bench needs a real server; --demo has none to send requests to".into());
+        }
+        if args.bench_repeat == 0 || args.bench_gen == 0 {
+            return Err("--bench-repeat and --bench-gen must be at least 1".into());
+        }
+        Some(bench::Config {
+            ctx: bench::parse_ctx_list(&args.bench_ctx)?,
+            repeat: args.bench_repeat,
+            gen: args.bench_gen,
+        })
+    } else {
+        None
+    };
     let auth = HttpAuth::from_key_file(args.api_key_file.as_deref())?;
     colors::init_color_mode(&args.color);
     let mut theme_name = args.theme.clone();
@@ -599,6 +628,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut slots: Vec<ModelSlot> = discovered.into_iter().map(ModelSlot::new).collect();
     let mut focus: usize = 0;
+    if bench_config.is_some() && slots.iter().all(|s| s.model.port.is_none()) {
+        return Err(endpoint_err
+            .unwrap_or_else(|| "--bench: no inference server with a port was found".into())
+            .into());
+    }
 
     let moe_experts = slots
         .first()
@@ -801,6 +835,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let read_ctx = |args: &Args| log_path(args).and_then(|p| dblog::context_speed(&p));
     let mut last_visual_activity = Instant::now();
 
+    // `--bench`: the run starts once the poller has reported the server's
+    // own context size (or after a moment without one), so the plan skips
+    // lengths it cannot hold.
+    let (bench_tx, mut bench_rx) = mpsc::channel::<bench::BenchEvent>(64);
+    let mut bench_wait: Option<(bench::Config, Instant)> =
+        bench_config.map(|c| (c, Instant::now()));
+    let mut bench_run: Option<bench::BenchSession> = None;
+    // The slot being benchmarked, and its finished-request count when the
+    // current request was sent: the next request row it closes is ours.
+    let mut bench_slot: u32 = 0;
+    let mut bench_before: u64 = 0;
+    // Results waiting (briefly) for the dashboard's own row of the request.
+    let mut bench_pending: Vec<(bench::BenchResult, u64, Instant)> = Vec::new();
+    let mut bench_open = false;
+
     loop {
         tokio::task::yield_now().await;
         let mut rescan = false;
@@ -867,6 +916,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if close {
                         settings_form = None;
                     }
+                } else if key.kind == KeyEventKind::Press && bench_open {
+                    if matches!(
+                        key.code,
+                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('B')
+                    ) {
+                        bench_open = false;
+                    }
                 } else if key.kind == KeyEventKind::Press && log_view.is_some() {
                     match key.code {
                         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('l') => log_view = None,
@@ -917,6 +973,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             settings_form = Some(settings::SettingsForm::new(&args))
                         }
                         KeyCode::Char('l') => log_view = Some(read_log(&args)),
+                        KeyCode::Char('B') if bench_run.is_some() => bench_open = true,
                         KeyCode::Char('c') => {
                             let speeds = read_ctx(&args);
                             // Open on the focused model when it has samples.
@@ -1091,6 +1148,147 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             status = status_for(&slots, false);
         }
 
+        if let Some((cfg, since)) = &bench_wait {
+            let target = slots
+                .iter()
+                .enumerate()
+                .find(|(i, s)| *i == focus && s.model.port.is_some())
+                .or_else(|| {
+                    slots
+                        .iter()
+                        .enumerate()
+                        .find(|(_, s)| s.model.port.is_some())
+                });
+            let ready = target.is_some_and(|(_, s)| s.live.ctx_max > 0)
+                || now.duration_since(*since) > Duration::from_secs(3);
+            if let (true, Some((i, slot))) = (ready, target) {
+                let m = &slot.model;
+                let tag = args.bench_tag.clone().unwrap_or_else(|| {
+                    format!(
+                        "{} {}",
+                        m.short_name(),
+                        chrono::Local::now().format("%Y-%m-%d %H:%M")
+                    )
+                });
+                let mut session =
+                    bench::BenchSession::new(tag, m.name.clone(), m.engine.clone(), cfg.clone());
+                session.gpus = latest_gpu
+                    .iter()
+                    .map(|g| g.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                session.settings = if m.cmdline.is_empty() {
+                    cfg.describe()
+                } else {
+                    format!("{} · {}", cfg.describe(), bench::redact_cmdline(&m.cmdline))
+                };
+                let target = bench::Target {
+                    host: m.host.clone(),
+                    port: m.port.unwrap_or(0),
+                    auth: auth_for(m, &auth),
+                    name: m.name.clone(),
+                    ctx_max: slot.ctx_max,
+                };
+                bench_slot = m.key();
+                focus = i;
+                status = session.progress();
+                bench_run = Some(session);
+                tokio::spawn(bench::run(target, cfg.clone(), bench_tx.clone()));
+                bench_wait = None;
+            }
+        }
+        let mut bench_news = false;
+        while let Ok(event) = bench_rx.try_recv() {
+            ui_changed = true;
+            let Some(run) = bench_run.as_mut() else {
+                continue;
+            };
+            // Its own status lines aside, every event changes the progress.
+            bench_news |= !matches!(event, bench::BenchEvent::Status(_));
+            match event {
+                bench::BenchEvent::Plan {
+                    model_id,
+                    plan,
+                    skipped,
+                } => {
+                    run.model_id = model_id;
+                    run.plan = plan;
+                    run.skipped = skipped;
+                    run.state = bench::SessionState::Running;
+                    if let Some(log) = db.as_ref() {
+                        match log.bench_run(run) {
+                            Ok(id) => run.run_id = Some(id),
+                            Err(e) => status = format!("bench not logged: {e}"),
+                        }
+                    }
+                }
+                bench::BenchEvent::Status(s) => status = s,
+                bench::BenchEvent::Request { ctx, rep } => {
+                    run.current = Some((ctx, rep));
+                    bench_before = slot_of
+                        .get(&bench_slot)
+                        .and_then(|i| slots.get(*i))
+                        .map_or(0, |s| s.perf.finished);
+                }
+                bench::BenchEvent::Result(r) => bench_pending.push((r, bench_before, now)),
+                bench::BenchEvent::Done => run.state = bench::SessionState::Done,
+                bench::BenchEvent::Failed(e) => run.state = bench::SessionState::Failed(e),
+            }
+            if !matches!(
+                run.state,
+                bench::SessionState::Starting | bench::SessionState::Running
+            ) {
+                run.current = None;
+            }
+        }
+        // Attach the dashboard's own row of each request once the poller
+        // has closed it; after a few seconds without one, go without.
+        if let Some(run) = bench_run.as_mut() {
+            let slot = slot_of.get(&bench_slot).and_then(|i| slots.get(*i));
+            let mut i = 0;
+            let mut finished = false;
+            while i < bench_pending.len() {
+                let (_, before, at) = &bench_pending[i];
+                // The first row closed after the request was sent; `history`
+                // ends with the `finished - before` rows closed since.
+                let row = slot.and_then(|s| {
+                    let closed = s.perf.finished.checked_sub(*before)? as usize;
+                    if closed == 0 {
+                        return None;
+                    }
+                    s.perf
+                        .history
+                        .get(s.perf.history.len().checked_sub(closed)?)
+                });
+                if row.is_none() && now.duration_since(*at) < Duration::from_secs(3) {
+                    i += 1;
+                    continue;
+                }
+                let (mut r, ..) = bench_pending.remove(i);
+                if let Some(rec) = row {
+                    r.dash_prefill_tps = Some(rec.avg_prefill_tps() as f64).filter(|v| *v > 0.0);
+                    r.dash_decode_tps = Some(rec.avg_decode_tps() as f64).filter(|v| *v > 0.0);
+                }
+                if let (Some(log), Some(id)) = (db.as_ref(), run.run_id) {
+                    if let Err(e) = log.bench_result(id, &r) {
+                        status = format!("bench not logged: {e}");
+                    }
+                }
+                run.results.push(r);
+                finished = true;
+            }
+            if finished || bench_news {
+                status = run.progress();
+            }
+            // The table opens by itself when the last result is in.
+            if finished
+                && bench_pending.is_empty()
+                && !matches!(run.state, bench::SessionState::Running)
+            {
+                bench_open = true;
+            }
+        }
+
         while let Ok(event) = events_rx.try_recv() {
             ui_changed = true;
             match event {
@@ -1215,6 +1413,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             settings: settings_form.as_ref(),
             log: log_view.as_ref(),
             ctx_speed: ctx_view.as_ref().map(|(s, i)| (s, *i)),
+            bench: bench_run.as_ref().filter(|_| bench_open),
+            bench_running: bench_run.is_some(),
         };
         renderer.render_frame(&mut terminal, &dash);
 
@@ -1227,6 +1427,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     crossterm::terminal::disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
     _guard.restored = true;
+    // The results outlive the screen, logged or not.
+    if let Some(run) = bench_run.filter(|r| !r.results.is_empty()) {
+        print!("{}", bench::format_session(&run));
+        match (run.run_id, args.log_db_path()) {
+            (Some(id), Some(path)) => println!(
+                "logged as run {id} in {} (compare with --bench-report)",
+                path.display()
+            ),
+            (_, None) => println!("not logged: --log-db is off"),
+            _ => println!("not logged: the log database refused the write"),
+        }
+    }
     Ok(())
 }
 
