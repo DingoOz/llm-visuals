@@ -19,6 +19,7 @@ use crate::gpu::GpuStats;
 use crate::landscape::{self, Camera};
 use crate::model_detect::DetectedModel;
 use crate::observe::{ExpertStats, LiveStats};
+use crate::ollama;
 use crate::perf::{Meter, PerfTracker, Phase, RequestRecord};
 use crate::pipeline::{GeneratedText, TokenBuffer};
 use crate::settings::{Kind, SettingsForm};
@@ -366,10 +367,13 @@ impl Renderer {
                 segs.push((
                     8,
                     vec![
-                        Span::styled(m.engine.clone(), st(pal::TEXT)),
+                        Span::styled(m.engine_label().to_string(), st(pal::TEXT)),
                         Span::styled(format!(" pid {}", m.pid), st(pal::TEXT_DIM)),
                     ],
                 ));
+                if let Some(o) = &d.live.ollama {
+                    segs.extend(ollama_segments(o, d.perf.phase != Phase::Idle));
+                }
                 if let Some(g) = &m.gguf {
                     segs.push((4, vec![Span::styled(g.architecture.clone(), st(pal::TEXT))]));
                     segs.push((
@@ -419,7 +423,16 @@ impl Renderer {
                     }
                     segs.push((9, seg));
                 }
-                if let Some(q) = quant_from_path(m) {
+                // An Ollama blob is named by its hash; the daemon knows the quant.
+                let ollama_quant = || {
+                    d.live
+                        .ollama
+                        .as_ref()
+                        .and_then(|o| o.loaded.as_ref())
+                        .map(|p| p.quantization.clone())
+                        .filter(|q| !q.is_empty())
+                };
+                if let Some(q) = quant_from_path(m).or_else(ollama_quant) {
                     segs.push((2, vec![Span::styled(q, st(pal::TEAL))]));
                 }
                 if !m.tensor_split.is_empty() {
@@ -501,6 +514,10 @@ impl Renderer {
         let w = inner.width as usize;
         let h = inner.height as usize;
         let mut lines: Vec<Line> = Vec::with_capacity(h);
+        if d.live.ollama.as_ref().is_some_and(|o| !o.counters) {
+            self.render_no_counters(frame, inner, d);
+            return;
+        }
 
         // Big numerals for the decode rate.
         let live = p.phase == Phase::Decode;
@@ -642,6 +659,53 @@ impl Renderer {
                 lines.push(Line::from(spans));
             }
         }
+        frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    }
+
+    /// The throughput panel for an Ollama slot with no token counters: say
+    /// why there are no rates rather than draw zeros, and show what the
+    /// daemon does report.
+    fn render_no_counters(&self, frame: &mut Frame, inner: Rect, d: &Dashboard) {
+        let w = inner.width as usize;
+        let st = |rgb| Style::default().fg(pal::c(rgb));
+        let legacy = d
+            .detected
+            .is_some_and(|m| ollama::is_legacy_runner(&m.cmdline));
+        let why = if legacy {
+            "this Ollama's runner has no token counters; newer releases run llama-server, which does"
+        } else {
+            "Ollama's API has no token counters, and the llama-server runner that has them is not visible from here"
+        };
+        let mut lines = vec![Line::from(Span::styled(
+            truncate("throughput n/a", w),
+            st(pal::AMBER).add_modifier(Modifier::BOLD),
+        ))];
+        lines.extend(
+            wrap_words(why, w)
+                .into_iter()
+                .map(|l| Line::from(Span::styled(l, st(pal::TEXT_DIM)))),
+        );
+        if let Some(p) = d.live.ollama.as_ref().and_then(|o| o.loaded.as_ref()) {
+            let gb = |b: u64| format!("{:.1} GB", b as f64 / 1e9);
+            lines.push(Line::from(vec![
+                Span::styled("resident ", st(pal::TEXT_DIM)),
+                Span::styled(gb(p.size), st(pal::TEXT)),
+                Span::styled("  ·  vram ", st(pal::TEXT_DIM)),
+                Span::styled(gb(p.size_vram), st(pal::BLUE)),
+                Span::styled("  ·  ", st(pal::TEXT_MUTED)),
+                Span::styled(p.processor(), st(pal::TEAL)),
+            ]));
+            if p.context_length > 0 {
+                lines.push(Line::from(vec![
+                    Span::styled("context ", st(pal::TEXT_DIM)),
+                    Span::styled(fmt_int(p.context_length), st(pal::TEXT)),
+                ]));
+            }
+        }
+        let lines: Vec<Line> = lines
+            .into_iter()
+            .map(|l| Line::from(fit_spans(&l.spans, w)))
+            .collect();
         frame.render_widget(Paragraph::new(Text::from(lines)), inner);
     }
 
@@ -1352,6 +1416,8 @@ impl Renderer {
             lines.push(Line::from(facts));
             let hint = if d.detected.is_some_and(|m| m.engine == "strata") {
                 "Strata reports draft acceptance from 0.1.35"
+            } else if d.detected.is_some_and(ollama::is_runner) {
+                "Ollama starts llama-server without --metrics: no acceptance stats"
             } else {
                 "start llama-server with --metrics for acceptance stats"
             };
@@ -2831,6 +2897,22 @@ impl Renderer {
         let focused = i == d.focus;
         let p = m.perf;
         let (badge_rgb, badge) = phase_badge(p.phase);
+        // An idle Ollama model carries its unload countdown in the badge;
+        // one the daemon has dropped says so.
+        let ps = m.live.ollama.as_ref();
+        let badge = match ps.map(|o| o.loaded.as_ref()) {
+            // A runner's model was unloaded; the daemon's slot has none yet.
+            Some(None) if counters_of(ps) => "evicted".to_string(),
+            Some(None) => "empty".to_string(),
+            Some(Some(loaded)) if p.phase == Phase::Idle => {
+                match ollama::expiry_short(loaded, chrono::Utc::now().timestamp()) {
+                    Some(left) => format!("idle {left}"),
+                    None => badge.to_string(),
+                }
+            }
+            _ => badge.to_string(),
+        };
+        let counters = counters_of(ps);
         let name_style = if focused {
             Style::default()
                 .fg(pal::c(pal::WHITE))
@@ -2896,7 +2978,11 @@ impl Renderer {
 
         let rate = p.decode_tps_smooth;
         spans.push(Span::styled(
-            format!("{:>6}", fmt_rate(rate)),
+            if counters {
+                format!("{:>6}", fmt_rate(rate))
+            } else {
+                format!("{:>6}", "n/a")
+            },
             Style::default()
                 .fg(if rate > 0.0 {
                     pal::gradient_color(pal::FLOW, 0.85)
@@ -2933,7 +3019,13 @@ impl Renderer {
         }
 
         if show_vram {
-            let gb = m.detected.mem_used_mb as f32 / 1024.0;
+            // A daemon found by its port has no process for the driver to
+            // charge; the daemon's own VRAM count stands in.
+            let mb = match ps.and_then(|o| o.loaded.as_ref()) {
+                Some(l) if m.detected.mem_used_mb == 0 => l.size_vram / (1024 * 1024),
+                _ => m.detected.mem_used_mb,
+            };
+            let gb = mb as f32 / 1024.0;
             spans.push(Span::styled(
                 format!("{gb:>5.1}G "),
                 Style::default().fg(pal::c(pal::BLUE)),
@@ -3030,7 +3122,7 @@ impl Renderer {
                     .bg(pal::c(pal::dim_rgb(badge_rgb, glow)))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("  {}", m.detected.engine), muted),
+            Span::styled(format!("  {}", m.detected.engine_label()), muted),
             Span::styled(
                 match m.detected.port {
                     Some(port) => format!(":{port}"),
@@ -4386,6 +4478,26 @@ fn fmt_clock(d: Duration) -> String {
     format!("{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
 }
 
+/// Greedy word wrap to `width` columns; a word longer than a line is cut.
+fn wrap_words(s: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in s.split_whitespace() {
+        let need = cur.chars().count() + usize::from(!cur.is_empty()) + word.chars().count();
+        if !cur.is_empty() && need > width {
+            lines.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines.into_iter().map(|l| truncate(&l, width)).collect()
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -4448,6 +4560,69 @@ fn vision_label(v: &Vision, gpus: &[GpuStats]) -> Option<(String, Option<String>
         Place::Gpus(_) => ("GPU".into(), None),
         Place::Unknown => ("loaded".into(), None),
     })
+}
+
+/// Whether a slot's own port serves token counters: everything but an
+/// Ollama daemon or legacy runner.
+fn counters_of(ps: Option<&ollama::Status>) -> bool {
+    ps.map_or(true, |o| o.counters)
+}
+
+/// Header segments for an Ollama model, with their keep priorities: when
+/// it unloads (kept longest: a model about to vanish is news), where it
+/// runs, and its size class.
+fn ollama_segments(o: &ollama::Status, busy: bool) -> Vec<(u8, Vec<Span<'static>>)> {
+    let st = |rgb| Style::default().fg(pal::c(rgb));
+    let mut segs = Vec::new();
+    let Some(p) = &o.loaded else {
+        segs.push((
+            9,
+            vec![Span::styled(
+                "not loaded",
+                st(pal::AMBER).add_modifier(Modifier::BOLD),
+            )],
+        ));
+        return segs;
+    };
+    let now = chrono::Utc::now().timestamp();
+    if let Some(label) = ollama::expiry_label(p, now, busy) {
+        let soon = p.expires_at.is_some_and(|t| t - now < 60);
+        segs.push((
+            7,
+            vec![Span::styled(
+                label,
+                st(if soon { pal::AMBER } else { pal::TEXT }),
+            )],
+        ));
+    }
+    let proc = p.processor();
+    if !proc.is_empty() {
+        let all_gpu = p.cpu_bytes() == 0;
+        segs.push((
+            3,
+            vec![Span::styled(
+                proc,
+                st(if all_gpu { pal::TEAL } else { pal::AMBER }),
+            )],
+        ));
+    }
+    if !p.parameter_size.is_empty() {
+        segs.push((
+            2,
+            vec![Span::styled(p.parameter_size.clone(), st(pal::TEXT))],
+        ));
+    }
+    // Only the daemon's own slot lists the rest; each runner has its own.
+    if !o.counters && o.others > 0 {
+        segs.push((
+            1,
+            vec![Span::styled(
+                format!("+{} loaded", o.others),
+                st(pal::TEXT_DIM),
+            )],
+        ));
+    }
+    segs
 }
 
 fn quant_from_path(m: &DetectedModel) -> Option<String> {
@@ -4617,6 +4792,16 @@ mod tests {
             cmd_arg("x --cache-type-k q8_0 --y", "--cache-type-k").as_deref(),
             Some("q8_0")
         );
+    }
+
+    #[test]
+    fn words_wrap_to_the_width() {
+        assert_eq!(
+            wrap_words("Ollama's API has no token counters", 14),
+            vec!["Ollama's API", "has no token", "counters"]
+        );
+        assert_eq!(wrap_words("", 10), Vec::<String>::new());
+        assert_eq!(wrap_words("a b", 80), vec!["a b"]);
     }
 
     #[test]

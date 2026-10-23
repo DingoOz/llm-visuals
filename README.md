@@ -522,6 +522,7 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | VRAM weights vs KV | llama.cpp: **estimate** from GGUF file size × `--tensor-split`. SGLang: `memory.weight_gb` and `memory.kv_cache_gb` from `/v1/loads`. vLLM and other safetensors servers: **estimate** from the summed size of the served directory's weight shards. On a part with no device memory (GB10 / DGX Spark) the bar is labelled `UNIFIED`: used = the server's weight + KV + CUDA-graph GiB from `/v1/loads` summed over the models that report it, denominator = system RAM — the pool the accelerator shares. vLLM has no `/v1/loads`; a vLLM server is counted by its own declared numbers instead: the served directory's shard sizes for weights, plus the whole `--kv-cache-memory-bytes` pool it was launched with, which vLLM allocates at start-up (the value is read as vLLM reads it: `16g` is 16 × 10⁹ bytes, `16G` is 16 GiB). `kv_cache_usage_perc` from `/metrics` lights the share of that pool holding tokens. Without that flag but with `--gpu-memory-utilization` on the command line, the fill is that fraction of system RAM — the budget vLLM claims at start-up, weights included — never less than the shards; the segment past the weights is then the rest of that budget, so it holds activations and CUDA graphs as well as the KV pool. With neither flag the pool is not counted (vLLM's 0.9 default is not on the command line), and with no number from any model the row degrades to zeros rather than a stand-in. Shards one directory down (`tensors/`) are found when the served directory has none of its own. An amdgpu APU row is the exception: its pool is measured from the driver's VRAM + GTT heaps, which already count every GPU process, so no server declaration overwrites it |
 | layers, heads, experts, MTP layers, engram, quant | GGUF header, or HuggingFace `config.json` (`num_hidden_layers`, `num_attention_heads`, `num_experts` / `num_local_experts`, `num_experts_per_tok`) for safetensors dirs |
 | vision encoder | llama.cpp: `modalities.vision` from `GET /props`, else `--mmproj` / `-hf` on the command line or `LLAMA_ARG_MMPROJ` in `/proc/<pid>/environ`. Placement: CPU for `--no-mmproj-offload` or a process with no GPU runtime in `/proc/<pid>/maps`; otherwise `--mmproj-device` or the first GPU device, mapped to a card by the CUDA driver's `cuDeviceGetPCIBusId` (run in a child process with the server's CUDA variables) matched against nvidia-smi's `pci.bus_id`, or by the one card the process occupies. vLLM / SGLang: `vision_config` in `config.json`, on the model's GPUs (none with `--language-model-only`) |
+| Ollama tag, unload time, CPU/GPU split | `name`, `expires_at`, `size` and `size_vram` from the daemon's `GET /api/ps`; a runner's entry is the tag whose manifest names its blob. CPU-side bytes = `size − size_vram`, which Ollama measures from llama-server's buffer report (weights of CPU-side layers, their KV cache and host compute buffers). See [Ollama](#ollama) |
 | layer → GPU | `--tensor-split` proportions |
 | layer activity | utilisation of the GPU the layer lives on, smoothed |
 | expert blocks | real top-k routing from `GET /experts` (patched server), else a deterministic stand-in keyed by layer and token step |
@@ -664,6 +665,53 @@ server's own port when it runs behind a gateway; API keys work through the
 existing `--api-key-file` option. As with the vLLM adapter, request rows
 reconstructed from aggregate counters are activity windows, not individual
 concurrent request traces.
+
+### Ollama
+
+Nothing to configure. Current Ollama runs every loaded GGUF model in a
+bundled `llama-server` (`…/lib/ollama/llama-server --model
+…/blobs/sha256-…`), one process per model, on a port of its own. Each of
+those is found and polled like any llama-server, through `/slots`, so
+throughput, TTFT, context and the request log are real. The header names
+the engine `ollama`, and the model by its tag (`qwen3:8b`), read from the
+manifest in the same store that points at the blob. The blob is a GGUF
+without the extension, so layers, heads, experts and the tensor table come
+from its header as usual.
+
+What only the daemon knows comes from its `GET /api/ps`, asked every 5 s
+(every request is a line in Ollama's log):
+
+- **when the model unloads**: `unloads in 4m` in the header and `idle 4m` in
+  the models strip, counted down locally between polls; `kept loaded` for
+  `keep_alive -1`; nothing while a request runs, since Ollama only restarts
+  the timer when it ends. When the daemon drops the model its runner exits,
+  and within a few seconds the strip reads `evicted` and the header
+  `not loaded`. A model loaded again runs in a new runner: press `r` to pick
+  it up;
+- **where it runs**: `100% GPU`, `100% CPU` or `38%/62% CPU/GPU`, as
+  `ollama ps` prints it. The part in system RAM is the memory pipeline's
+  CPU-side figure, and the part in VRAM caps the weights the VRAM bar puts on
+  the cards: a model Ollama runs on the CPU has none there;
+- the size class and quantization (`1.3B`, `Q4_K_M`).
+
+The daemon is found from `OLLAMA_HOST` in the runner's environment (or its
+parent's), else at `127.0.0.1:11434`. The environment of a process owned by
+another user cannot be read, so a system service on a custom port is not
+found that way; the runner's own numbers still are.
+
+Older releases (before mid-2026) ran `ollama runner` instead, and a daemon in
+a container or reached with `--endpoint http://localhost:11434` hides its
+runner. Neither has token counters, so those slots show what `/api/ps` has
+(tag, resident and VRAM bytes, context, unload countdown) and the throughput
+panel says `throughput n/a` rather than drawing zeros. A daemon slot shows
+the model it has loaded first (Ollama lists the longest-lived first), with a
+`+N loaded` count, and reads the GGUF from the local store when the tag is
+found there: `OLLAMA_MODELS`, `~/.ollama/models`, or the Linux service's
+`/usr/share/ollama/.ollama/models`. With nothing loaded the slot is named
+`ollama`.
+
+Ollama does not start llama-server with `--metrics`, so speculative
+acceptance is not available for its models.
 
 ---
 
@@ -833,8 +881,8 @@ card, and AMD cards still show their link generation and width but not live
 PCIe traffic. The other stages continue to work. Press `r` to retry.
 
 **RAM strip says "no tensor table".** The model path on the server's command
-line could not be opened as a GGUF (ollama blobs, remote paths, or a
-non-GGUF engine). Disk, PCIe and VRAM meters still work; the byte estimates
+line could not be opened as a GGUF (remote paths, a non-GGUF engine, or an
+Ollama daemon slot whose tag is not in a local store). Disk, PCIe and VRAM meters still work; the byte estimates
 need the file.
 
 **Throughput reads zero while the model is clearly working.** Another client

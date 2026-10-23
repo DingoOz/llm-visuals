@@ -109,6 +109,16 @@ impl DetectedModel {
         self.mem_used_mb == 0 && self.path.is_none() && self.gguf.is_none()
     }
 
+    /// The engine as the panels name it: a llama-server that Ollama started
+    /// is Ollama to whoever runs it, though it is polled as llama.cpp.
+    pub fn engine_label(&self) -> &str {
+        if self.engine == "llama.cpp" && crate::ollama::is_runner(self) {
+            "ollama"
+        } else {
+            &self.engine
+        }
+    }
+
     pub fn n_layers(&self) -> usize {
         self.gguf.as_ref().map(|g| g.n_layers).unwrap_or(0)
     }
@@ -132,7 +142,8 @@ impl DetectedModel {
 pub fn load_gguf_metadata(model: &mut DetectedModel, path: PathBuf) {
     let path = resolve_model_path(model.pid, &path, &model.name);
     model.path = Some(path.clone());
-    if path.extension().and_then(|e| e.to_str()) != Some("gguf") {
+    // An Ollama blob is a GGUF under its content hash, with no extension.
+    if path.extension().and_then(|e| e.to_str()) != Some("gguf") && !crate::ollama::is_blob(&path) {
         return;
     }
     if let Ok(info) = gguf::read_info(&path) {
@@ -687,13 +698,34 @@ pub fn detect_models() -> Vec<DetectedModel> {
         if m.engine == "strata" {
             apply_strata_config(m);
         }
+        // `ollama serve` listens where OLLAMA_HOST says, not on its command
+        // line; a runner's `--port` is its own and stays.
+        if m.engine == "ollama" && !crate::ollama::is_legacy_runner(&m.cmdline) {
+            if let Some((host, port)) = crate::ollama::env_host(m.pid) {
+                m.host = host;
+                m.port = Some(port);
+            }
+        }
         if let Some(path) = m.path.clone() {
             // A containerized server reports the model path as seen from
             // its own mount namespace (e.g. /model); re-anchor it through
             // /proc/<pid>/mountinfo so the size (and the GGUF metadata
             // below) reads the host-side file.
             let resolved = resolve_model_path(m.pid, &path, &m.name);
-            if resolved.extension().and_then(|e| e.to_str()) == Some("gguf") {
+            if crate::ollama::is_blob(&resolved) {
+                // Named by its content hash: the tag is in the manifests
+                // beside it, and failing those the GGUF's own name beats
+                // `sha256-…`, which is kept only when neither is there.
+                let stem = std::mem::take(&mut m.name);
+                m.name = crate::ollama::names_for_blob(&resolved)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default();
+                load_gguf_metadata(m, resolved);
+                if m.name.is_empty() {
+                    m.name = stem;
+                }
+            } else if resolved.extension().and_then(|e| e.to_str()) == Some("gguf") {
                 load_gguf_metadata(m, resolved);
             } else if resolved.is_dir() {
                 // Keep the resolved dir (load_gguf_metadata does the same for
@@ -1142,7 +1174,7 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
 
 /// Address to dial for a `--host` value. Wildcard binds accept local
 /// connections; a concrete address does not.
-fn connect_host(raw: &str) -> String {
+pub(crate) fn connect_host(raw: &str) -> String {
     let trimmed = raw.trim();
     let bare = trimmed
         .strip_prefix('[')
@@ -1837,6 +1869,22 @@ pub async fn probe_endpoint(
 
     if engine == "ollama" || port == 11434 {
         engine = "ollama".to_string();
+        // `/v1/models` lists every model pulled, loaded or not; the daemon's
+        // slot shows the one it has loaded, so name it after that.
+        // With nothing loaded it is just the daemon.
+        if let Ok(body) = http_get(host, port, "/api/ps", auth).await {
+            if let Some(loaded) = crate::ollama::parse_ps(&body) {
+                match loaded.into_iter().next() {
+                    Some(first) => {
+                        model_name = Some(first.name);
+                        if first.context_length > 0 {
+                            ctx_max = Some(first.context_length);
+                        }
+                    }
+                    None => model_name = Some("ollama".into()),
+                }
+            }
+        }
         if model_name.is_none() {
             if let Ok(body) = http_get(host, port, "/api/tags", auth).await {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
