@@ -19,6 +19,8 @@ is put together.
 - SGLang: `/v1/loads` poller, `/server_info`, worker folding, safetensors
   `config.json` architecture fields (also used by vLLM).
 - Decode speed vs context length (`c`), from the logged samples.
+- Regression flag: decode speed now vs the same model's logged week, per
+  context range and on the same GPU set.
 
 ## Ideas not yet done
 

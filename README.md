@@ -688,6 +688,10 @@ concurrent request traces.
 --log-db auto|off|FILE  SQLite log of samples and requests (default: auto)
 --log-every 1.0      seconds between --log-db sample rows
 --log-db-max-mb 1024 size cap for --log-db; oldest rows are dropped (0 = none)
+--regress-pct 10     flag a model decoding this many % slower than its own
+                     logged history at the same context lengths (0 = never)
+--regress-days 7     baseline for that flag: this many days back, minus the
+                     last 24 hours (2–365)
 --version, -v        print the version and exit
 ```
 
@@ -702,7 +706,7 @@ the account running the dashboard.
 ### Settings screen and saved defaults
 
 Press `s` to change the theme, colour depth, poll interval, model limits,
-GPUs and logging while the dashboard runs. `a` applies the values to this
+GPUs, logging and the regression flag while the dashboard runs. `a` applies the values to this
 session; `w` also saves them as the launch default, in
 `~/.config/llm-visuals/settings.json` (`%APPDATA%\llm-visuals` on Windows,
 `~/Library/Application Support/llm-visuals` on macOS). The file maps flag
@@ -742,6 +746,40 @@ samples taken while the model was decoding count; ones that overlap a prefill
 are left out, since their one-second window is partly empty. Ranges with fewer
 than five samples are dimmed. It opens on the focused model; `←` / `→` switch
 to the others in the file.
+
+### Regression flag
+
+When a model decodes noticeably slower than it used to, the header says so
+— `decode ▼18% vs 7d`, amber at the threshold and red at twice it — and
+the models strip carries the same `▼18%` beside its rate. A driver update,
+a card running hot, a changed flag or a new build all show up this way
+without anyone having to remember last week's number.
+
+The comparison is the model against itself, from the log:
+
+- **Now** is the last hour of samples; the **baseline** is the same model
+  from `--regress-days` (7) days ago up to a day ago. The last 24 hours are
+  left out so that a slowdown which started today is not averaged into the
+  thing it is measured against.
+- **Like with like.** Decode speed falls as the context fills, so a plain
+  mean mostly measures how long today's prompts were. Both windows are cut
+  into the context ranges the `c` screen uses, and only ranges with at least
+  five samples on each side are compared. The two means are weighted by
+  where the model is working now, and no verdict is given under 30 current
+  samples (about half a minute of decoding at the default `--log-every`).
+- **Same model, same cards.** A model is its name and engine, as logged.
+  Samples carry no GPU of their own, so the baseline keeps only the
+  ten-minute spans whose logged GPUs (index and name) match the ones the
+  model has now; a swapped card starts a fresh baseline rather than raising
+  a false alarm.
+
+Only slowdowns past `--regress-pct` (10 %) are flagged. Faster than before,
+or too little data, leaves the header alone; the `c` screen shows the
+comparison either way, as `7d` and `1h` columns beside each context range
+and a `last hour vs 1–7d ago` line, or `baseline: n/a` and the reason. The
+log is read on a background thread at start, every minute and when the set
+of models changes; the baseline itself is re-read hourly. The flag needs
+logging on, since this session's samples are half of the comparison.
 
 For anything else, query it directly:
 

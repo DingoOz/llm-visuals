@@ -280,6 +280,20 @@ impl SettingsForm {
                 "Oldest rows are dropped past this size; 0 = no cap".into(),
             ),
             field(
+                "Regression flag (%)",
+                "regress-pct",
+                Kind::Number,
+                args.regress_pct.to_string(),
+                "Flag a model decoding this much slower than its logged history; 0 = never".into(),
+            ),
+            field(
+                "Regression days",
+                "regress-days",
+                Kind::Number,
+                args.regress_days.to_string(),
+                "History compared against: this many days back, leaving out the last 24 h".into(),
+            ),
+            field(
                 "Max layers",
                 "max-layers",
                 Kind::Number,

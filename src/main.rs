@@ -15,6 +15,7 @@ pub mod nvml;
 mod observe;
 mod perf;
 mod pipeline;
+mod regress;
 mod render;
 mod safetensors;
 mod settings;
@@ -63,6 +64,8 @@ struct ModelSlot {
     num_layers: usize,
     num_heads: usize,
     ctx_max: usize,
+    /// The log's record of this model's decode speed, for the regression flag.
+    regression: Option<regress::History>,
 }
 
 impl ModelSlot {
@@ -85,7 +88,13 @@ impl ModelSlot {
             experts: None,
             experts_seen: 0,
             routing: None,
+            regression: None,
         }
+    }
+
+    /// How the log names this model.
+    fn log_key(&self) -> regress::ModelKey {
+        (self.model.name.clone(), self.model.engine.clone())
     }
 
     fn view(&self) -> ModelView<'_> {
@@ -97,6 +106,7 @@ impl ModelSlot {
             experts: self.experts.as_ref(),
             num_layers: self.num_layers,
             num_heads: self.num_heads,
+            regression: self.regression.as_ref(),
         }
     }
 }
@@ -511,6 +521,14 @@ async fn poll_server(
     }
 }
 
+/// How often the regression flag re-reads the log.
+const REGRESS_EVERY: Duration = Duration::from_secs(60);
+/// A read of the log, and the reader handed back with its baseline kept.
+type RegressResult = (
+    regress::Reader,
+    Result<HashMap<regress::ModelKey, regress::History>, String>,
+);
+
 /// Opens the log database `args` asks for; `Ok(None)` when logging is off.
 fn open_db(args: &Args) -> Result<Option<dblog::DbLog>, String> {
     let Some(path) = args.log_db_path() else {
@@ -606,6 +624,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|n| *n > 0)
         .unwrap_or(args.moe_experts);
     let mut renderer = Renderer::new(theme, args.max_layers, args.max_heads, moe_experts);
+    renderer.regress_pct = args.regress_pct;
 
     // Opened before raw mode so a bad explicit path fails with a readable
     // error. The default location only turns logging off: it was not asked for.
@@ -799,6 +818,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let read_log = |args: &Args| log_path(args).and_then(|p| dblog::summarize(&p));
     let read_ctx = |args: &Args| log_path(args).and_then(|p| dblog::context_speed(&p));
+    // The regression flag reads the log off the frame loop: at start, every
+    // minute, and whenever the set of models changes.
+    let (regress_tx, mut regress_rx) = mpsc::channel::<RegressResult>(1);
+    let mut regress_due = Instant::now();
+    // Away on its blocking thread while a read is in flight.
+    let mut regress_reader = Some(regress::Reader::default());
+    let mut regress_keys: Vec<regress::ModelKey> = Vec::new();
+    let mut regress_err: Option<String> = None;
     let mut last_visual_activity = Instant::now();
 
     loop {
@@ -833,6 +860,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     colors::init_color_mode(&new.color);
                                     renderer.max_layers = new.max_layers;
                                     renderer.max_heads = new.max_heads;
+                                    renderer.regress_pct = new.regress_pct;
+                                    regress_due = Instant::now();
                                     let relog = new.log_db_path() != args.log_db_path()
                                         || new.log_every != args.log_every
                                         || new.log_db_max_mb != args.log_db_max_mb;
@@ -853,6 +882,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         status.push_str("; GPU selection applies at next launch");
                                     }
                                     if relog {
+                                        // A different file is a different history.
+                                        for slot in &mut slots {
+                                            slot.regression = None;
+                                        }
                                         db = None; // close the old file before reopening
                                         match open_db(&args) {
                                             Ok(d) => db = d,
@@ -878,7 +911,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let n = speeds.as_ref().map_or(0, |v| v.len()).max(1);
                     match key.code {
                         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => ctx_view = None,
-                        KeyCode::Char('r') => *speeds = read_ctx(&args),
+                        KeyCode::Char('r') => {
+                            *speeds = read_ctx(&args);
+                            regress_due = Instant::now();
+                        }
                         KeyCode::Right | KeyCode::Tab => *sel = (*sel + 1) % n,
                         KeyCode::Left | KeyCode::BackTab => *sel = (*sel + n - 1) % n,
                         _ => {}
@@ -1135,6 +1171,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        while let Ok((reader, found)) = regress_rx.try_recv() {
+            regress_reader = Some(reader);
+            ui_changed = true;
+            match found {
+                Ok(mut map) => {
+                    regress_err = None;
+                    for slot in &mut slots {
+                        if let Some(h) = map.remove(&slot.log_key()) {
+                            slot.regression = Some(h);
+                        }
+                    }
+                }
+                Err(e) => regress_err = Some(e),
+            }
+        }
+        let models_changed = slots.len() != regress_keys.len()
+            || slots
+                .iter()
+                .zip(&regress_keys)
+                .any(|(s, k)| s.model.name != k.0 || s.model.engine != k.1);
+        let regress_now =
+            regress_reader.is_some() && !slots.is_empty() && (now >= regress_due || models_changed);
+        // Only the file this dashboard writes holds this session's samples.
+        if let Some(path) = regress_now
+            .then(|| db.as_ref().and(args.log_db_path()))
+            .flatten()
+        {
+            regress_due = now + REGRESS_EVERY;
+            regress_keys = slots.iter().map(ModelSlot::log_key).collect();
+            let (tx, days, keys) = (regress_tx.clone(), args.regress_days, regress_keys.clone());
+            let mut reader = regress_reader.take().expect("checked above");
+            tokio::task::spawn_blocking(move || {
+                let found = reader.read(&path, dblog::unix_now(), days, &keys);
+                let _ = tx.blocking_send((reader, found));
+            });
+        }
+
         // Preserve the 30 FPS animation cadence while a request is active and
         // while its heat/fade effects settle. Once fully idle, fresh telemetry
         // or input drives rendering at the 200 ms sample cadence. The loop
@@ -1215,6 +1288,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             settings: settings_form.as_ref(),
             log: log_view.as_ref(),
             ctx_speed: ctx_view.as_ref().map(|(s, i)| (s, *i)),
+            regress_off: if db.is_none() {
+                Some("--log-db is off")
+            } else {
+                regress_err.as_deref()
+            },
         };
         renderer.render_frame(&mut terminal, &dash);
 
