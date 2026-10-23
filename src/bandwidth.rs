@@ -27,6 +27,9 @@ pub struct Verdict {
 /// Build the weight layout from the detected model and current VRAM use.
 /// Weights on a GPU are estimated as the file's `--tensor-split` share,
 /// clamped to what the card actually holds; the remainder is CPU-side.
+/// Tensors llama.cpp's `-ot` / `--cpu-moe` rules placed are taken as placed:
+/// the ones in RAM are CPU-side outright, the ones pinned to a card join
+/// that card's share before the clamp.
 pub fn weight_layout(detected: Option<&DetectedModel>, gpus: &[GpuStats]) -> WeightLayout {
     let Some(m) = detected else {
         return WeightLayout::default();
@@ -44,6 +47,9 @@ pub fn weight_layout(detected: Option<&DetectedModel>, gpus: &[GpuStats]) -> Wei
         .unwrap_or((0, 0));
     let total = t.total_bytes;
     let active = t.active_bytes_per_token(n_exp, k);
+    let rules = m.offload.as_ref().filter(|o| o.n_rules > 0);
+    let mut cpu_by_rule = 0;
+    let mut cpu_active_bytes = None;
     // A unified part has no VRAM that weights could fail to fit in: the
     // pool is the GPU, and whatever the server did not report as resident
     // (file-offloaded lookup tables) is not a CPU-side layer either.
@@ -59,6 +65,7 @@ pub fn weight_layout(detected: Option<&DetectedModel>, gpus: &[GpuStats]) -> Wei
         0
     } else {
         let split_sum: f32 = m.tensor_split.iter().copied().sum::<f32>().max(1.0);
+        let shared = rules.map_or(total, |o| o.split_bytes);
         let mut on_gpu = 0u64;
         for g in gpus {
             let i = g.index as usize;
@@ -67,16 +74,34 @@ pub fn weight_layout(detected: Option<&DetectedModel>, gpus: &[GpuStats]) -> Wei
             } else {
                 m.tensor_split.get(i).copied().unwrap_or(0.0) / split_sum
             };
-            let want = (total as f64 * share as f64) as u64;
+            let pinned = rules.map_or(0, |o| o.pinned_on(g.index));
+            let want = (shared as f64 * share as f64) as u64 + pinned;
             on_gpu += want.min(g.mem_used_mb * 1024 * 1024);
         }
-        total.saturating_sub(on_gpu)
+        let cpu = total.saturating_sub(on_gpu);
+        if let Some(o) = rules {
+            cpu_by_rule = o.cpu_bytes.min(cpu);
+            // What the cards could not hold on top of the rules' share is
+            // read like the rest of the model, at its active fraction.
+            let spill = cpu - cpu_by_rule;
+            let rest_total = total.saturating_sub(o.cpu_bytes);
+            let rest_active = active.saturating_sub(o.cpu_active_bytes);
+            let spill_active = if rest_total == 0 {
+                0
+            } else {
+                (spill as f64 * rest_active as f64 / rest_total as f64) as u64
+            };
+            cpu_active_bytes = Some(o.cpu_active_bytes + spill_active);
+        }
+        cpu
     };
     WeightLayout {
         known: true,
         total_bytes: total,
         active_bytes: active,
         cpu_bytes,
+        cpu_by_rule,
+        cpu_active_bytes,
         ubatch: ubatch_from(&m.cmdline),
     }
 }
@@ -377,6 +402,7 @@ mod tests {
             active_bytes: 24_000_000_000,
             cpu_bytes: 6_000_000_000,
             ubatch: 512,
+            ..Default::default()
         };
         p.tick_bandwidth(&layout, now, 0.2);
         let v = assess(&p, &g);
@@ -413,6 +439,72 @@ mod tests {
         assert_eq!(l.cpu_bytes, 25_000_000_000 - on_gpu);
         assert_eq!(l.active_bytes, 24_000_000_000);
         assert_eq!(weight_layout(None, &gpus).known, false);
+    }
+
+    /// A 20 GB MoE (128 experts, 8 routed) whose 18 GB of experts are kept
+    /// in RAM by `--cpu-moe`, on a 24 GB card that holds the other 2 GB and
+    /// 10 GB of KV cache.
+    fn experts_on_cpu() -> (DetectedModel, Vec<GpuStats>) {
+        let mut m = crate::demo::demo_models(4096, 1).remove(0);
+        m.tensor_split = vec![];
+        m.cmdline = "llama-server -m m.gguf -ngl 99 --cpu-moe".into();
+        let mut table = vec![("token_embd.weight".to_string(), 400_000_000u64)];
+        for n in 0..40 {
+            table.push((format!("blk.{n}.attn_qkv.weight"), 40_000_000));
+            table.push((format!("blk.{n}.ffn_up_exps.weight"), 225_000_000));
+            table.push((format!("blk.{n}.ffn_down_exps.weight"), 225_000_000));
+        }
+        table.push(("output.weight".into(), 0));
+        if let Some(g) = m.gguf.as_mut() {
+            g.n_experts = 128;
+            g.n_experts_used = 8;
+        }
+        m.tensors = Some(crate::gguf::summarize_tensors(&table));
+        let rules = crate::offload::parse_rules(&m.cmdline, &Default::default());
+        m.offload = Some(crate::offload::place(&table, &rules, 128, 8, |_, _| None));
+        (m, vec![gpu(40.0, 30.0, 12_000)])
+    }
+
+    #[test]
+    fn experts_kept_in_ram_are_cpu_side_whatever_the_card_holds() {
+        let (m, gpus) = experts_on_cpu();
+        let l = weight_layout(Some(&m), &gpus);
+        // The split-share clamp alone would credit the card with 12 GB of
+        // weights and leave only 8 GB on the CPU side.
+        assert_eq!(l.cpu_bytes, 18_000_000_000);
+        assert_eq!(l.cpu_by_rule, 18_000_000_000);
+        // Each step reads the routed 8 of 128 experts from RAM, and the dense
+        // 1.6 GB from VRAM.
+        assert_eq!(l.cpu_active_bytes, Some(1_125_000_000));
+        let (ram, vram) = l.per_step();
+        assert_eq!(ram, 1_125_000_000.0);
+        assert_eq!(vram, 1_600_000_000.0);
+    }
+
+    #[test]
+    fn experts_in_ram_make_decode_ram_bound() {
+        let (m, gpus) = experts_on_cpu();
+        let (mut p, now) = decoding();
+        p.observe_gpu(&gpus, now);
+        p.tick_bandwidth(&weight_layout(Some(&m), &gpus), now, 0.2);
+        let v = assess(&p, &gpus);
+        assert_eq!(v.stage, Some(StageId::Ram));
+        assert!(v.detail.contains("18.0 GB"), "{}", v.detail);
+    }
+
+    #[test]
+    fn a_card_too_small_for_the_rest_spills_at_the_dense_rate() {
+        // Same model on a 1 GB card: 0.6 GB of the dense part spills too.
+        let (m, _) = experts_on_cpu();
+        let gpus = vec![gpu(40.0, 30.0, 1_000)];
+        let l = weight_layout(Some(&m), &gpus);
+        let spill = 2_000_000_000 - 1_000 * 1024 * 1024;
+        assert_eq!(l.cpu_bytes, 18_000_000_000 + spill);
+        assert_eq!(l.cpu_by_rule, 18_000_000_000);
+        // The spill is read at the rest of the model's active fraction:
+        // 1.6 GB of every 2 GB (the embedding is a lookup).
+        let spill_active = (spill as f64 * 1.6 / 2.0) as u64;
+        assert_eq!(l.cpu_active_bytes, Some(1_125_000_000 + spill_active));
     }
 
     #[test]

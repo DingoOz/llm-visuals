@@ -19,6 +19,9 @@ is put together.
 - SGLang: `/v1/loads` poller, `/server_info`, worker folding, safetensors
   `config.json` architecture fields (also used by vLLM).
 - Decode speed vs context length (`c`), from the logged samples.
+- llama.cpp tensor overrides (`-ot`, `--cpu-moe`, `--n-cpu-moe`,
+  `--n-cpu-ffn`) applied to the tensor table: exact CPU-side bytes for the
+  memory pipeline and verdict, `C` tags on layer tiles.
 
 ## Ideas not yet done
 
@@ -29,5 +32,5 @@ is put together.
 - Real DRAM bandwidth (perf uncore counters) instead of the bytes × steps
   estimate; per-GPU memory bandwidth ceilings so the VRAM meter can show GB/s
   against the card's peak.
-- Honour `-ot` / `--override-tensor` and `--fit` output to place tensors on
-  CPU vs GPU exactly instead of by `--tensor-split` share.
+- `--fit` output, to place the tensors it moves at load time (only the
+  server's log says where).

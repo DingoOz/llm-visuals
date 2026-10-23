@@ -544,6 +544,14 @@ pub struct WeightLayout {
     /// Weights that did not fit in VRAM (estimate: file size minus per-GPU
     /// weight share), read from system RAM by the CPU every step.
     pub cpu_bytes: u64,
+    /// Of `cpu_bytes`, the part llama.cpp's `-ot` / `--cpu-moe` rules put
+    /// there: exact, not estimated.
+    pub cpu_by_rule: u64,
+    /// Bytes read from RAM per step when the rules say which tensors are
+    /// CPU-side; otherwise `cpu_bytes` is taken at the model's active fraction.
+    /// Experts pinned to RAM are read at the routed fraction, which is far
+    /// below the whole model's.
+    pub cpu_active_bytes: Option<u64>,
     /// llama.cpp `--ubatch-size` (weights are read once per micro-batch in prefill).
     pub ubatch: usize,
 }
@@ -559,7 +567,10 @@ impl WeightLayout {
 
     /// Bytes streamed per step from RAM and from VRAM respectively.
     pub fn per_step(&self) -> (f32, f32) {
-        let cpu_active = self.cpu_bytes as f32 * self.active_frac();
+        let cpu_active = match self.cpu_active_bytes {
+            Some(b) => b as f32,
+            None => self.cpu_bytes as f32 * self.active_frac(),
+        };
         let vram_active = (self.active_bytes as f32 - cpu_active).max(0.0);
         (cpu_active, vram_active)
     }
@@ -1590,6 +1601,7 @@ mod tests {
             active_bytes: 2_500_000_000,
             cpu_bytes: 8_000_000_000,
             ubatch: 512,
+            ..Default::default()
         };
         // 8 GB on the CPU side × 12.5 % active = 1 GB per step from RAM,
         // the other 1.5 GB per step from VRAM.
