@@ -1,3 +1,4 @@
+mod balance;
 mod bandwidth;
 mod colors;
 mod config;
@@ -901,6 +902,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char(' ') if view_mode == ViewMode::Landscape => {
                             camera.toggle_orbit()
                         }
+                        KeyCode::Char('u') => view_mode = ViewMode::Balance,
                         KeyCode::Char('b') => view_mode = ViewMode::Bandwidth,
                         KeyCode::Char('v') => view_mode = ViewMode::Models,
                         KeyCode::Tab => focus = (focus + 1) % n,
