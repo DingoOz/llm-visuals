@@ -5,7 +5,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::gpu::GpuStats;
+use crate::gpu::{ClockReasons, GpuStats};
 use crate::host::HostSample;
 use crate::observe::{LiveStats, SpecMetrics};
 
@@ -325,6 +325,8 @@ pub struct PerfTracker {
     /// Peak-hold markers for VU meters (fraction 0..1, and time set).
     pub util_peak: Vec<(f32, Instant)>,
     pub power_peak: Vec<(f32, Instant)>,
+    /// Clocks-event reasons per GPU, held briefly so they can be read.
+    pub clock_hold: Vec<ReasonHold>,
     pub current: Option<RequestRecord>,
     pub history: VecDeque<RequestRecord>,
     pub session_decoded: u64,
@@ -697,6 +699,7 @@ impl PerfTracker {
             temp_hist: Vec::new(),
             util_peak: Vec::new(),
             power_peak: Vec::new(),
+            clock_hold: Vec::new(),
             current: None,
             history: VecDeque::with_capacity(MAX_REQUESTS),
             session_decoded: 0,
@@ -1009,6 +1012,7 @@ impl PerfTracker {
             self.temp_hist.push(VecDeque::with_capacity(HISTORY));
             self.util_peak.push((0.0, now));
             self.power_peak.push((0.0, now));
+            self.clock_hold.push(ReasonHold::default());
         }
         self.total_power_w = gpus.iter().map(|g| g.power_watts).sum();
         self.bw.ensure_gpu(n, gpus);
@@ -1027,6 +1031,7 @@ impl PerfTracker {
             push(&mut self.temp_hist[i], g.temperature.unwrap_or(0.0));
             hold_peak(&mut self.util_peak[i], g.utilization_gpu / 100.0, now, dt);
             hold_peak(&mut self.power_peak[i], g.power_frac(), now, dt);
+            self.clock_hold[i].observe(g.clock_reasons, now);
         }
     }
 
@@ -1038,6 +1043,41 @@ impl PerfTracker {
         }
         out.extend(self.history.iter().rev().take(n.saturating_sub(out.len())));
         out
+    }
+}
+
+/// How long a clocks-event reason stays on the card after the driver last
+/// reported it.
+const REASON_HOLD: Duration = Duration::from_millis(1500);
+
+/// Clocks-event reasons with a short hold, bit by bit: a power cap that is on
+/// for one 200 ms poll stays on screen for 1.5 s rather than flashing past
+/// unread. The hold only stretches what the driver reported, and one reason
+/// never keeps another alive; nothing shows that was not seen in that time.
+#[derive(Debug, Default, Clone)]
+pub struct ReasonHold {
+    /// When each of the nine bits nvml.h defines was last reported.
+    seen: [Option<Instant>; 9],
+}
+
+impl ReasonHold {
+    pub fn observe(&mut self, reasons: Option<ClockReasons>, now: Instant) {
+        let Some(reasons) = reasons else { return };
+        for (bit, seen) in self.seen.iter_mut().enumerate() {
+            if reasons.0 & (1 << bit) != 0 {
+                *seen = Some(now);
+            }
+        }
+    }
+
+    pub fn held(&self, now: Instant) -> ClockReasons {
+        ClockReasons(
+            self.seen
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.is_some_and(|t| now.duration_since(t) <= REASON_HOLD))
+                .fold(0, |bits, (bit, _)| bits | 1 << bit),
+        )
     }
 }
 
@@ -1060,6 +1100,26 @@ fn push(h: &mut VecDeque<f32>, v: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_reasons_are_held_briefly_and_bit_by_bit() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut h = ReasonHold::default();
+        assert_eq!(h.held(t0), ClockReasons(0));
+        // A power cap seen for a single poll is still on screen 1.5 s later,
+        // and gone after that.
+        h.observe(Some(ClockReasons(ClockReasons::SW_POWER_CAP)), at(0));
+        h.observe(Some(ClockReasons(0)), at(200));
+        assert_eq!(h.held(at(1500)), ClockReasons(ClockReasons::SW_POWER_CAP));
+        assert_eq!(h.held(at(1501)), ClockReasons(0));
+        // A later reason does not keep an earlier one alive.
+        h.observe(Some(ClockReasons(ClockReasons::SW_THERMAL)), at(1000));
+        assert_eq!(h.held(at(2000)), ClockReasons(ClockReasons::SW_THERMAL));
+        // A poll that could not read the reasons changes nothing.
+        h.observe(None, at(2100));
+        assert_eq!(h.held(at(2400)), ClockReasons(ClockReasons::SW_THERMAL));
+    }
 
     fn slot(
         id: i64,

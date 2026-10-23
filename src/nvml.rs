@@ -13,7 +13,7 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::gpu::GpuStats;
+use crate::gpu::{ClockReasons, GpuStats};
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
@@ -103,6 +103,7 @@ type FnNvmlDeviceGetFanSpeed = unsafe extern "C" fn(*mut c_void, *mut u32) -> u3
 type FnNvmlDeviceGetPcieGen = unsafe extern "C" fn(*mut c_void, *mut u32) -> u32;
 type FnNvmlDeviceGetPcieWidth = unsafe extern "C" fn(*mut c_void, *mut u32) -> u32;
 type FnNvmlDeviceGetPcieThroughput = unsafe extern "C" fn(*mut c_void, u32, *mut u32) -> u32;
+type FnNvmlDeviceGetClocksEventReasons = unsafe extern "C" fn(*mut c_void, *mut u64) -> u32;
 
 #[cfg(windows)]
 pub(crate) mod os {
@@ -217,6 +218,7 @@ pub struct NvmlSession {
     device_get_pcie_gen_fn: Option<FnNvmlDeviceGetPcieGen>,
     device_get_pcie_width_fn: Option<FnNvmlDeviceGetPcieWidth>,
     device_get_pcie_throughput_fn: Option<FnNvmlDeviceGetPcieThroughput>,
+    device_get_clocks_event_reasons_fn: Option<FnNvmlDeviceGetClocksEventReasons>,
     initialized: AtomicBool,
 }
 
@@ -347,6 +349,22 @@ impl NvmlSession {
             FnNvmlDeviceGetPcieThroughput
         );
 
+        // Same call under two names: "throttle" became "event" in later
+        // headers, and the old symbol stays as a deprecated alias. A driver
+        // older than either leaves the badge off.
+        let device_get_clocks_event_reasons_fn = opt_sym!(
+            lib,
+            b"nvmlDeviceGetCurrentClocksEventReasons\0",
+            FnNvmlDeviceGetClocksEventReasons
+        )
+        .or_else(|| {
+            opt_sym!(
+                lib,
+                b"nvmlDeviceGetCurrentClocksThrottleReasons\0",
+                FnNvmlDeviceGetClocksEventReasons
+            )
+        });
+
         // Initialize driver session.
         // NOTE: init_fn() MUST remain the last fallible step before returning Self.
         // Once init_fn() succeeds, the NvmlSession instance owns the session and its
@@ -376,6 +394,7 @@ impl NvmlSession {
             device_get_pcie_gen_fn,
             device_get_pcie_width_fn,
             device_get_pcie_throughput_fn,
+            device_get_clocks_event_reasons_fn,
             initialized: AtomicBool::new(true),
         }))
     }
@@ -555,6 +574,15 @@ impl NvmlSession {
                 let _ = unsafe { width_fn(handle, &mut pcie_width) };
             }
 
+            // NOT_SUPPORTED (some GeForce and virtual GPUs) reads as unknown.
+            let clock_reasons = self
+                .device_get_clocks_event_reasons_fn
+                .and_then(|reasons_fn| {
+                    let mut bits = 0u64;
+                    (unsafe { reasons_fn(handle, &mut bits) } == NVML_SUCCESS)
+                        .then_some(ClockReasons(bits))
+                });
+
             stats_list.push(GpuStats {
                 index,
                 name,
@@ -567,6 +595,7 @@ impl NvmlSession {
                 power_max_watts,
                 temperature,
                 temperature_memory,
+                clock_reasons,
                 clock_sm_mhz: sm_clock,
                 clock_sm_max_mhz: sm_clock_max,
                 clock_mem_mhz: mem_clock,
