@@ -309,6 +309,26 @@ much faster. A genuine change of level
 rejected in a row (≈3 s at the default poll rate) re-anchor the reference,
 and the new speed is shown as fact.
 
+Under the session totals, an energy row adds up what the GPUs have drawn
+since the dashboard started — `GPU energy 2.23 Wh` — and, for the focused
+model, the energy per thousand generated tokens. With `--energy-price` set it
+also prices both: the session so far and a million tokens
+(`· $0.0007 · 3.12 Wh/1k tok · $0.937/1M tok`); on a narrow panel the
+session cost goes first, then the per-million figure.
+
+It is GPU board power as the driver reports it (NVML, amdgpu hwmon,
+xpu-smi, powermetrics / macmon), summed over every card shown — the same
+reading tok/J divides by — not power at the wall: CPU, RAM, fans and power
+supply losses are not in it. Cards without a power sensor add nothing, and
+when none has one the row says `no power readings`. The session figure is
+for the whole box, idle time included. The per-token figure counts only the
+time the focused model was the only one working, prefill included, since a
+prompt has to be read before anything is generated: two models busy at once
+on shared cards draw one power reading between them and nothing says how to
+divide it, so that time and its tokens are left out of both models' figures.
+A gap of more than 5 s between GPU readings (a stalled driver call, a
+suspended laptop) is skipped rather than billed at the last wattage seen.
+
 ### GPUs
 
 One card per device: utilisation gauge with a VU-style peak-hold notch, power
@@ -515,6 +535,7 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | time to first token | slot turning busy → first decoded token, quantised to the poll interval. Strata: the finished request's `prompt_ms`, the server's time reading the new prompt tokens (time spent queued is not in it) |
 | impossible tok/s samples | a displayed rate is finite, under 10⁶ (decode) / 10⁷ (prefill) tok/s, and (decode only) not above both 4× the median of the recently accepted samples of that server and that median + 20 tok/s; glitch polls are cut and the display holds the last real reading, six rejections in a row re-anchor to a genuinely faster engine |
 | tok/J | decode tok/s ÷ summed GPU power draw |
+| GPU energy, Wh/1k tok, cost | summed GPU board power (the same reading as tok/J) integrated over time by the trapezoid rule between GPU polls; an interval longer than 5 s between readings is not integrated. Wh/1k tok: energy drawn while the focused model was the only model working (prefill or decode), ÷ the tokens it generated over the same intervals. Cost: Wh × `--energy-price` per kWh |
 | cache hit | llama.cpp: `n_prompt_tokens_cache / n_prompt_tokens`. vLLM: the window's `prefix_cache_hits_total / prefix_cache_queries_total` delta — exact even when several requests share the poll window, since both counters move in the same scheduler step; a request row whose window held more than one request shows its own cached count as `—` instead of a blend. SGLang without `--enable-metrics` is unknown (shown as "—"). Strata: the finished request's `reused`, unknown ("—") while it runs |
 | request log | one record per `id_task`; averages from accumulated deltas |
 | util, VRAM, power, °C, clocks, fan, PCIe link | NVIDIA in-process NVML (`nvidia-smi --query-gpu=…` fallback), Intel `xpu-smi --query-gpu=…`, or Linux amdgpu sysfs and hwmon, every poll. NVIDIA additionally reports the memory temperature — NVML field value 82 on the in-process path, `temperature.memory` on the CLI one — shown as `mem 71°` beside the die temperature on cards whose driver reports the sensor (HBM parts such as the CMP 170HX it was verified on); it reads blank elsewhere. On Intel, fan speed is the `xe` driver's hwmon tachometer (RPM); utilization that samples ~0 while clocks are boosted is reconstructed from the clock ratio and marked `~`; PCIe link and an unsupported temperature read blank. Unified-memory parts (NVIDIA GB10 / DGX Spark) report no device memory, fan or memory-busy counter at all: NVML stays the backend for the fields that *do* answer, and the memory bar relabels itself (see `VRAM weights vs KV` and Troubleshooting). AMD APUs (BC-250 / Cyan Skillfish, Strix Halo) are unified too but *measured*: the driver reports a 512 MiB VRAM carve-out plus a GTT heap spanning the shared RAM pool, and the backend shows the sum of both heaps as the `UNIFIED` pool — the same figures nvtop prints for an integrated GPU |
@@ -688,6 +709,8 @@ concurrent request traces.
 --log-db auto|off|FILE  SQLite log of samples and requests (default: auto)
 --log-every 1.0      seconds between --log-db sample rows
 --log-db-max-mb 1024 size cap for --log-db; oldest rows are dropped (0 = none)
+--energy-price 0     electricity price per kWh for GPU energy costs (0 = hide costs)
+--currency '$'       symbol printed before energy costs
 --version, -v        print the version and exit
 ```
 
@@ -702,7 +725,7 @@ the account running the dashboard.
 ### Settings screen and saved defaults
 
 Press `s` to change the theme, colour depth, poll interval, model limits,
-GPUs and logging while the dashboard runs. `a` applies the values to this
+GPUs, logging and the energy price and currency while the dashboard runs. `a` applies the values to this
 session; `w` also saves them as the launch default, in
 `~/.config/llm-visuals/settings.json` (`%APPDATA%\llm-visuals` on Windows,
 `~/Library/Application Support/llm-visuals` on macOS). The file maps flag

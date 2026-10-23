@@ -14,6 +14,7 @@ use crate::bandwidth::{self, StageId};
 use crate::colors::{self as pal, ColorTheme};
 use crate::config::ViewMode;
 use crate::dblog::{ContextSpeed, LogSummary};
+use crate::energy::{self, GpuEnergy};
 use crate::fade::FadeState;
 use crate::gpu::GpuStats;
 use crate::landscape::{self, Camera};
@@ -78,6 +79,8 @@ pub struct Dashboard<'a> {
     /// The context-speed screen (`c`): per-model buckets or why not, and
     /// which model is shown.
     pub ctx_speed: Option<(&'a Result<Vec<ContextSpeed>, String>, usize)>,
+    /// GPU energy drawn this session (box total) and the price to cost it at.
+    pub energy: &'a GpuEnergy,
 }
 
 pub struct Renderer {
@@ -596,6 +599,13 @@ impl Renderer {
                 Style::default().fg(pal::c(pal::AMBER)),
             ),
         ]));
+
+        // Energy takes a sparkline row while two remain, or the lone row a
+        // sparkline cannot use.
+        let spare = h.saturating_sub(lines.len());
+        if spare >= 3 || spare == 1 {
+            lines.push(energy_line(d, w));
+        }
 
         // Sparklines fill the rest: decode gets the lion's share.
         let remaining = h.saturating_sub(lines.len());
@@ -4332,6 +4342,76 @@ fn max_layer_head(cols: &[&crate::pipeline::TokenColumn]) -> (usize, usize) {
     (l, h)
 }
 
+/// The throughput panel's energy row: the box's GPU energy this session and
+/// what the focused model spent per generated token, with their costs when a
+/// price is set. Least important first to go when the row is too narrow:
+/// session cost, then cost per million tokens, then energy per token.
+fn energy_line(d: &Dashboard, w: usize) -> Line<'static> {
+    let e = d.energy;
+    let st = |rgb| Style::default().fg(pal::c(rgb));
+    let mut spans = vec![Span::styled("GPU energy ", st(pal::TEXT_DIM))];
+    if !e.powered {
+        let why = if d.gpus.is_empty() {
+            "no GPU telemetry"
+        } else {
+            "no power readings"
+        };
+        spans.push(Span::styled(why, st(pal::TEXT_MUTED)));
+        return Line::from(spans);
+    }
+    let currency = e.tariff.currency.as_str();
+    let mine = &d.perf.energy;
+    let mut segs: Vec<(u8, Span<'static>)> = vec![(
+        4,
+        Span::styled(energy::fmt_energy(e.total_j()), st(pal::AMBER)),
+    )];
+    if let Some(cost) = e.session_cost() {
+        segs.push((
+            1,
+            Span::styled(energy::fmt_cost(currency, cost), st(pal::AMBER)),
+        ));
+    }
+    if let Some(wh) = mine.wh_per_1k_tokens() {
+        segs.push((
+            3,
+            Span::styled(
+                format!("{} Wh/1k tok", energy::fmt_wh_per_1k(wh)),
+                st(pal::GREEN),
+            ),
+        ));
+    }
+    if let Some(cost) = e.tariff.price().and_then(|p| mine.cost_per_1m_tokens(p)) {
+        segs.push((
+            2,
+            Span::styled(
+                format!("{}/1M tok", energy::fmt_cost(currency, cost)),
+                st(pal::GREEN),
+            ),
+        ));
+    }
+    const SEP: &str = " · ";
+    let label_w = spans[0].content.chars().count();
+    let width = |segs: &[(u8, Span)]| {
+        label_w
+            + segs
+                .iter()
+                .map(|(_, s)| s.content.chars().count())
+                .sum::<usize>()
+            + SEP.chars().count() * segs.len().saturating_sub(1)
+    };
+    while segs.len() > 1 && width(&segs) > w {
+        let lowest = (0..segs.len()).min_by_key(|&i| segs[i].0).unwrap_or(0);
+        segs.remove(lowest);
+    }
+    for (k, (_, seg)) in segs.into_iter().enumerate() {
+        if k > 0 {
+            spans.push(Span::styled(SEP, st(pal::TEXT_MUTED)));
+        }
+        spans.push(seg);
+    }
+    Line::from(spans)
+}
+
 // ---------------------------------------------------------------------------
 // Formatting
 // ---------------------------------------------------------------------------
@@ -4744,6 +4824,7 @@ mod tests {
             settings: None,
             log: None,
             ctx_speed: None,
+            energy: &GpuEnergy::default(),
         };
         let renderer = Renderer::new(pal::get_theme("defrag"), 0, 0, 1);
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -4900,6 +4981,89 @@ mod tests {
         let (tw, th, tpr) = layer_tile_size(60, 10, 41);
         let tpc = 10 / th;
         assert!(tpr * tpc >= 41, "{tw}x{th} tpr {tpr}");
+    }
+
+    /// The throughput panel's energy row for one model that decoded alone
+    /// at 360 W for ten seconds and generated 500 tokens.
+    fn energy_text(price: f64, gpus: &[GpuStats], w: usize) -> String {
+        let t0 = Instant::now();
+        let mut energy = GpuEnergy::default();
+        energy.tariff.price_per_kwh = price;
+        let mut perf = PerfTracker::new();
+        energy.observe(t0, gpus, [&mut perf]);
+        perf.phase = Phase::Decode;
+        for s in 1..=10 {
+            perf.session_decoded = 50 * s;
+            energy.observe(t0 + Duration::from_secs(s), gpus, [&mut perf]);
+        }
+        let model = crate::demo::demo_models(4096, 1).remove(0);
+        let (live, fade) = (LiveStats::default(), FadeState::new());
+        let (attention, generated) = (TokenBuffer::new(8), GeneratedText::new());
+        let camera = Camera::new();
+        let dash = Dashboard {
+            models: &[],
+            focus: 0,
+            detected: Some(&model),
+            gpus,
+            gpu_error: None,
+            fade: &fade,
+            perf: &perf,
+            live: &live,
+            attention: &attention,
+            generated: &generated,
+            num_layers: 1,
+            num_heads: 1,
+            view: ViewMode::All,
+            camera: &camera,
+            status: "",
+            theme_name: "defrag",
+            demo: true,
+            experts: None,
+            gpu_backend: None,
+            settings: None,
+            log: None,
+            ctx_speed: None,
+            energy: &energy,
+        };
+        energy_line(&dash, w)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn energy_row_sheds_cost_before_energy() {
+        let gpus = [GpuStats {
+            power_watts: 360.0,
+            ..Default::default()
+        }];
+        // 3600 J = 1 Wh for 500 tokens = 2 Wh per 1k; at 0.30/kWh, 0.60/1M.
+        assert_eq!(
+            energy_text(0.30, &gpus, 80),
+            "GPU energy 1.00 Wh · $0.0003 · 2.00 Wh/1k tok · $0.600/1M tok"
+        );
+        assert_eq!(
+            energy_text(0.30, &gpus, 51),
+            "GPU energy 1.00 Wh · 2.00 Wh/1k tok · $0.600/1M tok"
+        );
+        assert_eq!(
+            energy_text(0.30, &gpus, 50),
+            "GPU energy 1.00 Wh · 2.00 Wh/1k tok"
+        );
+        assert_eq!(energy_text(0.30, &gpus, 30), "GPU energy 1.00 Wh");
+        // No price, no costs.
+        assert_eq!(
+            energy_text(0.0, &gpus, 80),
+            "GPU energy 1.00 Wh · 2.00 Wh/1k tok"
+        );
+    }
+
+    #[test]
+    fn energy_row_says_when_no_card_reports_power() {
+        let gpus = [GpuStats::default()];
+        assert_eq!(energy_text(0.30, &gpus, 80), "GPU energy no power readings");
+        assert_eq!(energy_text(0.30, &[], 80), "GPU energy no GPU telemetry");
     }
 }
 

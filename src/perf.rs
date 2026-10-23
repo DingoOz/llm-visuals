@@ -5,6 +5,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use crate::energy::ModelEnergy;
 use crate::gpu::GpuStats;
 use crate::host::HostSample;
 use crate::observe::{LiveStats, SpecMetrics};
@@ -339,6 +340,8 @@ pub struct PerfTracker {
     pub spec: SpecStats,
     /// Memory pipeline meters (`b` view).
     pub bw: BandwidthStats,
+    /// GPU energy billed to this model (see `energy.rs`).
+    pub energy: ModelEnergy,
 }
 
 #[derive(Debug, Clone)]
@@ -708,6 +711,7 @@ impl PerfTracker {
             poll_ok: false,
             spec: SpecStats::new(),
             bw: BandwidthStats::new(),
+            energy: ModelEnergy::default(),
         }
     }
 

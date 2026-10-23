@@ -19,6 +19,7 @@ is put together.
 - SGLang: `/v1/loads` poller, `/server_info`, worker folding, safetensors
   `config.json` architecture fields (also used by vLLM).
 - Decode speed vs context length (`c`), from the logged samples.
+- GPU energy per session and per generated token, priced with `--energy-price`.
 
 ## Ideas not yet done
 

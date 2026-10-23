@@ -3,6 +3,7 @@ mod colors;
 mod config;
 mod dblog;
 mod demo;
+mod energy;
 mod fade;
 mod gguf;
 mod gpu;
@@ -770,6 +771,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let empty_live = LiveStats::default();
     let empty_fade = FadeState::new();
 
+    // GPU energy is a box total, like the cards it is read from.
+    let mut gpu_energy = energy::GpuEnergy::default();
+
     let mut view_mode = ViewMode::All;
     let mut camera = landscape::Camera::new();
     let mut idle_frame = 0u8;
@@ -1028,6 +1032,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             for slot in &mut slots {
                 slot.perf.observe_gpu(&latest_gpu, now);
             }
+            gpu_energy.observe(now, &latest_gpu, slots.iter_mut().map(|s| &mut s.perf));
         }
         for slot in &mut slots {
             slot.routing = None;
@@ -1192,6 +1197,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(v) = cur {
             renderer.moe_experts = v.detected.n_experts_used().max(1);
         }
+        // The settings screen can change the price mid-session.
+        gpu_energy.tariff.price_per_kwh = args.energy_price;
+        if gpu_energy.tariff.currency != args.currency {
+            gpu_energy.tariff.currency = args.currency.clone();
+        }
         let dash = Dashboard {
             models: &views,
             focus,
@@ -1215,6 +1225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             settings: settings_form.as_ref(),
             log: log_view.as_ref(),
             ctx_speed: ctx_view.as_ref().map(|(s, i)| (s, *i)),
+            energy: &gpu_energy,
         };
         renderer.render_frame(&mut terminal, &dash);
 

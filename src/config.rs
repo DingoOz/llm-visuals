@@ -148,6 +148,15 @@ pub struct Args {
     #[arg(long, default_value_t = 1024)]
     pub log_db_max_mb: u64,
 
+    /// Electricity price per kWh, for the cost of the GPU energy drawn
+    /// (0 = no price; costs are hidden)
+    #[arg(long, default_value_t = 0.0, value_parser = parse_price)]
+    pub energy_price: f64,
+
+    /// Currency symbol printed before energy costs
+    #[arg(long, default_value = "$")]
+    pub currency: String,
+
     /// Print the version and exit
     #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
     version: Option<bool>,
@@ -290,5 +299,16 @@ mod tests {
         // 5. Empty strings are ignored
         let res = Args::resolve_endpoint(Some("   "), "auto", Some("   "));
         assert_eq!(res, None);
+    }
+}
+
+/// A price is a finite, non-negative number; clap's plain f64 parser would
+/// take `nan`, `inf` and `-1`.
+fn parse_price(s: &str) -> Result<f64, String> {
+    match s.trim().parse::<f64>() {
+        Ok(v) if v.is_finite() && v >= 0.0 => Ok(v),
+        _ => Err(format!(
+            "`{s}` is not a price per kWh (a number, 0 or more)"
+        )),
     }
 }
