@@ -280,6 +280,40 @@ impl SettingsForm {
                 "Oldest rows are dropped past this size; 0 = no cap".into(),
             ),
             field(
+                "Alerts",
+                "alerts",
+                Kind::Choice(&["off", "banner", "bell", "notify"]),
+                args.alerts.clone(),
+                "banner shows them on screen; bell also rings; notify also sends a desktop \
+                 notification"
+                    .into(),
+            ),
+            field(
+                "VRAM alert (%)",
+                "alert-vram-pct",
+                Kind::Number,
+                args.alert_vram_pct.to_string(),
+                "Raised when a card's memory stays this full for 3 s".into(),
+            ),
+            field(
+                "Temperature alert (°C)",
+                "alert-temp-c",
+                Kind::Text,
+                args.alert_temp_c.clone(),
+                format!(
+                    "auto = the card's own slowdown limit, else {:.0} °C; or a number",
+                    crate::alerts::DEFAULT_TEMP_C
+                ),
+            ),
+            field(
+                "Slow decode alert (%)",
+                "alert-slow-pct",
+                Kind::Number,
+                args.alert_slow_pct.to_string(),
+                "Raised when decode stays under this share of the model's usual rate for 5 s"
+                    .into(),
+            ),
+            field(
                 "Max layers",
                 "max-layers",
                 Kind::Number,
@@ -519,6 +553,30 @@ mod tests {
         assert_eq!(saved.get("theme").map(String::as_str), Some("neon"));
         assert!(!saved.contains_key("poll-ms"));
         assert_eq!(saved.get("model").map(String::as_str), Some("auto"));
+    }
+
+    #[test]
+    fn alert_settings_round_trip_and_reject_nonsense() {
+        let launch = argv(&[APP]);
+        let mut form = SettingsForm::new(&Args::try_parse_from(&launch).unwrap());
+        let at = |form: &SettingsForm, flag: &str| {
+            form.fields.iter().position(|f| f.flag == flag).unwrap()
+        };
+        let i = at(&form, "alerts");
+        form.selected = i;
+        form.cycle(1);
+        let j = at(&form, "alert-temp-c");
+        form.fields[j].value = "80".into();
+        let args = form.resolve(&launch).unwrap();
+        assert_eq!(args.alerts, "bell");
+        assert_eq!(args.alert_limits().temp_c, Some(80.0));
+        form.fields[j].value = "hot".into();
+        let err = form.resolve(&launch).unwrap_err();
+        assert!(err.contains("alert-temp-c"), "{err}");
+        let k = at(&form, "alert-vram-pct");
+        form.fields[j].value = "auto".into();
+        form.fields[k].value = "120".into();
+        assert!(form.resolve(&launch).is_err());
     }
 
     #[test]

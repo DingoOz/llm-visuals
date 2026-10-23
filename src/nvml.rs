@@ -66,6 +66,11 @@ const NVML_TEMPERATURE_GPU: u32 = 0;
 /// `nvmlDeviceGetTemperature` knows a single GPU sensor. Cards without the
 /// memory sensor answer per-field NOT_SUPPORTED.
 const NVML_FI_DEV_MEMORY_TEMP: u32 = 82;
+// nvmlTemperatureThresholds_t: where the driver starts slowing the clocks,
+// the memory's and the die's max operating temperatures.
+const NVML_TEMPERATURE_THRESHOLD_SLOWDOWN: u32 = 1;
+const NVML_TEMPERATURE_THRESHOLD_MEM_MAX: u32 = 2;
+const NVML_TEMPERATURE_THRESHOLD_GPU_MAX: u32 = 3;
 // nvmlValueType_t: selects which member of the nvmlValue_t union is valid.
 const NVML_VALUE_TYPE_DOUBLE: i32 = 0;
 const NVML_VALUE_TYPE_UNSIGNED_INT: i32 = 1;
@@ -93,6 +98,7 @@ type FnNvmlDeviceGetMemoryInfoV2 = unsafe extern "C" fn(*mut c_void, *mut NvmlMe
 type FnNvmlDeviceGetUtilizationRates =
     unsafe extern "C" fn(*mut c_void, *mut NvmlUtilization) -> u32;
 type FnNvmlDeviceGetTemperature = unsafe extern "C" fn(*mut c_void, u32, *mut u32) -> u32;
+type FnNvmlDeviceGetTemperatureThreshold = unsafe extern "C" fn(*mut c_void, u32, *mut u32) -> u32;
 type FnNvmlDeviceGetFieldValues =
     unsafe extern "C" fn(*mut c_void, std::ffi::c_int, *mut NvmlFieldValue) -> u32;
 type FnNvmlDeviceGetPowerUsage = unsafe extern "C" fn(*mut c_void, *mut u32) -> u32;
@@ -208,6 +214,7 @@ pub struct NvmlSession {
     device_get_memory_info_v2_fn: Option<FnNvmlDeviceGetMemoryInfoV2>,
     device_get_utilization_rates_fn: FnNvmlDeviceGetUtilizationRates,
     device_get_temperature_fn: FnNvmlDeviceGetTemperature,
+    device_get_temperature_threshold_fn: Option<FnNvmlDeviceGetTemperatureThreshold>,
     device_get_field_values_fn: Option<FnNvmlDeviceGetFieldValues>,
     device_get_power_usage_fn: FnNvmlDeviceGetPowerUsage,
     device_get_power_limit_fn: Option<FnNvmlDeviceGetPowerLimit>,
@@ -298,6 +305,11 @@ impl NvmlSession {
             b"nvmlDeviceGetTemperature\0",
             FnNvmlDeviceGetTemperature
         );
+        let device_get_temperature_threshold_fn = opt_sym!(
+            lib,
+            b"nvmlDeviceGetTemperatureThreshold\0",
+            FnNvmlDeviceGetTemperatureThreshold
+        );
         let device_get_field_values_fn = opt_sym!(
             lib,
             b"nvmlDeviceGetFieldValues\0",
@@ -367,6 +379,7 @@ impl NvmlSession {
             device_get_memory_info_v2_fn,
             device_get_utilization_rates_fn,
             device_get_temperature_fn,
+            device_get_temperature_threshold_fn,
             device_get_field_values_fn,
             device_get_power_usage_fn,
             device_get_power_limit_fn,
@@ -495,6 +508,24 @@ impl NvmlSession {
                 decode_field_celsius(&fv)
             });
 
+            // The die's limit is whichever threshold the driver acts on
+            // first: some cards set a max operating temperature below the
+            // slowdown point, others report only the slowdown point.
+            let threshold = |kind: u32| -> Option<f32> {
+                let f = self.device_get_temperature_threshold_fn?;
+                let mut t = 0u32;
+                (unsafe { f(handle, kind, &mut t) } == NVML_SUCCESS && t > 0).then_some(t as f32)
+            };
+            let temperature_limit = match (
+                threshold(NVML_TEMPERATURE_THRESHOLD_SLOWDOWN),
+                threshold(NVML_TEMPERATURE_THRESHOLD_GPU_MAX),
+            ) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            let temperature_memory_limit =
+                temperature_memory.and_then(|_| threshold(NVML_TEMPERATURE_THRESHOLD_MEM_MAX));
+
             // Power
             let mut power_mw = 0u32;
             let power_watts = if unsafe { (self.device_get_power_usage_fn)(handle, &mut power_mw) }
@@ -567,6 +598,8 @@ impl NvmlSession {
                 power_max_watts,
                 temperature,
                 temperature_memory,
+                temperature_limit,
+                temperature_memory_limit,
                 clock_sm_mhz: sm_clock,
                 clock_sm_max_mhz: sm_clock_max,
                 clock_mem_mhz: mem_clock,

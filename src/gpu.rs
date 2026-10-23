@@ -26,6 +26,12 @@ pub struct GpuStats {
     /// Memory temperature, °C. NVIDIA only, and only on parts whose driver
     /// reports the sensor (HBM cards); it reads as missing everywhere else.
     pub temperature_memory: Option<f32>,
+    /// The first temperature the driver acts on for the die, °C: the lower
+    /// of NVML's slowdown and max-operating thresholds. NVML only; what the
+    /// temperature alert is measured against when the card names one.
+    pub temperature_limit: Option<f32>,
+    /// The memory's max operating temperature, °C (NVML, HBM parts).
+    pub temperature_memory_limit: Option<f32>,
     pub clock_sm_mhz: u32,
     pub clock_sm_max_mhz: u32,
     pub clock_mem_mhz: u32,
@@ -1169,6 +1175,8 @@ fn apple_stats(name: &str, cores: u32, m: MacmonSample) -> GpuStats {
         power_max_watts: apple_power_max(),
         temperature: (m.temp > 0.0).then_some(m.temp),
         temperature_memory: None,
+        temperature_limit: None,
+        temperature_memory_limit: None,
         clock_sm_mhz: m.freq_mhz,
         clock_sm_max_mhz: 0,
         clock_mem_mhz: 0,
@@ -1473,6 +1481,8 @@ fn amd_stats(index: u32, device: &AmdDevice) -> GpuStats {
         power_max_watts,
         temperature,
         temperature_memory: None,
+        temperature_limit: None,
+        temperature_memory_limit: None,
         clock_sm_mhz,
         clock_sm_max_mhz,
         clock_mem_mhz,
@@ -1633,6 +1643,8 @@ pub fn parse_csv(stdout: &str) -> Vec<GpuStats> {
             // Column 17: only the NVIDIA query asks for it. N/A on cards
             // without the sensor, absent for xpu-smi (16 columns).
             temperature_memory: opt(16),
+            temperature_limit: None,
+            temperature_memory_limit: None,
         });
     }
     stats
@@ -1718,7 +1730,16 @@ pub struct DemoGpu {
     mem_temp: f32,
     clock: f32,
     mem_used: f32,
+    /// Steps taken, for the occasional VRAM squeeze below.
+    ticks: u64,
 }
+
+/// Demo steps (200 ms each) between VRAM squeezes on the second card, and
+/// the stretch of each period the squeeze lasts: about 30 s from the 50 s
+/// mark of every four minutes, so `--demo` shows the VRAM alert without
+/// raising it all the time.
+const DEMO_SQUEEZE_PERIOD: u64 = 1200;
+const DEMO_SQUEEZE: std::ops::Range<u64> = 250..400;
 
 impl DemoGpu {
     pub fn new(index: usize) -> Self {
@@ -1731,6 +1752,7 @@ impl DemoGpu {
             mem_temp: 47.0,
             clock: 0.5,
             mem_used: 0.0,
+            ticks: 0,
         }
     }
 
@@ -1761,7 +1783,12 @@ impl DemoGpu {
         self.clock += (target_clock - self.clock) * 0.4 + jitter(&mut self.seed, 0.02);
         self.clock = self.clock.clamp(0.1, 1.0);
         let weights = mem_total as f32 * 0.68;
-        let target_mem = weights + mem_total as f32 * 0.22 * load.max(0.15);
+        let mut target_mem = weights + mem_total as f32 * 0.22 * load.max(0.15);
+        // Now and then the P100 fills up, as a long prompt's KV cache would.
+        self.ticks += 1;
+        if self.index == 1 && DEMO_SQUEEZE.contains(&(self.ticks % DEMO_SQUEEZE_PERIOD)) {
+            target_mem = mem_total as f32 * 0.97;
+        }
         self.mem_used += (target_mem - self.mem_used) * 0.2;
         let mem_used_mb = self.mem_used.clamp(0.0, mem_total as f32) as u64;
         GpuStats {
@@ -1785,6 +1812,8 @@ impl DemoGpu {
             } else {
                 Some(self.mem_temp)
             },
+            temperature_limit: None,
+            temperature_memory_limit: None,
             clock_sm_mhz: (self.clock * cmax as f32) as u32,
             clock_sm_max_mhz: cmax,
             clock_mem_mhz: if self.index == 1 { 715 } else { 3802 },

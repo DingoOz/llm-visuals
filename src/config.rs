@@ -148,12 +148,58 @@ pub struct Args {
     #[arg(long, default_value_t = 1024)]
     pub log_db_max_mb: u64,
 
+    /// Alerts: off, banner (on screen), bell (banner + terminal bell),
+    /// notify (bell + desktop notification)
+    #[arg(long, default_value = "banner", value_parser = ["off", "banner", "bell", "notify"])]
+    pub alerts: String,
+
+    /// VRAM alert: percent of a card's memory in use
+    #[arg(long, default_value_t = 95.0, value_parser = parse_percent)]
+    pub alert_vram_pct: f32,
+
+    /// GPU temperature alert in °C: `auto` uses the card's own slowdown
+    /// limit when the driver reports one (85 °C otherwise)
+    #[arg(long, default_value = "auto", value_parser = parse_celsius)]
+    pub alert_temp_c: String,
+
+    /// Slow-decode alert: percent of the model's usual decode rate at a
+    /// similar context length
+    #[arg(long, default_value_t = 50.0, value_parser = parse_percent)]
+    pub alert_slow_pct: f32,
+
     /// Print the version and exit
     #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
     version: Option<bool>,
 }
 
+fn parse_percent(s: &str) -> Result<f32, String> {
+    match s.trim().parse::<f32>() {
+        Ok(v) if (1.0..=100.0).contains(&v) => Ok(v),
+        _ => Err(format!("`{s}` is not a percentage from 1 to 100")),
+    }
+}
+
+fn parse_celsius(s: &str) -> Result<String, String> {
+    let s = s.trim();
+    match s.parse::<f32>() {
+        _ if s == "auto" => Ok(s.into()),
+        Ok(v) if (20.0..=150.0).contains(&v) => Ok(s.into()),
+        _ => Err(format!(
+            "`{s}` is not `auto` or a temperature from 20 to 150 °C"
+        )),
+    }
+}
+
 impl Args {
+    /// The alert thresholds the command line asks for.
+    pub fn alert_limits(&self) -> crate::alerts::Limits {
+        crate::alerts::Limits {
+            vram_pct: self.alert_vram_pct,
+            temp_c: self.alert_temp_c.parse().ok(),
+            slow_frac: self.alert_slow_pct / 100.0,
+        }
+    }
+
     pub fn bridge_script(&self) -> PathBuf {
         if let Some(path) = &self.bridge {
             return path.clone();
@@ -262,6 +308,25 @@ mod tests {
         // (`settings::launch`); the flag still answers behind them.
         let err = Args::try_parse_from(["llm-visuals", "--theme=neon", "-v"]).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::DisplayVersion);
+    }
+
+    #[test]
+    fn alert_flags_default_and_parse() {
+        let a = Args::try_parse_from(["llm-visuals"]).unwrap();
+        assert_eq!(a.alerts, "banner");
+        assert_eq!(a.alert_limits(), crate::alerts::Limits::default());
+        let a = Args::try_parse_from([
+            "llm-visuals",
+            "--alerts=notify",
+            "--alert-vram-pct=90",
+            "--alert-temp-c=78",
+            "--alert-slow-pct=40",
+        ])
+        .unwrap();
+        let l = a.alert_limits();
+        assert_eq!((l.vram_pct, l.temp_c, l.slow_frac), (90.0, Some(78.0), 0.4));
+        assert!(Args::try_parse_from(["llm-visuals", "--alerts=loud"]).is_err());
+        assert!(Args::try_parse_from(["llm-visuals", "--alert-slow-pct=0"]).is_err());
     }
 
     #[test]
