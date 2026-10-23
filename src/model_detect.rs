@@ -30,6 +30,10 @@ pub struct DetectedModel {
     pub tensors: Option<gguf::TensorSummary>,
     /// Vision encoder, when the server has (or may have) one.
     pub vision: Option<Vision>,
+    /// Bearer key the server names outside `cmdline`: the `api_key` in
+    /// Strata's `--config` JSON, or the key of the process an `--endpoint`
+    /// probe was merged with (its own cmdline is synthetic).
+    pub api_key: Option<String>,
 }
 
 impl std::fmt::Display for DetectedModel {
@@ -604,6 +608,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
             gguf: None,
             tensors: None,
             vision: None,
+            api_key: None,
         });
         if !entry.gpu_indices.contains(&app.gpu_index) {
             entry.gpu_indices.push(app.gpu_index);
@@ -656,6 +661,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
                 gguf: None,
                 tensors: None,
                 vision: None,
+                api_key: None,
             },
         );
     }
@@ -750,8 +756,12 @@ fn apply_strata_config(m: &mut DetectedModel) {
     let Some(path) = crate::strata::config_path(&m.cmdline, process_cwd(m.pid).as_deref()) else {
         return;
     };
-    let Some(cfg) = std::fs::read_to_string(&path)
-        .ok()
+    // A server config is a small regular file; a FIFO (`--config
+    // /dev/stdin`) would block the read, and a huge file is not a config.
+    let small_file = std::fs::metadata(&path).is_ok_and(|md| md.is_file() && md.len() <= 4 << 20);
+    let Some(cfg) = small_file
+        .then(|| std::fs::read_to_string(&path).ok())
+        .flatten()
         .and_then(|body| crate::strata::parse_config(&body))
     else {
         return;
@@ -765,6 +775,7 @@ fn apply_strata_config(m: &mut DetectedModel) {
     if m.ctx_max.is_none() {
         m.ctx_max = cfg.max_context;
     }
+    m.api_key = cfg.api_key;
 }
 
 /// This dashboard is itself a process with `--model` on its command line;
@@ -1183,44 +1194,6 @@ pub fn api_key_from(cmdline: &str) -> Option<String> {
         return found.filter(|k| !k.is_empty());
     }
     None
-}
-
-/// Strata names its config file `--config <file.json>` on the command line
-/// and keeps the API key inside that file, not in the cmdline — from 0.2.1
-/// the upgrade tooling puts a key there, every unauthenticated `/metrics`
-/// poll answers 401, and all throughput falls to zero while `/health` (the
-/// one open endpoint) keeps the server discovered. Read the key from that
-/// config: an `api_key` string (llama.cpp-style `"a,b"` lists allowed, the
-/// first counts) or a JSON list of keys. None whenever anything about that
-/// path does not hold — an unreadable or unparseable file must degrade to
-/// today's behavior, never poison the other auth sources.
-pub fn config_key_from(cmdline: &str) -> Option<String> {
-    let tokens: Vec<&str> = cmdline.split_whitespace().collect();
-    let path = tokens.iter().enumerate().find_map(|(i, t)| {
-        t.strip_prefix("--config=").or_else(|| {
-            (*t == "--config")
-                .then(|| tokens.get(i + 1).copied())
-                .flatten()
-        })
-    })?;
-    // A server config is small; never slurp a whole directory tree's worth
-    // because a flag pointed at something enormous.
-    if std::fs::metadata(path).ok()?.len() > 4 << 20 {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
-    let first = |s: &str| {
-        s.split(',')
-            .next()
-            .map(str::trim)
-            .filter(|k| !k.is_empty())
-            .map(str::to_string)
-    };
-    match v.get("api_key")? {
-        serde_json::Value::String(s) => first(s),
-        serde_json::Value::Array(list) => list.first()?.as_str().and_then(first),
-        _ => None,
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2036,6 +2009,7 @@ pub async fn probe_endpoint(
         gguf: gguf_info,
         tensors: tensor_summary,
         vision,
+        api_key: None,
     })
 }
 
@@ -2302,45 +2276,6 @@ mod tests {
         );
         assert_eq!(api_key_from("llama-server --port 8080"), None);
         assert_eq!(api_key_from("llama-server --api-key"), None);
-    }
-
-    #[test]
-    fn config_key_from_names_the_key_held_in_the_server_config() {
-        let dir = std::env::temp_dir().join(format!("lv-cfgkey-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let write = |name: &str, body: &str| {
-            let p = dir.join(name);
-            std::fs::write(&p, body).unwrap();
-            p
-        };
-        let stringy = write("s.json", r#"{"api_key": "k1, k2", "host": "0.0.0.0"}"#);
-        let listy = write("l.json", r#"{"api_key": ["a", "b"]}"#);
-        let empty = write("e.json", r#"{"api_key": ""}"#);
-        let absent = write("n.json", r#"{"host": "0.0.0.0"}"#);
-        let junk = write("j.json", "not json at all {{{");
-        let cmd = |p: &std::path::Path| {
-            format!(
-                "/venv/bin/python server.py --engine strata --config {} --port 8080",
-                p.display()
-            )
-        };
-        assert_eq!(
-            config_key_from(&cmd(&stringy)).as_deref(),
-            Some("k1"),
-            "comma list: the first key counts"
-        );
-        assert_eq!(config_key_from(&cmd(&listy)).as_deref(), Some("a"));
-        assert_eq!(config_key_from(&cmd(&empty)), None);
-        assert_eq!(config_key_from(&cmd(&absent)), None);
-        assert_eq!(config_key_from(&cmd(&junk)), None);
-        assert_eq!(config_key_from(&cmd(&dir.join("missing.json"))), None);
-        assert_eq!(
-            config_key_from(&format!("python server.py --config={}", stringy.display())).as_deref(),
-            Some("k1"),
-            "the = form"
-        );
-        assert_eq!(config_key_from("llama-server --port 8080"), None);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2669,6 +2604,7 @@ mod tests {
             gguf: None,
             tensors: None,
             vision: None,
+            api_key: None,
         };
         assert_eq!(m.key(), (7000_u32) | 0x8000_0000);
         assert_eq!(format!("{m}"), "test-model (:7000 · vllm · GPU ? · 0 MB)");

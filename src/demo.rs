@@ -199,6 +199,7 @@ fn demo_model_n(ctx_max: usize, idx: usize) -> DetectedModel {
                 },
             },
         }),
+        api_key: None,
     }
 }
 

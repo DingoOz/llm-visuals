@@ -9,7 +9,7 @@
 //! runs at a time unless the engine batches (`live.parallel` slots); then
 //! `live` describes the newest request in flight. From 0.2.1 the server may
 //! hold an `api_key` in the JSON config named by `--config` on its cmdline;
-//! the dashboard finds it there (`model_detect::config_key_from`).
+//! the dashboard reads it there (`parse_config`).
 //!
 //! The in-flight request carries its prompt size, prefill progress
 //! (`prompt_read`), measured prefill rate (`prefill_tok_s_mean`, newer
@@ -354,6 +354,9 @@ pub struct StrataConfig {
     /// First GGUF shard (`--native`), which carries the header.
     pub gguf: Option<PathBuf>,
     pub max_context: Option<usize>,
+    /// First `api_key`: a string (llama.cpp-style `"a,b"` lists allowed,
+    /// the first counts) or a JSON list of keys.
+    pub api_key: Option<String>,
 }
 
 pub fn parse_config(body: &str) -> Option<StrataConfig> {
@@ -363,6 +366,18 @@ pub fn parse_config(body: &str) -> Option<StrataConfig> {
         .and_then(|a| a.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
         .unwrap_or_default();
+    let first = |s: &str| {
+        s.split(',')
+            .next()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(str::to_string)
+    };
+    let api_key = match v.get("api_key") {
+        Some(Value::String(s)) => first(s),
+        Some(Value::Array(list)) => list.first().and_then(|k| k.as_str()).and_then(first),
+        _ => None,
+    };
     let flag = |name: &str| {
         args.iter()
             .position(|a| *a == name)
@@ -376,6 +391,7 @@ pub fn parse_config(body: &str) -> Option<StrataConfig> {
             .map(str::to_string),
         gguf: flag("--native").map(PathBuf::from),
         max_context: flag("--max-context").and_then(|s| s.parse().ok()),
+        api_key,
     })
 }
 
@@ -817,6 +833,16 @@ mod tests {
         assert_eq!(c.model_name.as_deref(), Some("qwen-iq2"));
         assert_eq!(c.gguf, Some(PathBuf::from("/m/a-00001-of-00002.gguf")));
         assert_eq!(c.max_context, Some(32768));
+        assert_eq!(c.api_key, None);
+        let key = |body: &str| parse_config(body).unwrap().api_key;
+        assert_eq!(
+            key(r#"{"api_key": "k1, k2"}"#).as_deref(),
+            Some("k1"),
+            "comma list: the first key counts"
+        );
+        assert_eq!(key(r#"{"api_key": ["a", "b"]}"#).as_deref(), Some("a"));
+        assert_eq!(key(r#"{"api_key": ""}"#), None);
+        assert_eq!(key(r#"{"api_key": 7}"#), None);
         assert_eq!(
             config_path(SERVER, Some(Path::new("/srv/strata"))),
             Some(PathBuf::from("/srv/strata/strata-iq2_xs.json"))
