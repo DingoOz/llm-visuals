@@ -28,6 +28,9 @@ pub struct RequestRecord {
     pub ended: Option<Instant>,
     pub prompt_tokens: usize,
     pub cached_tokens: usize,
+    /// The engine could not attribute cached tokens to this request
+    /// (vLLM window shared under concurrency): the row shows `—`.
+    pub cached_unknown: bool,
     pub decoded: usize,
     /// Prompt tokens actually pushed through prefill (prompt minus cache hits).
     pub prefill_tokens: usize,
@@ -49,6 +52,7 @@ impl RequestRecord {
             ended: None,
             prompt_tokens: s.prompt_tokens,
             cached_tokens: s.cache_tokens,
+            cached_unknown: s.cache_unknown,
             decoded: s.decoded,
             prefill_tokens: 0,
             prefill_secs: 0.0,
@@ -193,6 +197,12 @@ impl RateWindow {
 /// rejections run for [`GUARD_REBASE`] positive polls in a row the higher
 /// level is the engine's new normal (faster model, new speculative depth),
 /// and the reference re-anchors onto it.
+///
+/// Prefill is checked against the impossible ceiling only: its real rate
+/// swings by far more than [`GUARD_RATIO`] from one request to the next (a
+/// mostly cached follow-up against a long cold prompt), so a median of
+/// earlier requests says nothing about the next one, and the relative test
+/// would hide whole prefills behind a stale reading.
 #[derive(Debug, Clone)]
 struct RateGuard {
     /// Accepted positive samples: the reference the next one is checked against.
@@ -204,15 +214,18 @@ struct RateGuard {
     /// Above this no engine is producing it: the leftovers of dividing a
     /// token count by a broken (near-zero) duration.
     impossible: f32,
+    /// Whether the median test applies, or only the impossible ceiling.
+    relative: bool,
 }
 
 impl RateGuard {
-    fn new(impossible: f32) -> Self {
+    fn new(impossible: f32, relative: bool) -> Self {
         Self {
             refs: VecDeque::new(),
             last: 0.0,
             streak: 0,
             impossible,
+            relative,
         }
     }
 
@@ -222,7 +235,7 @@ impl RateGuard {
         // Physically impossible samples are cut outright; they never join
         // the rejection streak, so a continuously broken rate is never
         // mistaken for a new normal.
-        if v.is_finite() && v <= self.impossible && self.accept(v) {
+        if v.is_finite() && v <= self.impossible && (!self.relative || self.accept(v)) {
             self.last = v;
         }
         self.last
@@ -668,8 +681,8 @@ impl PerfTracker {
             last_gpu: None,
             decode_win: RateWindow::new(Duration::from_millis(1000)),
             prefill_win: RateWindow::new(Duration::from_millis(600)),
-            decode_guard: RateGuard::new(DECODE_IMPOSSIBLE_TPS),
-            prefill_guard: RateGuard::new(PREFILL_IMPOSSIBLE_TPS),
+            decode_guard: RateGuard::new(DECODE_IMPOSSIBLE_TPS, true),
+            prefill_guard: RateGuard::new(PREFILL_IMPOSSIBLE_TPS, false),
             phase: Phase::Idle,
             decode_tps: 0.0,
             prefill_tps: 0.0,
@@ -772,6 +785,7 @@ impl PerfTracker {
                     if done.prefill_tokens == 0 && done.decoded == 0 {
                         done.prompt_tokens = close.prompt;
                         done.cached_tokens = close.cached;
+                        done.cached_unknown = close.cached_unknown;
                         done.prefill_tokens = close.prompt.saturating_sub(close.cached);
                         done.decoded = close.gen;
                         if close.ttft_secs > 0.0 {
@@ -798,6 +812,7 @@ impl PerfTracker {
                         self.session_decoded += close.gen.saturating_sub(done.decoded) as u64;
                         done.prompt_tokens = close.prompt;
                         done.cached_tokens = close.cached;
+                        done.cached_unknown = close.cached_unknown;
                         done.decoded = done.decoded.max(close.gen);
                         done.set_prefill_timing(tokens, secs);
                         if close.ttft_secs > 0.0 {
@@ -915,6 +930,7 @@ impl PerfTracker {
             // the first sample, so always take the latest value.
             cur.prompt_tokens = s.prompt_tokens;
             cur.cached_tokens = s.cache_tokens;
+            cur.cached_unknown = s.cache_unknown;
             cur.decoded = cur.decoded.max(s.decoded);
             if d_pre > 0 {
                 cur.prefill_tokens += d_pre;
@@ -1204,6 +1220,7 @@ mod tests {
                     prefill_secs: None,
                     ttft_secs: 2.0,
                     itl_sum: 0.05,
+                    cached_unknown: false,
                 }),
             ),
             t0 + step + Duration::from_secs(17),
@@ -1268,6 +1285,7 @@ mod tests {
                     prefill_secs: None,
                     ttft_secs: 0.0,
                     itl_sum: 0.0,
+                    cached_unknown: false,
                 }),
             ),
             t0 + step * 2,
@@ -1402,6 +1420,39 @@ mod tests {
             "NaN holds the last rate"
         );
         assert!(p.peak_prefill_tps < 7000.0, "{}", p.peak_prefill_tps);
+    }
+
+    /// Prefill rates swing far more than the decode ratio between requests:
+    /// a long cold prompt after a run of cached follow-ups is real, and
+    /// must be shown on its first poll, not held behind the old level.
+    #[test]
+    fn cold_prefill_after_cached_follow_ups_is_shown() {
+        let mut p = PerfTracker::new();
+        let t0 = Instant::now();
+        let step = Duration::from_millis(500);
+        let pre = |task: i64, done: usize, rate: f32| LiveStats {
+            ctx_max: 32768,
+            id_task: task,
+            processing: true,
+            prompt_tokens: 20000,
+            prompt_processed: done,
+            prefill_tps: Some(rate),
+            ..Default::default()
+        };
+        p.observe(&slot(1, false, 0, 0, 0), t0);
+        let mut t = 1u32;
+        for task in 2..10i64 {
+            p.observe(&pre(task, 60, 300.0), t0 + step * t);
+            p.observe(&slot(task, false, 60, 60, 0), t0 + step * (t + 1));
+            t += 2;
+        }
+        p.observe(&pre(10, 4000, 8000.0), t0 + step * t);
+        assert!(
+            (p.prefill_tps - 8000.0).abs() < 1.0,
+            "cold prefill shown: {}",
+            p.prefill_tps
+        );
+        assert!(p.peak_prefill_tps >= 8000.0);
     }
 
     #[test]

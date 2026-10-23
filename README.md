@@ -300,9 +300,11 @@ whole request's tokens, or a self-reported rate is simply wrong — 1500 tok/s
 from a model that tops out at 75. Untreated, that single poll latches the
 session peak and squashes the sparklines into a flat line until restart. A
 rate is now shown only when it is physically possible (finite, under a
-ceiling no hardware reaches) and plausible for that server: above both 4× the
-median of the recently accepted samples and that median + 20 tok/s, it is
-glitch, and the panel holds the last real reading. A genuine change of level
+ceiling no hardware reaches) and, for decode, plausible for that server: above
+both 4× the median of the recently accepted samples and that median + 20
+tok/s, it is glitch, and the panel holds the last real reading. Prefill gets
+only the ceiling, since a cold prompt after cached follow-ups really is that
+much faster. A genuine change of level
 — faster model, deeper speculation — is held for a few polls at most: six
 rejected in a row (≈3 s at the default poll rate) re-anchor the reference,
 and the new speed is shown as fact.
@@ -509,15 +511,15 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | Metric | Source |
 |---|---|
 | decode tok/s | llama.cpp: delta of `n_decoded` from `GET /slots`. When that field is absent, delta of `llamacpp:tokens_predicted_total` from `GET /metrics`, anchored at the start of the request. vLLM: `/metrics` generation counter. SGLang: `decode_moments[5]` from `GET /v1/loads`. Strata: `live.generated` from `GET /metrics`. 1 s sliding window. Polls go to the server's `--host` (loopback when it bound `0.0.0.0`) |
-| prefill tok/s | llama.cpp: `n_prompt_tokens_processed`. vLLM: prompt-token counter. SGLang: `total_prefill_uncached_tokens`, or `sglang:realtime_tokens_total{mode="prefill_compute"}` with `--enable-metrics`. Strata: engine-measured `live.prefill_tok_s_mean`, then uncached tokens / `prompt_ms` at completion, from JSON `GET /metrics` |
+| prefill tok/s | llama.cpp: `n_prompt_tokens_processed`. vLLM: prompt-token counter minus `prompt_tokens_cached_total` (its prompt counter is the whole prompt, cached included). SGLang: `total_prefill_uncached_tokens`, or `sglang:realtime_tokens_total{mode="prefill_compute"}` with `--enable-metrics`. Strata: engine-measured `live.prefill_tok_s_mean`, then uncached tokens / `prompt_ms` at completion, from JSON `GET /metrics` |
 | time to first token | slot turning busy → first decoded token, quantised to the poll interval. Strata: the finished request's `prompt_ms`, the server's time reading the new prompt tokens (time spent queued is not in it) |
-| impossible tok/s samples | a displayed rate is finite, under 10⁶ (decode) / 10⁷ (prefill) tok/s, and not above both 4× the median of the recently accepted samples of that server and that median + 20 tok/s; glitch polls are cut and the display holds the last real reading, six rejections in a row re-anchor to a genuinely faster engine |
+| impossible tok/s samples | a displayed rate is finite, under 10⁶ (decode) / 10⁷ (prefill) tok/s, and (decode only) not above both 4× the median of the recently accepted samples of that server and that median + 20 tok/s; glitch polls are cut and the display holds the last real reading, six rejections in a row re-anchor to a genuinely faster engine |
 | tok/J | decode tok/s ÷ summed GPU power draw |
-| cache hit | llama.cpp: `n_prompt_tokens_cache / n_prompt_tokens`. SGLang without `--enable-metrics` is unknown (shown as "—"). Strata: the finished request's `reused`, unknown ("—") while it runs |
+| cache hit | llama.cpp: `n_prompt_tokens_cache / n_prompt_tokens`. vLLM: the window's `prefix_cache_hits_total / prefix_cache_queries_total` delta — exact even when several requests share the poll window, since both counters move in the same scheduler step; a request row whose window held more than one request shows its own cached count as `—` instead of a blend. SGLang without `--enable-metrics` is unknown (shown as "—"). Strata: the finished request's `reused`, unknown ("—") while it runs |
 | request log | one record per `id_task`; averages from accumulated deltas |
-| util, VRAM, power, °C, clocks, fan, PCIe link | NVIDIA in-process NVML (`nvidia-smi --query-gpu=…` fallback), Intel `xpu-smi --query-gpu=…`, or Linux amdgpu sysfs and hwmon, every poll. NVIDIA additionally reports the memory temperature — NVML field value 82 on the in-process path, `temperature.memory` on the CLI one — shown as `mem 71°` beside the die temperature on cards whose driver reports the sensor (HBM parts such as the CMP 170HX it was verified on); it reads blank elsewhere. On Intel, fan speed is the `xe` driver's hwmon tachometer (RPM); utilization that samples ~0 while clocks are boosted is reconstructed from the clock ratio and marked `~`; PCIe link and an unsupported temperature read blank. Unified-memory parts (NVIDIA GB10 / DGX Spark) report no device memory, fan or memory-busy counter at all: NVML stays the backend for the fields that *do* answer, and the memory bar relabels itself (see `VRAM weights vs KV` and Troubleshooting) |
+| util, VRAM, power, °C, clocks, fan, PCIe link | NVIDIA in-process NVML (`nvidia-smi --query-gpu=…` fallback), Intel `xpu-smi --query-gpu=…`, or Linux amdgpu sysfs and hwmon, every poll. NVIDIA additionally reports the memory temperature — NVML field value 82 on the in-process path, `temperature.memory` on the CLI one — shown as `mem 71°` beside the die temperature on cards whose driver reports the sensor (HBM parts such as the CMP 170HX it was verified on); it reads blank elsewhere. On Intel, fan speed is the `xe` driver's hwmon tachometer (RPM); utilization that samples ~0 while clocks are boosted is reconstructed from the clock ratio and marked `~`; PCIe link and an unsupported temperature read blank. Unified-memory parts (NVIDIA GB10 / DGX Spark) report no device memory, fan or memory-busy counter at all: NVML stays the backend for the fields that *do* answer, and the memory bar relabels itself (see `VRAM weights vs KV` and Troubleshooting). AMD APUs (BC-250 / Cyan Skillfish, Strix Halo) are unified too but *measured*: the driver reports a 512 MiB VRAM carve-out plus a GTT heap spanning the shared RAM pool, and the backend shows the sum of both heaps as the `UNIFIED` pool — the same figures nvtop prints for an integrated GPU |
 | system RAM | Linux `/proc/meminfo` (`MemTotal − MemAvailable` in use, `Cached` as page cache) and the server's `VmRSS`; elsewhere the OS memory totals, with no page cache split |
-| VRAM weights vs KV | llama.cpp: **estimate** from GGUF file size × `--tensor-split`. SGLang: `memory.weight_gb` and `memory.kv_cache_gb` from `/v1/loads`. vLLM and other safetensors servers: **estimate** from the summed size of the served directory's weight shards. On a part with no device memory (GB10 / DGX Spark) the bar is labelled `UNIFIED`: used = the server's weight + KV + CUDA-graph GiB from `/v1/loads` summed over the models that report it, denominator = system RAM — the pool the accelerator shares. vLLM has no `/v1/loads`; a vLLM server is counted by its own declared numbers instead: the served directory's shard sizes for weights, plus the whole `--kv-cache-memory-bytes` pool it was launched with, which vLLM allocates at start-up (the value is read as vLLM reads it: `16g` is 16 × 10⁹ bytes, `16G` is 16 GiB). `kv_cache_usage_perc` from `/metrics` lights the share of that pool holding tokens. Without the flag the pool is not counted, and with no number from any model the row degrades to zeros rather than a stand-in |
+| VRAM weights vs KV | llama.cpp: **estimate** from GGUF file size × `--tensor-split`. SGLang: `memory.weight_gb` and `memory.kv_cache_gb` from `/v1/loads`. vLLM and other safetensors servers: **estimate** from the summed size of the served directory's weight shards. On a part with no device memory (GB10 / DGX Spark) the bar is labelled `UNIFIED`: used = the server's weight + KV + CUDA-graph GiB from `/v1/loads` summed over the models that report it, denominator = system RAM — the pool the accelerator shares. vLLM has no `/v1/loads`; a vLLM server is counted by its own declared numbers instead: the served directory's shard sizes for weights, plus the whole `--kv-cache-memory-bytes` pool it was launched with, which vLLM allocates at start-up (the value is read as vLLM reads it: `16g` is 16 × 10⁹ bytes, `16G` is 16 GiB). `kv_cache_usage_perc` from `/metrics` lights the share of that pool holding tokens. Without that flag but with `--gpu-memory-utilization` on the command line, the fill is that fraction of system RAM — the budget vLLM claims at start-up, weights included — never less than the shards; the segment past the weights is then the rest of that budget, so it holds activations and CUDA graphs as well as the KV pool. With neither flag the pool is not counted (vLLM's 0.9 default is not on the command line), and with no number from any model the row degrades to zeros rather than a stand-in. Shards one directory down (`tensors/`) are found when the served directory has none of its own. An amdgpu APU row is the exception: its pool is measured from the driver's VRAM + GTT heaps, which already count every GPU process, so no server declaration overwrites it |
 | layers, heads, experts, MTP layers, engram, quant | GGUF header, or HuggingFace `config.json` (`num_hidden_layers`, `num_attention_heads`, `num_experts` / `num_local_experts`, `num_experts_per_tok`) for safetensors dirs |
 | vision encoder | llama.cpp: `modalities.vision` from `GET /props`, else `--mmproj` / `-hf` on the command line or `LLAMA_ARG_MMPROJ` in `/proc/<pid>/environ`. Placement: CPU for `--no-mmproj-offload` or a process with no GPU runtime in `/proc/<pid>/maps`; otherwise `--mmproj-device` or the first GPU device, mapped to a card by the CUDA driver's `cuDeviceGetPCIBusId` (run in a child process with the server's CUDA variables) matched against nvidia-smi's `pci.bus_id`, or by the one card the process occupies. vLLM / SGLang: `vision_config` in `config.json`, on the model's GPUs (none with `--language-model-only`) |
 | layer → GPU | `--tensor-split` proportions |
@@ -782,8 +784,11 @@ system RAM as the denominator and the SGLang server's own
 vLLM reports no `/v1/loads`; its fill is the served directory's shard sizes
 plus the `--kv-cache-memory-bytes` pool from its command line, all of which
 vLLM allocates at start-up, and `kv_cache_usage_perc` lights the part of the
-pool that holds tokens. A vLLM server launched without that flag sizes its
-pool by profiling, and only its weights are counted. llama.cpp reports
+pool that holds tokens. Launched with `--gpu-memory-utilization` instead,
+the fill is that fraction of system RAM, the budget vLLM takes for weights,
+activations, CUDA graphs and KV together, so the segment past the weights is
+all of those rather than KV alone. With neither flag only its weights are
+counted. llama.cpp reports
 neither, so its bar shows zeros. An SGLang server whose key the dashboard does
 not have shows zeros too, and the status line says `HTTP 401` (see
 [API keys and LM Studio](#api-keys-and-lm-studio)). Fan and `VRAM busy %` read
@@ -805,6 +810,14 @@ same tensor table a GGUF file would (labelled `est`).
 `amdgpu` driver and readable DRM sysfs/hwmon files under `/sys/class/drm`.
 No ROCm installation or privileged access is required. On other operating
 systems the dashboard continues to use the existing NVIDIA collector.
+
+**AMD APU shows a tiny, nearly-full card.** A BC-250 / Cyan Skillfish or
+Strix Halo APU is not a 512 MiB GPU: that is only the VRAM carve-out the
+driver reports, and the work happens in the GTT heap that spans the shared
+RAM pool. The backend detects the carve-out and draws the sum of both heaps
+as a `UNIFIED` pool — the same vram+gtt sum nvtop shows once libdrm flags
+the part as integrated — and keeps that driver-measured count even when a
+server declares its own occupancy.
 
 **MTP panel says "start llama-server with --metrics".** Exactly that; see
 above.
@@ -832,8 +845,8 @@ need the file.
 may be using a different slot; the dashboard follows the busy slot when there
 is one. Check `GET /slots` on the server.
 
-**The rate holds its last value for a second while the server is clearly
-faster or slower.** That is the glitch guard: a rate more than 4× (and 20
+**The decode rate holds its last value for a second while the server is clearly
+faster.** That is the glitch guard: a rate more than 4× (and 20
 tok/s above) the recent median of the same server is not shown until it has
 repeated for six polls in a row, because single-poll spikes of that size are
 engine bugs, not speed — and one accepted spike rescales the whole

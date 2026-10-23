@@ -389,6 +389,7 @@ impl SglangAdapter {
             itl_sum: 0.0,
             closing: None,
             cache_unknown: cache_unknown && running,
+            cache_hit_override: None,
             weight_gb: c.weight_gb,
             kv_cache_gb: c.kv_cache_gb,
             graph_gb: c.graph_gb,
