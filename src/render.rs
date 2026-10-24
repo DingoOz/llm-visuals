@@ -16,7 +16,7 @@ use crate::colors::{self as pal, ColorTheme};
 use crate::config::ViewMode;
 use crate::dblog::{ContextSpeed, LogSummary};
 use crate::fade::FadeState;
-use crate::gpu::GpuStats;
+use crate::gpu::{ClockReasons, GpuStats, ReasonLevel};
 use crate::landscape::{self, Camera};
 use crate::model_detect::DetectedModel;
 use crate::observe::{ExpertStats, LiveStats};
@@ -763,10 +763,27 @@ impl Renderer {
         ));
         // Optional stats, most important first; dropped from the end until
         // the utilisation gauge keeps a sensible width on narrow terminals.
-        let mut extras: Vec<Span> = vec![Span::styled(
+        let mut extras: Vec<Span> = Vec::new();
+        // Why the clocks are down, when the driver says they are. First of
+        // the optional stats, so the last to go: it takes no room while
+        // nothing is limiting, and explains a slow token when something is.
+        let held = d.perf.clock_hold.get(gi).map(|h| h.held(Instant::now()));
+        let badge = held.and_then(fmt_clock_reasons);
+        if let Some((text, level)) = &badge {
+            let colour = match level {
+                ReasonLevel::Severe => pal::vu(1.0),
+                ReasonLevel::Warn => pal::c(pal::AMBER),
+                ReasonLevel::Info => pal::c(pal::TEXT_DIM),
+            };
+            extras.push(Span::styled(
+                format!("  {text}"),
+                Style::default().fg(colour).add_modifier(Modifier::BOLD),
+            ));
+        }
+        extras.push(Span::styled(
             format!("  {temp:>2.0}°"),
             Style::default().fg(temp_col).add_modifier(Modifier::BOLD),
-        )];
+        ));
         // Memory temperature, on the NVIDIA cards that report it: the second
         // hot spot on an LLM box, and the one that throttles before the die does.
         if let Some(mt) = g.temperature_memory {
@@ -808,7 +825,19 @@ impl Renderer {
         while !extras.is_empty() && fixed + width_of(&extras) + min_bar > w {
             extras.pop();
         }
-        let bar_w = w.saturating_sub(fixed).clamp(4, 30);
+        let mut bar_w = w.saturating_sub(fixed).clamp(4, 30);
+        // The gauge keeps its width so the cards line up; a stat that would
+        // still run past the panel edge goes whole rather than cut mid-number
+        // (a clock-reason badge arriving pushes the last one out this way).
+        let spans_w = |s: &[Span]| -> usize { s.iter().map(Span::width).sum() };
+        let rest_w = |e: &[Span]| name.chars().count() + spans_w(&tail) + spans_w(e);
+        let keep = usize::from(badge.is_some());
+        while extras.len() > keep && rest_w(&extras) + bar_w > w {
+            extras.pop();
+        }
+        // A badge that the loop above kept but the full gauge leaves no room
+        // for takes its cells from the gauge: it is what explains the gauge.
+        bar_w = bar_w.min(w.saturating_sub(rest_w(&extras))).max(4);
         // The card's peak memory bandwidth, only where it fits whole beside
         // the bar: every card's bar keeps the same width so they line up.
         if let Some(peak) = g.mem_peak_gb_s.filter(|_| !g.unified) {
@@ -816,7 +845,7 @@ impl Renderer {
                 format!("  {}GB/s", fmt_compact(peak)),
                 Style::default().fg(pal::c(pal::TEXT_MUTED)),
             );
-            if fixed + bar_w + width_of(&extras) + width_of(std::slice::from_ref(&peak)) <= w {
+            if rest_w(&extras) + bar_w + peak.width() <= w {
                 extras.push(peak);
             }
         }
@@ -4713,6 +4742,21 @@ fn max_layer_head(cols: &[&crate::pipeline::TokenColumn]) -> (usize, usize) {
 // Formatting
 // ---------------------------------------------------------------------------
 
+/// The clocks-event badge: every limiting reason, worst first, and the level
+/// of the worst. `⚠` marks the driver's power and thermal policy and hardware
+/// slowdown; a configured ceiling (APP, SYNC) is stated, not flagged.
+fn fmt_clock_reasons(reasons: ClockReasons) -> Option<(String, ReasonLevel)> {
+    let labels = reasons.labels();
+    let worst = labels.iter().map(|&(_, level)| level).max()?;
+    let names: Vec<&str> = labels.iter().map(|&(name, _)| name).collect();
+    let mark = if worst >= ReasonLevel::Warn {
+        "⚠"
+    } else {
+        ""
+    };
+    Some((format!("{mark}{}", names.join("+")), worst))
+}
+
 pub fn fmt_int(n: usize) -> String {
     let s = n.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
@@ -4855,6 +4899,28 @@ fn quant_from_path(m: &DetectedModel) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_reason_badge() {
+        let badge = |bits: u64| fmt_clock_reasons(ClockReasons(bits));
+        assert_eq!(badge(0), None);
+        assert_eq!(badge(ClockReasons::GPU_IDLE), None);
+        assert_eq!(
+            badge(ClockReasons::SW_POWER_CAP),
+            Some(("⚠PWR".to_string(), ReasonLevel::Warn))
+        );
+        assert_eq!(
+            badge(
+                ClockReasons::HW_THERMAL | ClockReasons::HW_SLOWDOWN | ClockReasons::SW_POWER_CAP
+            ),
+            Some(("⚠THERM+PWR".to_string(), ReasonLevel::Severe))
+        );
+        // A configured ceiling is stated, not flagged.
+        assert_eq!(
+            badge(ClockReasons::APP_CLOCKS),
+            Some(("APP".to_string(), ReasonLevel::Info))
+        );
+    }
 
     #[test]
     fn gpu_split_keeps_three_rows_per_card_before_adding_gaps() {

@@ -67,7 +67,7 @@ GPUs and the disk are shared.
 | `sglang.rs` | SGLang adapter: `GET /v1/loads?include=all` plus one-shot `/server_info`; optional `sglang:realtime_tokens_total` |
 | `gpu.rs` | in-process NVML telemetry collector (falling back to `nvidia-smi` CSV) or Linux amdgpu sysfs on a `spawn_blocking` thread; smooth random-walk demo GPUs |
 | `nvml.rs` | dynamically loads `nvml.dll` or `libnvidia-ml.so`; maintains a persistent in-process session for GPU metrics and PCIe throughput without subprocess overhead |
-| `perf.rs` | turns counter samples into rates with `RateWindow` (sliding window), tracks requests, TTFT, peaks, MTP acceptance, history ring buffers; `Meter` (VU channel with peak hold and auto scale) and `BandwidthStats` for the pipeline view |
+| `perf.rs` | turns counter samples into rates with `RateWindow` (sliding window), tracks requests, TTFT, peaks, MTP acceptance, history ring buffers, the clocks-event reason hold; `Meter` (VU channel with peak hold and auto scale) and `BandwidthStats` for the pipeline view |
 | `host.rs` | host counters: `/proc/diskstats`, `/proc/<pid>/io`, `/proc/<pid>/stat` (major faults), `/proc/<pid>/status` (`RssFile`), `/proc/meminfo`, and PCIe rx/tx per GPU via NVML `nvmlDeviceGetPcieThroughput` (with `nvidia-smi dmon` fallback). In-process NVML eliminates the repeated CLI subprocess spawns on the NVML path; the `dmon` fallback still spawns one per poll |
 | `bandwidth.rs` | `weight_layout` (bytes total / active / CPU-side from the GGUF tensor table and VRAM use) and `assess`, the rule chain that names the bottleneck stage |
 | `fade.rs` | time-based smoothing so the UI breathes: fast attack, slow release; per-expert heat that cools exponentially; per-expert usage (the server's hit counts as a share of the busiest expert's) eased for the landscape |
@@ -174,8 +174,13 @@ peak_i)` under a parallel one (tensor-parallel safetensors servers,
   by level with a gradient.
 - Layout sheds the models strip first (it needs 14 rows of body beneath it),
   then requests below 22 body rows and context/MTP below 16; the GPU line
-  sheds PCIe, fan, clock, temperature before shrinking its gauge, and the key
-  row shortens its own labels before dropping keys from the end.
+  sheds PCIe, fan, clock, temperature before shrinking its gauge (whole
+  items, never cut at the panel edge), keeps a clocks-event badge longest
+  and lets it take cells from the gauge, and the key row shortens its own
+  labels before dropping keys from the end.
+- Clocks-event reasons are held per bit for 1.5 s after the driver last
+  reported them (`perf::ReasonHold`), so a one-poll power cap is readable;
+  the hold stretches a reported reason and never adds one.
 - The models strip gives each row a fixed budget — index, name, phase and rate
   always survive — and spends what is left on history, then context, then
   VRAM, so every row's columns line up at any width.

@@ -318,6 +318,29 @@ memory bandwidth where the line has room for it, a VRAM bar split into
 weights / KV in use / KV reserved / free, and utilisation and power history
 sparklines.
 
+When the driver is holding an NVIDIA card's clocks down, a badge after the
+power reading says why, so a sudden drop in decode speed has its cause on
+screen:
+
+| Badge | Driver reason |
+|---|---|
+| `⚠THERM` red | hardware thermal slowdown (clocks halved or worse) |
+| `⚠BRAKE` red | hardware power brake: an external signal, usually the power supply |
+| `⚠HW` red | hardware slowdown not explained by either of the above |
+| `⚠THERM` amber | software thermal cap: past the card's maximum operating temperature |
+| `⚠PWR` amber | software power cap: drawing the power limit |
+| `SYNC` grey | held to the slowest card of a sync-boost group |
+| `APP` grey | held to the configured application clocks |
+
+Several reasons at once read worst first (`⚠THERM+PWR`). Idle and the display
+clock setting are not shown: neither slows a token down. A reason stays up
+for 1.5 s after the driver last reported it, so one that is on for a single
+200 ms poll can still be read; it is never shown longer than that. It is the
+last of the optional stats to be dropped on a narrow card: the clock, fan and
+PCIe go first, and if the badge still has no room it takes it from the
+utilisation gauge. Cards whose driver does not report reasons (AMD, Intel,
+Apple, some virtual GPUs) show nothing.
+
 Below the cards, a system RAM section shows memory in use / page cache / free
 against the machine's total, the focused model's resident size, and a history
 of RAM in use. It is on both the dashboard and the perf view, and is the first
@@ -571,7 +594,8 @@ watched and `--pid A,B` restricts it to named processes.
 
 Layouts adapt: the model strip is the first thing shed on a short terminal,
 then the request log, then the context and MTP row, and on narrow terminals
-the GPU line sheds PCIe, fan, clock and temperatures before the gauge shrinks,
+the GPU line sheds PCIe, fan, clock and temperatures before the gauge shrinks
+(a clocks-event badge outlasts them all),
 while the key row shortens its own labels. Truecolor is auto-detected with a
 256-colour fallback.
 
@@ -588,7 +612,7 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | tok/J | decode tok/s ÷ summed GPU power draw |
 | cache hit | llama.cpp: `n_prompt_tokens_cache / n_prompt_tokens`. vLLM: the window's `prefix_cache_hits_total / prefix_cache_queries_total` delta — exact even when several requests share the poll window, since both counters move in the same scheduler step; a request row whose window held more than one request shows its own cached count as `—` instead of a blend. SGLang without `--enable-metrics` is unknown (shown as "—"). Strata: the finished request's `reused`, unknown ("—") while it runs |
 | request log | one record per `id_task`; averages from accumulated deltas |
-| util, VRAM, power, °C, clocks, fan, PCIe link | NVIDIA in-process NVML (`nvidia-smi --query-gpu=…` fallback), Intel `xpu-smi --query-gpu=…`, or Linux amdgpu sysfs and hwmon, every poll. NVIDIA additionally reports the memory temperature — NVML field value 82 on the in-process path, `temperature.memory` on the CLI one — shown as `mem 71°` beside the die temperature on cards whose driver reports the sensor (HBM parts such as the CMP 170HX it was verified on); it reads blank elsewhere. On Intel, fan speed is the `xe` driver's hwmon tachometer (RPM); utilization that samples ~0 while clocks are boosted is reconstructed from the clock ratio and marked `~`; PCIe link and an unsupported temperature read blank. Unified-memory parts (NVIDIA GB10 / DGX Spark) report no device memory, fan or memory-busy counter at all: NVML stays the backend for the fields that *do* answer, and the memory bar relabels itself (see `VRAM weights vs KV` and Troubleshooting). AMD APUs (BC-250 / Cyan Skillfish, Strix Halo) are unified too but *measured*: the driver reports a 512 MiB VRAM carve-out plus a GTT heap spanning the shared RAM pool, and the backend shows the sum of both heaps as the `UNIFIED` pool — the same figures nvtop prints for an integrated GPU |
+| util, VRAM, power, °C, clocks, fan, PCIe link | NVIDIA in-process NVML (`nvidia-smi --query-gpu=…` fallback), Intel `xpu-smi --query-gpu=…`, or Linux amdgpu sysfs and hwmon, every poll. NVIDIA additionally reports the memory temperature — NVML field value 82 on the in-process path, `temperature.memory` on the CLI one — shown as `mem 71°` beside the die temperature on cards whose driver reports the sensor (HBM parts such as the CMP 170HX it was verified on); it reads blank elsewhere. The clocks-event reasons badge is NVML `nvmlDeviceGetCurrentClocksEventReasons` (`…ClocksThrottleReasons` on drivers that predate the rename) in process, and `clocks_event_reasons.active` (else `clocks_throttle_reasons.active`) on the CLI, a bitmask decoded per `nvml.h`. On Intel, fan speed is the `xe` driver's hwmon tachometer (RPM); utilization that samples ~0 while clocks are boosted is reconstructed from the clock ratio and marked `~`; PCIe link and an unsupported temperature read blank. Unified-memory parts (NVIDIA GB10 / DGX Spark) report no device memory, fan or memory-busy counter at all: NVML stays the backend for the fields that *do* answer, and the memory bar relabels itself (see `VRAM weights vs KV` and Troubleshooting). AMD APUs (BC-250 / Cyan Skillfish, Strix Halo) are unified too but *measured*: the driver reports a 512 MiB VRAM carve-out plus a GTT heap spanning the shared RAM pool, and the backend shows the sum of both heaps as the `UNIFIED` pool — the same figures nvtop prints for an integrated GPU |
 | system RAM | Linux `/proc/meminfo` (`MemTotal − MemAvailable` in use, `Cached` as page cache) and the server's `VmRSS`; elsewhere the OS memory totals, with no page cache split |
 | VRAM weights vs KV | llama.cpp: **estimate** from GGUF file size × `--tensor-split`, with the tensors override rules keep in RAM left out and the ones they pin to a card counted on it. SGLang: `memory.weight_gb` and `memory.kv_cache_gb` from `/v1/loads`. vLLM and other safetensors servers: **estimate** from the summed size of the served directory's weight shards. On a part with no device memory (GB10 / DGX Spark) the bar is labelled `UNIFIED`: used = the server's weight + KV + CUDA-graph GiB from `/v1/loads` summed over the models that report it, denominator = system RAM — the pool the accelerator shares. vLLM has no `/v1/loads`; a vLLM server is counted by its own declared numbers instead: the served directory's shard sizes for weights, plus the whole `--kv-cache-memory-bytes` pool it was launched with, which vLLM allocates at start-up (the value is read as vLLM reads it: `16g` is 16 × 10⁹ bytes, `16G` is 16 GiB). `kv_cache_usage_perc` from `/metrics` lights the share of that pool holding tokens. Without that flag but with `--gpu-memory-utilization` on the command line, the fill is that fraction of system RAM — the budget vLLM claims at start-up, weights included — never less than the shards; the segment past the weights is then the rest of that budget, so it holds activations and CUDA graphs as well as the KV pool. With neither flag the pool is not counted (vLLM's 0.9 default is not on the command line), and with no number from any model the row degrades to zeros rather than a stand-in. Shards one directory down (`tensors/`) are found when the served directory has none of its own. An amdgpu APU row is the exception: its pool is measured from the driver's VRAM + GTT heaps, which already count every GPU process, so no server declaration overwrites it |
 | layers, heads, experts, MTP layers, engram, quant | GGUF header, or HuggingFace `config.json` (`num_hidden_layers`, `num_attention_heads`, `num_experts` / `num_local_experts`, `num_experts_per_tok`) for safetensors dirs |
