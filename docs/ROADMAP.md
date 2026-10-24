@@ -32,6 +32,7 @@ is put together.
   from the store's manifests; `/api/ps` for the unload countdown, the
   CPU/GPU split and the CPU-side bytes; daemon-only slots labelled
   `throughput n/a`.
+- GPU energy per session and per generated token, priced with `--energy-price`.
 
 ## Ideas not yet done
 
