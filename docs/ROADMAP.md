@@ -35,6 +35,8 @@ is put together.
 - GPU energy per session and per generated token, priced with `--energy-price`.
 - Alerts (`--alerts`): VRAM growth past its settled level, GPU / memory hot, slow decode against the
   model's own baseline, server gone; banner, bell or desktop notification.
+- Regression flag: decode speed now vs the same model's logged week, per
+  context range and on the same GPU set.
 
 ## Ideas not yet done
 

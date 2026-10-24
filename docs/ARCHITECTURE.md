@@ -58,6 +58,7 @@ GPUs and the disk are shared.
 | `config.rs` | clap arguments and `ViewMode` |
 | `settings.rs` | per-user config/data paths; loads `settings.json` and places its flags ahead of the command line; the settings screen's fields, keys, validation (re-parsing through clap) and saving |
 | `dblog.rs` | `--log-db` SQLite writer (on by default at the per-user data path) with a size cap |
+| `regress.rs` | the regression flag: reads the last hour and the baseline window of decode samples from the log on a blocking thread (rowid binary search as the time index, baseline cached for an hour), keeps spans logged with the model's current GPU set, and compares the two per context range |
 | `model_detect.rs` | finds inference processes via `nvidia-smi --query-compute-apps` and `/proc`, parses their command lines (model path, port, ctx size, tensor split, spec mode); returns every server found, best first, minus this process and idle daemons |
 | `vision.rs` | vision encoder detection and placement: llama.cpp projector flags and environment, the GPU runtime from `/proc/<pid>/maps`, and CUDA ordinal → host card via a `--cuda-bus-ids` child process that queries `libcuda` under the server's `CUDA_VISIBLE_DEVICES` / `CUDA_DEVICE_ORDER` |
 | `gguf.rs` | reads the GGUF header without loading tensors; maps layers to GPUs from `--tensor-split`; `read_tensor_table` walks the tensor table and sizes each tensor from the gap to the next offset (no quant type table needed), `read_tensor_summary` totals it |

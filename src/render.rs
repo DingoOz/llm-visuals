@@ -15,7 +15,7 @@ use crate::balance::Balance;
 use crate::bandwidth::{self, StageId};
 use crate::colors::{self as pal, ColorTheme};
 use crate::config::ViewMode;
-use crate::dblog::{ContextSpeed, LogSummary};
+use crate::dblog::{ContextSpeed, LogSummary, CTX_GRAIN};
 use crate::energy::{self, GpuEnergy};
 use crate::fade::FadeState;
 use crate::gpu::{ClockReasons, GpuStats, ReasonLevel};
@@ -25,6 +25,7 @@ use crate::observe::{ExpertStats, LiveStats};
 use crate::ollama;
 use crate::perf::{Meter, PerfTracker, Phase, RequestRecord};
 use crate::pipeline::{GeneratedText, TokenBuffer};
+use crate::regress::{self, Comparison, History};
 use crate::settings::{Kind, SettingsForm};
 use crate::vision::{Place, Vision};
 
@@ -45,6 +46,9 @@ pub struct ModelView<'a> {
     pub experts: Option<&'a ExpertStats>,
     pub num_layers: usize,
     pub num_heads: usize,
+    /// Decode speed logged now and over the baseline window, for the
+    /// regression flag; None until the first read of the log comes back.
+    pub regression: Option<&'a History>,
 }
 
 /// Everything one frame needs, borrowed from the main loop.
@@ -88,6 +92,9 @@ pub struct Dashboard<'a> {
     pub alerts: &'a [Alert],
     /// The alert the banner row shows, while it is news.
     pub alert_banner: Option<&'a Alert>,
+    /// Why no model has a regression baseline at all (logging off, or the
+    /// log could not be read).
+    pub regress_off: Option<&'a str>,
 }
 
 pub struct Renderer {
@@ -95,6 +102,9 @@ pub struct Renderer {
     pub max_layers: usize,
     pub max_heads: usize,
     pub moe_experts: usize,
+    /// `--regress-pct`: how far below its baseline a model's decode speed
+    /// must fall to be flagged; 0 never flags.
+    pub regress_pct: f64,
     epoch: Instant,
 }
 
@@ -105,6 +115,7 @@ impl Renderer {
             max_layers,
             max_heads,
             moe_experts,
+            regress_pct: 0.0,
             epoch: Instant::now(),
         }
     }
@@ -139,7 +150,7 @@ impl Renderer {
                 self.render_log(frame, area, log);
             }
             if let Some((speeds, sel)) = d.ctx_speed {
-                self.render_ctx_speed(frame, area, speeds, sel);
+                self.render_ctx_speed(frame, area, speeds, sel, d);
             }
             if let Some(form) = d.settings {
                 self.render_settings(frame, area, form);
@@ -342,6 +353,18 @@ impl Renderer {
     // Header
     // -----------------------------------------------------------------------
 
+    /// A model whose decode speed has fallen past `--regress-pct` below its
+    /// own baseline: the comparison, and amber at the threshold reddening
+    /// to twice it.
+    fn regression_flag(&self, history: Option<&History>) -> Option<(Comparison, (u8, u8, u8))> {
+        let c = history?.compare().ok()?;
+        if !c.regressed(self.regress_pct) {
+            return None;
+        }
+        let over = (-c.change * 100.0 / self.regress_pct - 1.0).clamp(0.0, 1.0);
+        Some((c, pal::gradient(pal::VU, 0.72 + 0.28 * over as f32)))
+    }
+
     fn render_header(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
         let phase = d.perf.phase;
         let (badge_rgb, badge_txt) = match phase {
@@ -494,6 +517,35 @@ impl Renderer {
                         seg.push(Span::styled(format!(" ({dev})"), st(pal::TEXT_DIM)));
                     }
                     segs.push((9, seg));
+                }
+                let history = d.models.get(d.focus).and_then(|v| v.regression);
+                if let Some((c, rgb)) = self.regression_flag(history) {
+                    // The flag is news and outlasts the model's shape; the
+                    // two speeds behind it go early on a narrow terminal.
+                    segs.push((
+                        9,
+                        vec![
+                            Span::styled(
+                                format!("decode ▼{:.0}%", -c.change * 100.0),
+                                st(rgb).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!(" vs {}d", history.map_or(0, |h| h.days)),
+                                st(pal::TEXT_DIM),
+                            ),
+                        ],
+                    ));
+                    segs.push((
+                        3,
+                        vec![Span::styled(
+                            format!(
+                                "{} → {} t/s",
+                                fmt_rate(c.base_tps as f32),
+                                fmt_rate(c.cur_tps as f32)
+                            ),
+                            st(pal::TEXT_DIM),
+                        )],
+                    ));
                 }
                 // An Ollama blob is named by its hash; the daemon knows the quant.
                 let ollama_quant = || {
@@ -3139,6 +3191,7 @@ impl Renderer {
         area: Rect,
         speeds: &Result<Vec<ContextSpeed>, String>,
         sel: usize,
+        d: &Dashboard,
     ) {
         let width = area.width.saturating_sub(4).min(100);
         let height = area.height.saturating_sub(2).min(26);
@@ -3217,25 +3270,36 @@ impl Renderer {
         ));
         lines.push(Line::raw(""));
 
+        // The regression baseline on this screen's own rows: the model's
+        // last hour and its baseline window, both on the GPUs it has now.
+        let running = d.models.iter().find(|v| v.detected.name == m.model);
+        let history = running.and_then(|v| v.regression);
+        let (lo, per) = (m.buckets[0].0 / CTX_GRAIN, m.step / CTX_GRAIN);
+        let windows = history.map(|h| {
+            (
+                h.days,
+                crate::dblog::merge_grains(&h.base, lo, per),
+                crate::dblog::merge_grains(&h.cur, lo, per),
+            )
+        });
         let label_w = 14;
-        let bar_w = w.saturating_sub(label_w + 8 + 9 + 3);
-        lines.push(Line::styled(
-            truncate(
-                &format!(
-                    " {:<label_w$} {:<bar_w$} {:>8} {:>8}",
-                    "CONTEXT", "", "t/s", "SAMPLES"
-                ),
-                w,
-            ),
-            head,
-        ));
+        let extra = if windows.is_some() { 16 } else { 0 };
+        let bar_w = w.saturating_sub(label_w + 8 + 9 + 3 + extra);
+        let mut columns = format!(
+            " {:<label_w$} {:<bar_w$} {:>8} {:>8}",
+            "CONTEXT", "", "t/s", "SAMPLES"
+        );
+        if let Some((days, _, _)) = &windows {
+            columns.push_str(&format!(" {:>7} {:>7}", format!("{days}d"), "1h"));
+        }
+        lines.push(Line::styled(truncate(&columns, w), head));
         let peak = m.buckets.iter().map(|b| b.1).fold(0.0, f64::max);
         let (first, last) = (m.buckets[0].0, m.buckets[m.buckets.len() - 1].0);
         // Every row from the shortest to the longest context, empty ones too,
         // so the vertical axis stays linear in tokens.
         let mut start = first;
-        // Leave a blank line, the summary and the key row below.
-        while start <= last && lines.len() + 3 < h {
+        // Leave a blank line, the two summaries and the key row below.
+        while start <= last && lines.len() + 4 < h {
             let range = format!("{}–{}", fmt_tokens(start), fmt_tokens(start + m.step));
             let mut spans = vec![Span::styled(format!(" {range:<label_w$} "), text)];
             match m.buckets.iter().find(|b| b.0 == start) {
@@ -3245,6 +3309,21 @@ impl Renderer {
                     let st = if n < 5 { dim } else { text };
                     spans.push(Span::styled(format!(" {:>8}", fmt_rate(tps as f32)), st));
                     spans.push(Span::styled(format!(" {:>8}", fmt_int(n as usize)), dim));
+                    if let Some((_, base, cur)) = &windows {
+                        for side in [base, cur] {
+                            spans.push(match side.iter().find(|r| r.0 == start) {
+                                Some(&(_, tps, n)) => Span::styled(
+                                    format!(" {:>7}", fmt_rate(tps as f32)),
+                                    if n < regress::MIN_RANGE_SAMPLES {
+                                        dim
+                                    } else {
+                                        text
+                                    },
+                                ),
+                                None => Span::styled(format!(" {:>7}", "–"), dim),
+                            });
+                        }
+                    }
                 }
                 None => spans.push(Span::styled(format!("{:>w2$}", "–", w2 = bar_w + 9), dim)),
             }
@@ -3266,6 +3345,48 @@ impl Renderer {
                     text.add_modifier(Modifier::BOLD),
                 ),
             ]));
+        }
+        let verdict = match (d.regress_off, history) {
+            (Some(why), _) => Err(why.to_string()),
+            (None, Some(h)) => h.compare(),
+            (None, None) if running.is_none() => Err("not running now".into()),
+            (None, None) => Err("reading the log…".into()),
+        };
+        match verdict {
+            Ok(c) => {
+                let flagged = self.regression_flag(history).map(|(_, rgb)| rgb);
+                lines.push(Line::from(fit_spans(
+                    &[
+                        Span::styled(
+                            format!(" last hour vs 1–{}d ago ", history.map_or(0, |h| h.days)),
+                            dim,
+                        ),
+                        Span::styled(
+                            format!(
+                                "{} → {} t/s ({:+.0}%)",
+                                fmt_rate(c.base_tps as f32),
+                                fmt_rate(c.cur_tps as f32),
+                                c.change * 100.0
+                            ),
+                            flagged
+                                .map_or(text, |rgb| Style::default().fg(pal::c(rgb)))
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(
+                                " at the same contexts and GPUs, {} samples",
+                                fmt_int(c.samples as usize)
+                            ),
+                            dim,
+                        ),
+                    ],
+                    w,
+                )));
+            }
+            Err(why) => lines.push(Line::styled(
+                truncate(&format!(" baseline: n/a — {why}"), w),
+                dim,
+            )),
         }
         while lines.len() + 1 < h {
             lines.push(Line::raw(""));
@@ -3371,6 +3492,14 @@ impl Renderer {
         let core = idx_w + phase_w + rate_w;
         let name_w = (w / 4).clamp(8, 24).min(w.saturating_sub(core + 2).max(6));
         let mut spare = w.saturating_sub(core + name_w + 1);
+        // A regression outranks the history and gauges: it is news.
+        let flag = self
+            .regression_flag(m.regression)
+            .map(|(c, rgb)| (format!("▼{:.0}% ", -c.change * 100.0), rgb))
+            .filter(|(f, _)| f.chars().count() <= spare);
+        if let Some((f, _)) = &flag {
+            spare -= f.chars().count();
+        }
         let show_vram = spare >= 10;
         if show_vram {
             spare -= 9;
@@ -3437,6 +3566,14 @@ impl Renderer {
             " tok/s ",
             Style::default().fg(pal::c(pal::TEXT_MUTED)),
         ));
+        if let Some((f, rgb)) = flag {
+            spans.push(Span::styled(
+                f,
+                Style::default()
+                    .fg(pal::c(rgb))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
 
         if spark_w > 0 {
             let hist: Vec<f32> = p.decode_hist.iter().copied().collect();
@@ -5507,6 +5644,7 @@ mod tests {
             experts: routed.then_some(&stats),
             num_layers: n_l,
             num_heads: 8,
+            regression: None,
         }];
         let dash = Dashboard {
             models: &views,
@@ -5534,6 +5672,7 @@ mod tests {
             energy: &GpuEnergy::default(),
             alerts: &[],
             alert_banner: None,
+            regress_off: None,
         };
         let renderer = Renderer::new(pal::get_theme("defrag"), 0, 0, 1);
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -5583,6 +5722,7 @@ mod tests {
             alerts,
             alert_banner: alerts.last().filter(|_| banner),
             energy: &GpuEnergy::default(),
+            regress_off: None,
         };
         let renderer = Renderer::new(pal::get_theme("defrag"), 0, 0, 1);
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
@@ -5859,6 +5999,7 @@ mod tests {
             energy: &energy,
             alerts: &[],
             alert_banner: None,
+            regress_off: None,
         };
         energy_line(&dash, w)
             .spans

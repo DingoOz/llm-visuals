@@ -180,6 +180,16 @@ pub struct Args {
     #[arg(long, default_value_t = 50.0, value_parser = parse_percent)]
     pub alert_slow_pct: f32,
 
+    /// Flag a model decoding at least this many percent slower than its own
+    /// logged history at the same context lengths (0 = never)
+    #[arg(long, default_value_t = 10.0)]
+    pub regress_pct: f64,
+
+    /// Days of --log-db history the regression flag compares against; the
+    /// last 24 hours are left out of it
+    #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u32).range(2..=365))]
+    pub regress_days: u32,
+
     /// Print the version and exit
     #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
     version: Option<bool>,
