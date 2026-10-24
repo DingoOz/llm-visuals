@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::gguf::{self, GgufInfo};
+use crate::offload::{self, Offload};
 use crate::vision::{self, Place, Vision};
 
 /// Information about a detected running LLM process
@@ -28,6 +29,9 @@ pub struct DetectedModel {
     pub gguf: Option<GgufInfo>,
     /// Weight byte layout from the tensor table (for bandwidth estimates).
     pub tensors: Option<gguf::TensorSummary>,
+    /// Where llama.cpp's `-ot` / `--cpu-moe` / `--n-cpu-moe` rules put the
+    /// tensors; `None` when the server was started without any.
+    pub offload: Option<Offload>,
     /// Vision encoder, when the server has (or may have) one.
     pub vision: Option<Vision>,
     /// Bearer key the server names outside `cmdline`: the `api_key` in
@@ -113,6 +117,16 @@ impl DetectedModel {
         self.mem_used_mb == 0 && self.path.is_none() && self.gguf.is_none()
     }
 
+    /// The engine as the panels name it: a llama-server that Ollama started
+    /// is Ollama to whoever runs it, though it is polled as llama.cpp.
+    pub fn engine_label(&self) -> &str {
+        if self.engine == "llama.cpp" && crate::ollama::is_runner(self) {
+            "ollama"
+        } else {
+            &self.engine
+        }
+    }
+
     pub fn n_layers(&self) -> usize {
         self.gguf.as_ref().map(|g| g.n_layers).unwrap_or(0)
     }
@@ -136,7 +150,8 @@ impl DetectedModel {
 pub fn load_gguf_metadata(model: &mut DetectedModel, path: PathBuf) {
     let path = resolve_model_path(model.pid, &path, &model.name);
     model.path = Some(path.clone());
-    if path.extension().and_then(|e| e.to_str()) != Some("gguf") {
+    // An Ollama blob is a GGUF under its content hash, with no extension.
+    if path.extension().and_then(|e| e.to_str()) != Some("gguf") && !crate::ollama::is_blob(&path) {
         return;
     }
     if let Ok(info) = gguf::read_info(&path) {
@@ -144,8 +159,49 @@ pub fn load_gguf_metadata(model: &mut DetectedModel, path: PathBuf) {
             model.name = info.name.clone();
         }
         model.gguf = Some(info);
-        model.tensors = gguf::read_tensor_summary(&path).ok();
+        match gguf::read_tensor_table(&path) {
+            Ok(table) => {
+                model.offload = offload_for(model, &table);
+                model.tensors = Some(gguf::summarize_tensors(&table));
+            }
+            Err(_) => model.tensors = None,
+        }
     }
+}
+
+/// llama.cpp's buffer-type overrides applied to the tensor table.
+fn offload_for(m: &DetectedModel, table: &[(String, u64)]) -> Option<Offload> {
+    if m.engine != "llama.cpp" {
+        return None;
+    }
+    let env = vision::read_environ(m.pid);
+    let rules = offload::parse_rules(&m.cmdline, &env);
+    if rules.is_empty() {
+        return None;
+    }
+    // A process on one card can only have pinned tensors to that card.
+    let single = (m.gpu_indices.len() == 1).then(|| m.gpu_indices[0]);
+    // The CUDA probe is a child process; run it once, and only if a rule
+    // names a CUDA device.
+    let mut cuda: Option<Option<Vec<Option<u32>>>> = None;
+    Some(offload::place(
+        table,
+        &rules,
+        m.n_experts(),
+        m.n_experts_used(),
+        |family, ordinal| {
+            if family == "CUDA" {
+                let map = cuda.get_or_insert_with(|| vision::cuda_host_indices(&env));
+                if let Some(g) = map
+                    .as_ref()
+                    .and_then(|v| v.get(ordinal as usize).copied().flatten())
+                {
+                    return Some(g);
+                }
+            }
+            single
+        },
+    ))
 }
 
 /// The vision encoder a detected server has (or may have) loaded, from its
@@ -562,17 +618,32 @@ pub fn detect_models() -> Vec<DetectedModel> {
     // onto the PID that serves HTTP.
     let mut worker_gpu: std::collections::HashMap<u32, (u64, Vec<u32>)> =
         std::collections::HashMap::new();
+    // Maya's vision helper, by the server that runs it: where the encoder is.
+    let mut helper_place: std::collections::HashMap<u32, vision::Place> =
+        std::collections::HashMap::new();
+    let have_gpu_list = !gpu_procs.is_empty();
 
     for app in gpu_procs {
         let cmdline = read_cmdline(app.pid).unwrap_or_else(|| app.process_name.clone());
+        let helper = crate::strata::is_helper(&app.process_name, &cmdline);
         if is_sglang_worker(&app.process_name)
             || crate::strata::is_engine(&app.process_name, &cmdline)
+            || helper
         {
             if let Some(ppid) = parent_pid(app.pid) {
                 let e = worker_gpu.entry(ppid).or_insert((0, Vec::new()));
                 e.0 = e.0.saturating_add(app.mem_used_mb);
                 if !e.1.contains(&app.gpu_index) {
                     e.1.push(app.gpu_index);
+                }
+                if helper {
+                    helper_place.insert(
+                        ppid,
+                        vision::Place::Gpu {
+                            device: None,
+                            gpu: Some(app.gpu_index),
+                        },
+                    );
                 }
             }
             continue;
@@ -607,6 +678,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
             cmdline: cmdline.clone(),
             gguf: None,
             tensors: None,
+            offload: None,
             vision: None,
             api_key: None,
         });
@@ -631,6 +703,18 @@ pub fn detect_models() -> Vec<DetectedModel> {
             continue;
         }
         if is_sglang_worker(&name) {
+            continue;
+        }
+        if crate::strata::is_helper(&name, &cmdline) {
+            // Not on the driver's list of GPU processes: on the CPU, unless
+            // there was no list to be on.
+            if let Some(ppid) = parent_pid(pid) {
+                helper_place.entry(ppid).or_insert(if have_gpu_list {
+                    vision::Place::Cpu
+                } else {
+                    vision::Place::Unknown
+                });
+            }
             continue;
         }
         // A vLLM server in a container reports its internal port;
@@ -660,6 +744,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
                 cmdline,
                 gguf: None,
                 tensors: None,
+                offload: None,
                 vision: None,
                 api_key: None,
             },
@@ -690,8 +775,16 @@ pub fn detect_models() -> Vec<DetectedModel> {
 
     let mut models: Vec<DetectedModel> = by_pid.into_values().collect();
     for m in &mut models {
-        if m.engine == "strata" {
+        if crate::strata::is_family(&m.engine) {
             apply_strata_config(m);
+        }
+        // `ollama serve` listens where OLLAMA_HOST says, not on its command
+        // line; a runner's `--port` is its own and stays.
+        if m.engine == "ollama" && !crate::ollama::is_legacy_runner(&m.cmdline) {
+            if let Some((host, port)) = crate::ollama::env_host(m.pid) {
+                m.host = host;
+                m.port = Some(port);
+            }
         }
         if let Some(path) = m.path.clone() {
             // A containerized server reports the model path as seen from
@@ -699,7 +792,20 @@ pub fn detect_models() -> Vec<DetectedModel> {
             // /proc/<pid>/mountinfo so the size (and the GGUF metadata
             // below) reads the host-side file.
             let resolved = resolve_model_path(m.pid, &path, &m.name);
-            if resolved.extension().and_then(|e| e.to_str()) == Some("gguf") {
+            if crate::ollama::is_blob(&resolved) {
+                // Named by its content hash: the tag is in the manifests
+                // beside it, and failing those the GGUF's own name beats
+                // `sha256-…`, which is kept only when neither is there.
+                let stem = std::mem::take(&mut m.name);
+                m.name = crate::ollama::names_for_blob(&resolved)
+                    .into_iter()
+                    .next()
+                    .unwrap_or_default();
+                load_gguf_metadata(m, resolved);
+                if m.name.is_empty() {
+                    m.name = stem;
+                }
+            } else if resolved.extension().and_then(|e| e.to_str()) == Some("gguf") {
                 load_gguf_metadata(m, resolved);
             } else if resolved.is_dir() {
                 // Keep the resolved dir (load_gguf_metadata does the same for
@@ -728,6 +834,12 @@ pub fn detect_models() -> Vec<DetectedModel> {
         }
         m.gpu_indices.sort_unstable();
         m.vision = detect_vision(m);
+        if let Some(place) = helper_place.remove(&m.pid) {
+            m.vision = Some(Vision {
+                loaded: Some(true),
+                place,
+            });
+        }
     }
 
     // GPU memory first; when nvidia-smi is unavailable that is zero for all,
@@ -736,7 +848,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
     models.sort_by_key(|m| {
         let has_model = m.path.is_some() || m.gguf.is_some();
         let engine_rank = match m.engine.as_str() {
-            "llama.cpp" | "vllm" | "sglang" | "strata" | "ninfer" | "exllamav2" => 2,
+            "llama.cpp" | "vllm" | "sglang" | "strata" | "maya" | "ninfer" | "exllamav2" => 2,
             "ollama" => 0,
             _ => 1,
         };
@@ -751,7 +863,8 @@ pub fn detect_models() -> Vec<DetectedModel> {
 }
 
 /// Strata's command line names only its `--config` JSON; the model's name,
-/// first GGUF shard and context size are in there.
+/// first GGUF shard and context size are in there, and for Maya the engine,
+/// its expert pack (which names the GGUF) and its cards.
 fn apply_strata_config(m: &mut DetectedModel) {
     let Some(path) = crate::strata::config_path(&m.cmdline, process_cwd(m.pid).as_deref()) else {
         return;
@@ -769,13 +882,23 @@ fn apply_strata_config(m: &mut DetectedModel) {
     if let Some(name) = cfg.model_name {
         m.name = name;
     }
+    if cfg.maya {
+        m.engine = "maya".into();
+    }
     if m.path.is_none() {
-        m.path = cfg.gguf;
+        m.path = cfg
+            .gguf
+            .or_else(|| cfg.pack.as_deref().and_then(crate::strata::pack_gguf));
     }
     if m.ctx_max.is_none() {
         m.ctx_max = cfg.max_context;
     }
     m.api_key = cfg.api_key;
+    // The engine's own GPU memory names its cards; the config is the
+    // fallback when the driver lists no processes.
+    if m.gpu_indices.is_empty() {
+        m.gpu_indices = cfg.gpus;
+    }
 }
 
 /// This dashboard is itself a process with `--model` on its command line;
@@ -1153,7 +1276,7 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
 
 /// Address to dial for a `--host` value. Wildcard binds accept local
 /// connections; a concrete address does not.
-fn connect_host(raw: &str) -> String {
+pub(crate) fn connect_host(raw: &str) -> String {
     let trimmed = raw.trim();
     let bare = trimmed
         .strip_prefix('[')
@@ -1848,6 +1971,22 @@ pub async fn probe_endpoint(
 
     if engine == "ollama" || port == 11434 {
         engine = "ollama".to_string();
+        // `/v1/models` lists every model pulled, loaded or not; the daemon's
+        // slot shows the one it has loaded, so name it after that.
+        // With nothing loaded it is just the daemon.
+        if let Ok(body) = http_get(host, port, "/api/ps", auth).await {
+            if let Some(loaded) = crate::ollama::parse_ps(&body) {
+                match loaded.into_iter().next() {
+                    Some(first) => {
+                        model_name = Some(first.name);
+                        if first.context_length > 0 {
+                            ctx_max = Some(first.context_length);
+                        }
+                    }
+                    None => model_name = Some("ollama".into()),
+                }
+            }
+        }
         if model_name.is_none() {
             if let Ok(body) = http_get(host, port, "/api/tags", auth).await {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
@@ -1878,7 +2017,12 @@ pub async fn probe_endpoint(
             crate::strata::parse_metrics(&body)
         };
         if let Some(m) = strata {
-            engine = "strata".to_string();
+            engine = if m.maya_version.is_some() {
+                "maya"
+            } else {
+                "strata"
+            }
+            .to_string();
             if model_name.is_none() {
                 model_name = m.model;
             }
@@ -1912,7 +2056,7 @@ pub async fn probe_endpoint(
     // key, since they come from /metrics.
     if model_name.is_none() {
         if let Some(h) = crate::strata::poll_health(host, port, auth).await {
-            engine = "strata".to_string();
+            engine = if h.maya { "maya" } else { "strata" }.to_string();
             model_name = h.model;
             if ctx_max.is_none() {
                 ctx_max = (h.max_context > 0).then_some(h.max_context);
@@ -2008,6 +2152,7 @@ pub async fn probe_endpoint(
         cmdline: format!("{final_name} --port {port}"),
         gguf: gguf_info,
         tensors: tensor_summary,
+        offload: None,
         vision,
         api_key: None,
     })
@@ -2603,6 +2748,7 @@ mod tests {
             cmdline: "test --port 7000".into(),
             gguf: None,
             tensors: None,
+            offload: None,
             vision: None,
             api_key: None,
         };

@@ -15,6 +15,9 @@ pub struct FadeState {
     pub n_heads: usize,
     pub layer: Vec<f32>,
     pub layer_gpu: Vec<usize>,
+    /// Share of each layer's bytes in system RAM (llama.cpp `-ot` rules);
+    /// empty when no rule placed anything there.
+    pub layer_cpu: Vec<f32>,
     pub layer_hist: Vec<VecDeque<f32>>,
     /// Per-expert heat: 1.0 the moment it is routed, cooling over ~0.6 s.
     pub expert: Vec<Vec<f32>>,
@@ -52,6 +55,7 @@ pub struct FadeState {
 pub struct FadeSample {
     pub layer_target: Vec<f32>,
     pub layer_gpu: Vec<usize>,
+    pub layer_cpu: Vec<f32>,
     pub kv_filled: Vec<bool>,
     pub processing: bool,
     pub decoded: usize,
@@ -85,6 +89,7 @@ impl FadeState {
             n_heads: 0,
             layer: Vec::new(),
             layer_gpu: Vec::new(),
+            layer_cpu: Vec::new(),
             layer_hist: Vec::new(),
             expert: Vec::new(),
             expert_usage: Vec::new(),
@@ -182,6 +187,7 @@ impl FadeState {
         if self.layer_gpu.len() < n_layers {
             self.layer_gpu.resize(n_layers, 0);
         }
+        self.layer_cpu = sample.layer_cpu.clone();
         self.processing = sample.processing;
         self.ctx_used = sample.ctx_used;
         self.ctx_max = sample.ctx_max.max(1);
@@ -376,6 +382,7 @@ mod tests {
         let sample = FadeSample {
             layer_target: vec![0.0; 3],
             layer_gpu: vec![0; 3],
+            layer_cpu: Vec::new(),
             kv_filled: vec![false; 4],
             processing: false,
             decoded: 0,
@@ -456,6 +463,7 @@ mod tests {
         let mut sample = FadeSample {
             layer_target: vec![1.0; 2],
             layer_gpu: vec![0; 2],
+            layer_cpu: Vec::new(),
             kv_filled: vec![true; 4],
             processing: true,
             decoded: 1,
@@ -487,6 +495,7 @@ mod tests {
         let mut sample = FadeSample {
             layer_target: vec![1.0; 2],
             layer_gpu: vec![0; 2],
+            layer_cpu: Vec::new(),
             kv_filled: vec![true; 4],
             processing: true,
             decoded: 1,
@@ -540,6 +549,7 @@ mod tests {
         let mut sample = FadeSample {
             layer_target: vec![1.0; 4],
             layer_gpu: vec![0; 4],
+            layer_cpu: Vec::new(),
             kv_filled: vec![true; 8],
             processing: true,
             decoded: 1,

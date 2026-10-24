@@ -536,6 +536,8 @@ impl VllmAdapter {
             kv_tokens: None,
             kv_usage_perc: c.kv_usage_perc.map(|v| v.clamp(0.0, 1.0) as f32),
             auth_denied: None,
+            ollama: None,
+            tiers: None,
         };
 
         let spec = spec_active.then(|| SpecMetrics {

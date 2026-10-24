@@ -154,6 +154,13 @@ pub struct LiveStats {
     /// number it owns is unreachable, so the panels show zeros. The status
     /// line names this instead of letting zeros pose as "nothing loaded".
     pub auth_denied: Option<u16>,
+    /// What the Ollama daemon's `/api/ps` says about this model: loaded or
+    /// not, how much is in VRAM, when it unloads. `None` for other engines
+    /// and while the daemon has not answered.
+    pub ollama: Option<crate::ollama::Status>,
+    /// Maya's expert tiers: where this model's tokens found their experts.
+    /// `None` for other engines.
+    pub tiers: Option<crate::strata::ExpertTiers>,
 }
 
 /// Per-request decode count when `/slots` does not carry `n_decoded`.
@@ -477,6 +484,8 @@ pub fn parse_slots(body: &str) -> Option<LiveStats> {
         kv_tokens: None,
         kv_usage_perc: None,
         auth_denied: None,
+        ollama: None,
+        tiers: None,
     })
 }
 
@@ -585,6 +594,231 @@ fn http_status_code(text: &str) -> Option<u16> {
         .nth(1)?
         .parse()
         .ok()
+}
+
+/// A POST whose response is read as it arrives. The benchmark times each
+/// server-sent event of a streamed completion, which `http_fetch` (read to
+/// the end, then parse) cannot do. Status codes are returned, not judged:
+/// a 400 from a server that rejects an optional field is a retry, not a
+/// failure.
+pub struct HttpStream {
+    stream: TcpStream,
+    pub status: u16,
+    /// None when the body is sent as-is and ends at close or Content-Length.
+    chunked: Option<ChunkedDecoder>,
+    remaining: Option<usize>,
+    /// Body bytes that arrived with the head.
+    pending: Vec<u8>,
+    eof: bool,
+}
+
+impl HttpStream {
+    pub async fn post_json(
+        host: &str,
+        port: u16,
+        path: &str,
+        auth: &HttpAuth,
+        body: &str,
+        head_timeout: Duration,
+    ) -> Result<Self, HttpError> {
+        let connect = TcpStream::connect((host, port));
+        let mut stream = tokio::time::timeout(Duration::from_secs(2), connect)
+            .await
+            .map_err(|_| HttpError::ConnectTimeout)?
+            .map_err(HttpError::Connect)?;
+        let authority = if host.contains(':') && !host.starts_with('[') {
+            format!("[{host}]:{port}")
+        } else {
+            format!("{host}:{port}")
+        };
+        let req = format!(
+            "POST {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\
+             Accept: {ACCEPT_ANY}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\n{}\r\n{body}",
+            body.len(),
+            auth.authorization_header()
+        );
+        stream
+            .write_all(req.as_bytes())
+            .await
+            .map_err(HttpError::Write)?;
+        // The head comes when the server starts answering, which for a long
+        // prompt can be after the whole prefill.
+        let mut buf = Vec::new();
+        let head_end = loop {
+            if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break i + 4;
+            }
+            if buf.len() > 64 * 1024 {
+                return Err(HttpError::Read(std::io::Error::other(
+                    "response head too long",
+                )));
+            }
+            let mut chunk = [0u8; 4096];
+            let n = tokio::time::timeout(head_timeout, stream.read(&mut chunk))
+                .await
+                .map_err(|_| HttpError::ReadTimeout)?
+                .map_err(HttpError::Read)?;
+            if n == 0 {
+                return Err(HttpError::Read(std::io::Error::other(
+                    "connection closed before a response",
+                )));
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+        let status = http_status_code(&head).unwrap_or(0);
+        let header = |name: &str| {
+            head.lines().skip(1).find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                k.trim()
+                    .eq_ignore_ascii_case(name)
+                    .then(|| v.trim().to_ascii_lowercase())
+            })
+        };
+        let chunked = header("transfer-encoding")
+            .is_some_and(|v| v.contains("chunked"))
+            .then(ChunkedDecoder::default);
+        let remaining = if chunked.is_some() {
+            None
+        } else {
+            header("content-length").and_then(|v| v.parse().ok())
+        };
+        let mut s = Self {
+            stream,
+            status,
+            chunked,
+            remaining,
+            pending: Vec::new(),
+            eof: false,
+        };
+        let early = buf[head_end..].to_vec();
+        s.pending = s.decode(&early);
+        Ok(s)
+    }
+
+    fn decode(&mut self, raw: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        match self.chunked.as_mut() {
+            Some(dec) => {
+                dec.feed(raw, &mut out);
+                self.eof |= dec.done();
+            }
+            None => {
+                let take = self.remaining.map_or(raw.len(), |r| r.min(raw.len()));
+                out.extend_from_slice(&raw[..take]);
+                if let Some(r) = self.remaining.as_mut() {
+                    *r -= take;
+                    self.eof |= *r == 0;
+                }
+            }
+        }
+        out
+    }
+
+    /// The next body bytes as they arrive; None once the body has ended.
+    /// `idle` bounds the wait for each read, not the whole body.
+    pub async fn next(&mut self, idle: Duration) -> Result<Option<Vec<u8>>, HttpError> {
+        if !self.pending.is_empty() {
+            return Ok(Some(std::mem::take(&mut self.pending)));
+        }
+        loop {
+            if self.eof {
+                return Ok(None);
+            }
+            let mut chunk = [0u8; 8192];
+            let n = tokio::time::timeout(idle, self.stream.read(&mut chunk))
+                .await
+                .map_err(|_| HttpError::ReadTimeout)?
+                .map_err(HttpError::Read)?;
+            if n == 0 {
+                self.eof = true;
+                return Ok(None);
+            }
+            let out = self.decode(&chunk[..n]);
+            if !out.is_empty() {
+                return Ok(Some(out));
+            }
+        }
+    }
+
+    /// The rest of the body as text.
+    pub async fn text(mut self, idle: Duration) -> Result<String, HttpError> {
+        let mut body = Vec::new();
+        while let Some(b) = self.next(idle).await? {
+            body.extend_from_slice(&b);
+        }
+        Ok(String::from_utf8_lossy(&body).to_string())
+    }
+}
+
+/// `Transfer-Encoding: chunked`, undone a read at a time: a chunk's size
+/// line, its data or its CRLF may each be split across reads.
+#[derive(Debug, Default)]
+pub struct ChunkedDecoder {
+    state: ChunkState,
+    line: Vec<u8>,
+}
+
+#[derive(Debug, Default, PartialEq)]
+enum ChunkState {
+    #[default]
+    Size,
+    Data(usize),
+    /// The CRLF after a chunk's data.
+    DataEnd,
+    Done,
+}
+
+impl ChunkedDecoder {
+    pub fn feed(&mut self, mut input: &[u8], out: &mut Vec<u8>) {
+        while !input.is_empty() {
+            match self.state {
+                ChunkState::Size => {
+                    let Some(nl) = input.iter().position(|&b| b == b'\n') else {
+                        self.line.extend_from_slice(input);
+                        return;
+                    };
+                    self.line.extend_from_slice(&input[..nl]);
+                    input = &input[nl + 1..];
+                    let line = String::from_utf8_lossy(&self.line).to_string();
+                    self.line.clear();
+                    // Extensions after `;` are allowed and meaningless here.
+                    let size = line.split(';').next().unwrap_or("").trim();
+                    if size.is_empty() {
+                        continue; // a stray blank line
+                    }
+                    self.state = match usize::from_str_radix(size, 16) {
+                        Ok(0) | Err(_) => ChunkState::Done,
+                        Ok(n) => ChunkState::Data(n),
+                    };
+                }
+                ChunkState::Data(n) => {
+                    let take = n.min(input.len());
+                    out.extend_from_slice(&input[..take]);
+                    input = &input[take..];
+                    self.state = if take == n {
+                        ChunkState::DataEnd
+                    } else {
+                        ChunkState::Data(n - take)
+                    };
+                }
+                ChunkState::DataEnd => match input.iter().position(|&b| b == b'\n') {
+                    Some(nl) => {
+                        input = &input[nl + 1..];
+                        self.state = ChunkState::Size;
+                    }
+                    None => return,
+                },
+                // Trailers, if any, carry nothing the benchmark uses.
+                ChunkState::Done => return,
+            }
+        }
+    }
+
+    pub fn done(&self) -> bool {
+        self.state == ChunkState::Done
+    }
 }
 
 #[cfg(test)]

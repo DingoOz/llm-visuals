@@ -280,6 +280,68 @@ impl SettingsForm {
                 "Oldest rows are dropped past this size; 0 = no cap".into(),
             ),
             field(
+                "Energy price (/kWh)",
+                "energy-price",
+                Kind::Number,
+                args.energy_price.to_string(),
+                "Electricity price per kWh for GPU energy costs; 0 hides them".into(),
+            ),
+            field(
+                "Currency",
+                "currency",
+                Kind::Text,
+                args.currency.clone(),
+                "Symbol shown before energy costs, e.g. $, €, £".into(),
+            ),
+            field(
+                "Alerts",
+                "alerts",
+                Kind::Choice(&["off", "banner", "bell", "notify"]),
+                args.alerts.clone(),
+                "banner shows them on screen; bell also rings; notify also sends a desktop \
+                 notification"
+                    .into(),
+            ),
+            field(
+                "VRAM alert (%)",
+                "alert-vram-pct",
+                Kind::Number,
+                args.alert_vram_pct.to_string(),
+                "Raised when a card past this has grown 2 % beyond where it settled".into(),
+            ),
+            field(
+                "Temperature alert (°C)",
+                "alert-temp-c",
+                Kind::Text,
+                args.alert_temp_c.clone(),
+                format!(
+                    "auto = the card's own slowdown limit, else {:.0} °C; or a number",
+                    crate::alerts::DEFAULT_TEMP_C
+                ),
+            ),
+            field(
+                "Slow decode alert (%)",
+                "alert-slow-pct",
+                Kind::Number,
+                args.alert_slow_pct.to_string(),
+                "Raised when decode stays under this share of the model's usual rate for 5 s"
+                    .into(),
+            ),
+            field(
+                "Regression flag (%)",
+                "regress-pct",
+                Kind::Number,
+                args.regress_pct.to_string(),
+                "Flag a model decoding this much slower than its logged history; 0 = never".into(),
+            ),
+            field(
+                "Regression days",
+                "regress-days",
+                Kind::Number,
+                args.regress_days.to_string(),
+                "History compared against: this many days back, leaving out the last 24 h".into(),
+            ),
+            field(
                 "Max layers",
                 "max-layers",
                 Kind::Number,
@@ -519,6 +581,57 @@ mod tests {
         assert_eq!(saved.get("theme").map(String::as_str), Some("neon"));
         assert!(!saved.contains_key("poll-ms"));
         assert_eq!(saved.get("model").map(String::as_str), Some("auto"));
+    }
+
+    #[test]
+    fn energy_price_is_validated_and_zero_is_the_default() {
+        let launch = argv(&[APP]);
+        let args = Args::try_parse_from(&launch).unwrap();
+        assert_eq!(args.energy_price, 0.0);
+        assert_eq!(args.currency, "$");
+        let mut form = SettingsForm::new(&args);
+        let i = form
+            .fields
+            .iter()
+            .position(|f| f.flag == "energy-price")
+            .unwrap();
+        form.fields[i].value = "0.30".into();
+        assert_eq!(form.resolve(&launch).unwrap().energy_price, 0.30);
+        for bad in ["-1", "nan", "cheap"] {
+            form.fields[i].value = bad.into();
+            let err = form.resolve(&launch).unwrap_err();
+            assert!(err.contains("energy-price"), "{bad}: {err}");
+        }
+        // The default price is not pinned into the saved file.
+        let defaults = SettingsForm::new(&args);
+        form.fields[i].value = "0".into();
+        let mut saved = Saved::new();
+        merge(&mut saved, form.flags(), defaults.flags());
+        assert!(!saved.contains_key("energy-price"));
+    }
+
+    #[test]
+    fn alert_settings_round_trip_and_reject_nonsense() {
+        let launch = argv(&[APP]);
+        let mut form = SettingsForm::new(&Args::try_parse_from(&launch).unwrap());
+        let at = |form: &SettingsForm, flag: &str| {
+            form.fields.iter().position(|f| f.flag == flag).unwrap()
+        };
+        let i = at(&form, "alerts");
+        form.selected = i;
+        form.cycle(1);
+        let j = at(&form, "alert-temp-c");
+        form.fields[j].value = "80".into();
+        let args = form.resolve(&launch).unwrap();
+        assert_eq!(args.alerts, "bell");
+        assert_eq!(args.alert_limits().temp_c, Some(80.0));
+        form.fields[j].value = "hot".into();
+        let err = form.resolve(&launch).unwrap_err();
+        assert!(err.contains("alert-temp-c"), "{err}");
+        let k = at(&form, "alert-vram-pct");
+        form.fields[j].value = "auto".into();
+        form.fields[k].value = "120".into();
+        assert!(form.resolve(&launch).is_err());
     }
 
     #[test]

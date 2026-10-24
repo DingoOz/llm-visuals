@@ -10,18 +10,26 @@ use ratatui::{
     Frame, Terminal,
 };
 
+use crate::alerts::Alert;
+use crate::balance::Balance;
 use crate::bandwidth::{self, StageId};
+use crate::bench::{self, BenchSession, SessionState};
 use crate::colors::{self as pal, ColorTheme};
 use crate::config::ViewMode;
-use crate::dblog::{ContextSpeed, LogSummary};
+use crate::dblog::{ContextSpeed, LogSummary, CTX_GRAIN};
+use crate::energy::{self, GpuEnergy};
 use crate::fade::FadeState;
-use crate::gpu::GpuStats;
+use crate::gpu::{ClockReasons, GpuStats, ReasonLevel};
 use crate::landscape::{self, Camera};
 use crate::model_detect::DetectedModel;
 use crate::observe::{ExpertStats, LiveStats};
+use crate::ollama;
 use crate::perf::{Meter, PerfTracker, Phase, RequestRecord};
 use crate::pipeline::{GeneratedText, TokenBuffer};
+use crate::regress::{self, Comparison, History};
+use crate::replay::Hud;
 use crate::settings::{Kind, SettingsForm};
+use crate::strata::ExpertTiers;
 use crate::vision::{Place, Vision};
 
 const HEATMAP_TOKEN_WIDTH: usize = 40;
@@ -41,6 +49,9 @@ pub struct ModelView<'a> {
     pub experts: Option<&'a ExpertStats>,
     pub num_layers: usize,
     pub num_heads: usize,
+    /// Decode speed logged now and over the baseline window, for the
+    /// regression flag; None until the first read of the log comes back.
+    pub regression: Option<&'a History>,
 }
 
 /// Everything one frame needs, borrowed from the main loop.
@@ -78,6 +89,21 @@ pub struct Dashboard<'a> {
     /// The context-speed screen (`c`): per-model buckets or why not, and
     /// which model is shown.
     pub ctx_speed: Option<(&'a Result<Vec<ContextSpeed>, String>, usize)>,
+    /// GPU energy drawn this session (box total) and the price to cost it at.
+    pub energy: &'a GpuEnergy,
+    /// Raised alerts, oldest first; empty with `--alerts off`.
+    pub alerts: &'a [Alert],
+    /// The alert the banner row shows, while it is news.
+    pub alert_banner: Option<&'a Alert>,
+    /// Why no model has a regression baseline at all (logging off, or the
+    /// log could not be read).
+    pub regress_off: Option<&'a str>,
+    /// Playback position when the numbers come from `--replay`, not servers.
+    pub replay: Option<Hud>,
+    /// The benchmark table (`B`), while it is open.
+    pub bench: Option<&'a BenchSession>,
+    /// A benchmark ran or is running this session, so `B` has a table.
+    pub bench_running: bool,
 }
 
 pub struct Renderer {
@@ -85,6 +111,9 @@ pub struct Renderer {
     pub max_layers: usize,
     pub max_heads: usize,
     pub moe_experts: usize,
+    /// `--regress-pct`: how far below its baseline a model's decode speed
+    /// must fall to be flagged; 0 never flags.
+    pub regress_pct: f64,
     epoch: Instant,
 }
 
@@ -95,6 +124,7 @@ impl Renderer {
             max_layers,
             max_heads,
             moe_experts,
+            regress_pct: 0.0,
             epoch: Instant::now(),
         }
     }
@@ -129,7 +159,10 @@ impl Renderer {
                 self.render_log(frame, area, log);
             }
             if let Some((speeds, sel)) = d.ctx_speed {
-                self.render_ctx_speed(frame, area, speeds, sel);
+                self.render_ctx_speed(frame, area, speeds, sel, d);
+            }
+            if let Some(run) = d.bench {
+                self.render_bench(frame, area, run);
             }
             if let Some(form) = d.settings {
                 self.render_settings(frame, area, form);
@@ -170,10 +203,65 @@ impl Renderer {
             ViewMode::Bandwidth => self.render_bandwidth(frame, rows[2], d),
             _ => self.render_panels(frame, rows[2], d),
         }
-        self.render_footer(frame, rows[3], d);
+        // A fresh alert has the key row to itself for a while: the panels
+        // above keep their layout, and the keys still work unseen.
+        match d.alert_banner {
+            Some(alert) => self.render_alert_banner(frame, rows[3], alert, d.alerts.len()),
+            None => self.render_footer(frame, rows[3], d),
+        }
+    }
+
+    /// The key row's stand-in while an alert is news: what was raised, when,
+    /// and how many others are still up.
+    fn render_alert_banner(&self, frame: &mut Frame, area: Rect, alert: &Alert, active: usize) {
+        let w = area.width as usize;
+        let when = chrono::Local::now()
+            - chrono::Duration::from_std(alert.since.elapsed()).unwrap_or_default();
+        let mut tail = format!("  since {}", when.format("%H:%M:%S"));
+        if active > 1 {
+            tail.push_str(&format!(" · {} more active", active - 1));
+        }
+        let head = " ⚠ ALERT ";
+        let room = w.saturating_sub(head.chars().count() + 1);
+        let text = truncate(&alert.text, room);
+        let tail = if text.chars().count() + tail.chars().count() <= room {
+            tail
+        } else {
+            String::new()
+        };
+        let line = Line::from(vec![
+            Span::styled(
+                head,
+                Style::default()
+                    .fg(pal::c((10, 12, 18)))
+                    .bg(pal::c(pal::RED))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {text}"),
+                Style::default()
+                    .fg(pal::c(pal::WHITE))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(tail, Style::default().fg(pal::c(pal::TEXT_DIM))),
+        ]);
+        frame.render_widget(
+            Paragraph::new(line).style(Style::default().bg(pal::c(pal::dim_rgb(pal::RED, 0.22)))),
+            area,
+        );
     }
 
     fn render_bandwidth(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
+        if d.replay.is_some() {
+            return self.render_not_logged(
+                frame,
+                area,
+                " ◆ MEMORY PIPELINE ",
+                pal::CYAN,
+                "the log keeps token rates and GPU totals, not the disk, RAM, PCIe and \
+                 memory-controller counters or the tensor table this view is drawn from",
+            );
+        }
         let verdict_h = if area.height >= 20 { 4 } else { 0 };
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -206,7 +294,9 @@ impl Renderer {
         // The landscape is a picture and wants every row it can get. Where
         // it cannot be drawn the flat map stands in, laid out as `m` is.
         let landscape = d.view == ViewMode::Landscape && landscape_fits(d, area);
-        let ctx_h = if !show_ctx || landscape {
+        // The balance view is a table, one row per layer: it gets the
+        // context row too, so a 40-odd-layer model fits on one screen.
+        let ctx_h = if !show_ctx || landscape || d.view == ViewMode::Balance {
             0
         } else if d.view == ViewMode::Perf {
             6
@@ -230,6 +320,7 @@ impl Renderer {
             ViewMode::Heatmap
             | ViewMode::MoE
             | ViewMode::Landscape
+            | ViewMode::Balance
             | ViewMode::Bandwidth
             | ViewMode::Models => vec![
                 Constraint::Length(0),
@@ -263,6 +354,7 @@ impl Renderer {
             match d.view {
                 ViewMode::Heatmap => self.render_layers(frame, rows[2], d),
                 ViewMode::Landscape if landscape => self.render_landscape(frame, rows[2], d),
+                ViewMode::Balance => self.render_balance(frame, rows[2], d),
                 ViewMode::MoE | ViewMode::Landscape => self.render_experts(frame, rows[2], d),
                 _ => {
                     let split = Layout::default()
@@ -282,6 +374,18 @@ impl Renderer {
     // -----------------------------------------------------------------------
     // Header
     // -----------------------------------------------------------------------
+
+    /// A model whose decode speed has fallen past `--regress-pct` below its
+    /// own baseline: the comparison, and amber at the threshold reddening
+    /// to twice it.
+    fn regression_flag(&self, history: Option<&History>) -> Option<(Comparison, (u8, u8, u8))> {
+        let c = history?.compare().ok()?;
+        if !c.regressed(self.regress_pct) {
+            return None;
+        }
+        let over = (-c.change * 100.0 / self.regress_pct - 1.0).clamp(0.0, 1.0);
+        Some((c, pal::gradient(pal::VU, 0.72 + 0.28 * over as f32)))
+    }
 
     fn render_header(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
         let phase = d.perf.phase;
@@ -307,6 +411,20 @@ impl Renderer {
             self.spinner()
         };
         let mut right_spans: Vec<Span> = Vec::new();
+        if let Some(newest) = d.alerts.last() {
+            let label = match d.alerts.len() {
+                1 => format!(" ⚠ {} ", newest.tag),
+                n => format!(" ⚠ {n} alerts "),
+            };
+            right_spans.push(Span::styled(
+                label,
+                Style::default()
+                    .fg(pal::c((10, 12, 18)))
+                    .bg(pal::c(pal::dim_rgb(pal::RED, 0.8 + 0.2 * self.pulse())))
+                    .add_modifier(Modifier::BOLD),
+            ));
+            right_spans.push(Span::raw(" "));
+        }
         if d.models.len() > 1 {
             right_spans.push(Span::styled(
                 format!(" model {}/{} ", d.focus + 1, d.models.len()),
@@ -315,27 +433,37 @@ impl Renderer {
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        let right = Line::from({
-            right_spans.extend([
-                Span::styled(
-                    format!(" {spinner} {badge_txt} "),
+        right_spans.push(Span::styled(
+            format!(" {spinner} {badge_txt} "),
+            Style::default()
+                .fg(badge_fg)
+                .bg(badge_bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        match d.replay {
+            // Replayed numbers carry the time they were logged, not the clock.
+            Some(r) => {
+                right_spans.push(Span::styled(
+                    format!(" REPLAY {} ", fmt_unix(r.ts)),
                     Style::default()
-                        .fg(badge_fg)
-                        .bg(badge_bg)
+                        .fg(pal::c(pal::AMBER))
                         .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(
-                        " up {}  {} ",
-                        fmt_clock(d.perf.uptime()),
-                        chrono::Local::now().format("%H:%M:%S")
-                    ),
+                ));
+                right_spans.push(Span::styled(
+                    format!("×{} {} ", r.speed, if r.paused { "⏸" } else { "▶" }),
                     Style::default().fg(pal::c(pal::TEXT_DIM)),
+                ));
+            }
+            None => right_spans.push(Span::styled(
+                format!(
+                    " up {}  {} ",
+                    fmt_clock(d.perf.uptime()),
+                    chrono::Local::now().format("%H:%M:%S")
                 ),
-            ]);
-            right_spans
-        })
-        .right_aligned();
+                Style::default().fg(pal::c(pal::TEXT_DIM)),
+            )),
+        }
+        let right = Line::from(right_spans).right_aligned();
 
         let (block, _) = with_right(
             panel(" ◆ LLM VISUALS ", pal::CYAN),
@@ -345,6 +473,9 @@ impl Renderer {
         );
         let inner = block.inner(area);
         frame.render_widget(block, area);
+        if let Some(r) = d.replay {
+            self.render_replay_progress(frame, area, r);
+        }
 
         let mut spans: Vec<Span> = Vec::new();
         let sep = || Span::styled("  ·  ", Style::default().fg(pal::c(pal::TEXT_MUTED)));
@@ -366,10 +497,13 @@ impl Renderer {
                 segs.push((
                     8,
                     vec![
-                        Span::styled(m.engine.clone(), st(pal::TEXT)),
+                        Span::styled(m.engine_label().to_string(), st(pal::TEXT)),
                         Span::styled(format!(" pid {}", m.pid), st(pal::TEXT_DIM)),
                     ],
                 ));
+                if let Some(o) = &d.live.ollama {
+                    segs.extend(ollama_segments(o, d.perf.phase != Phase::Idle));
+                }
                 if let Some(g) = &m.gguf {
                     segs.push((4, vec![Span::styled(g.architecture.clone(), st(pal::TEXT))]));
                     segs.push((
@@ -419,7 +553,45 @@ impl Renderer {
                     }
                     segs.push((9, seg));
                 }
-                if let Some(q) = quant_from_path(m) {
+                let history = d.models.get(d.focus).and_then(|v| v.regression);
+                if let Some((c, rgb)) = self.regression_flag(history) {
+                    // The flag is news and outlasts the model's shape; the
+                    // two speeds behind it go early on a narrow terminal.
+                    segs.push((
+                        9,
+                        vec![
+                            Span::styled(
+                                format!("decode ▼{:.0}%", -c.change * 100.0),
+                                st(rgb).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!(" vs {}d", history.map_or(0, |h| h.days)),
+                                st(pal::TEXT_DIM),
+                            ),
+                        ],
+                    ));
+                    segs.push((
+                        3,
+                        vec![Span::styled(
+                            format!(
+                                "{} → {} t/s",
+                                fmt_rate(c.base_tps as f32),
+                                fmt_rate(c.cur_tps as f32)
+                            ),
+                            st(pal::TEXT_DIM),
+                        )],
+                    ));
+                }
+                // An Ollama blob is named by its hash; the daemon knows the quant.
+                let ollama_quant = || {
+                    d.live
+                        .ollama
+                        .as_ref()
+                        .and_then(|o| o.loaded.as_ref())
+                        .map(|p| p.quantization.clone())
+                        .filter(|q| !q.is_empty())
+                };
+                if let Some(q) = quant_from_path(m).or_else(ollama_quant) {
                     segs.push((2, vec![Span::styled(q, st(pal::TEAL))]));
                 }
                 if !m.tensor_split.is_empty() {
@@ -501,6 +673,10 @@ impl Renderer {
         let w = inner.width as usize;
         let h = inner.height as usize;
         let mut lines: Vec<Line> = Vec::with_capacity(h);
+        if d.live.ollama.as_ref().is_some_and(|o| !o.counters) {
+            self.render_no_counters(frame, inner, d);
+            return;
+        }
 
         // Big numerals for the decode rate.
         let live = p.phase == Phase::Decode;
@@ -597,6 +773,13 @@ impl Renderer {
             ),
         ]));
 
+        // Energy takes a sparkline row while two remain, or the lone row a
+        // sparkline cannot use.
+        let spare = h.saturating_sub(lines.len());
+        if spare >= 3 || spare == 1 {
+            lines.push(energy_line(d, w));
+        }
+
         // Sparklines fill the rest: decode gets the lion's share.
         let remaining = h.saturating_sub(lines.len());
         if remaining >= 2 {
@@ -642,6 +825,53 @@ impl Renderer {
                 lines.push(Line::from(spans));
             }
         }
+        frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    }
+
+    /// The throughput panel for an Ollama slot with no token counters: say
+    /// why there are no rates rather than draw zeros, and show what the
+    /// daemon does report.
+    fn render_no_counters(&self, frame: &mut Frame, inner: Rect, d: &Dashboard) {
+        let w = inner.width as usize;
+        let st = |rgb| Style::default().fg(pal::c(rgb));
+        let legacy = d
+            .detected
+            .is_some_and(|m| ollama::is_legacy_runner(&m.cmdline));
+        let why = if legacy {
+            "this Ollama's runner has no token counters; newer releases run llama-server, which does"
+        } else {
+            "Ollama's API has no token counters, and the llama-server runner that has them is not visible from here"
+        };
+        let mut lines = vec![Line::from(Span::styled(
+            truncate("throughput n/a", w),
+            st(pal::AMBER).add_modifier(Modifier::BOLD),
+        ))];
+        lines.extend(
+            wrap_words(why, w)
+                .into_iter()
+                .map(|l| Line::from(Span::styled(l, st(pal::TEXT_DIM)))),
+        );
+        if let Some(p) = d.live.ollama.as_ref().and_then(|o| o.loaded.as_ref()) {
+            let gb = |b: u64| format!("{:.1} GB", b as f64 / 1e9);
+            lines.push(Line::from(vec![
+                Span::styled("resident ", st(pal::TEXT_DIM)),
+                Span::styled(gb(p.size), st(pal::TEXT)),
+                Span::styled("  ·  vram ", st(pal::TEXT_DIM)),
+                Span::styled(gb(p.size_vram), st(pal::BLUE)),
+                Span::styled("  ·  ", st(pal::TEXT_MUTED)),
+                Span::styled(p.processor(), st(pal::TEAL)),
+            ]));
+            if p.context_length > 0 {
+                lines.push(Line::from(vec![
+                    Span::styled("context ", st(pal::TEXT_DIM)),
+                    Span::styled(fmt_int(p.context_length), st(pal::TEXT)),
+                ]));
+            }
+        }
+        let lines: Vec<Line> = lines
+            .into_iter()
+            .map(|l| Line::from(fit_spans(&l.spans, w)))
+            .collect();
         frame.render_widget(Paragraph::new(Text::from(lines)), inner);
     }
 
@@ -758,10 +988,27 @@ impl Renderer {
         ));
         // Optional stats, most important first; dropped from the end until
         // the utilisation gauge keeps a sensible width on narrow terminals.
-        let mut extras: Vec<Span> = vec![Span::styled(
+        let mut extras: Vec<Span> = Vec::new();
+        // Why the clocks are down, when the driver says they are. First of
+        // the optional stats, so the last to go: it takes no room while
+        // nothing is limiting, and explains a slow token when something is.
+        let held = d.perf.clock_hold.get(gi).map(|h| h.held(Instant::now()));
+        let badge = held.and_then(fmt_clock_reasons);
+        if let Some((text, level)) = &badge {
+            let colour = match level {
+                ReasonLevel::Severe => pal::vu(1.0),
+                ReasonLevel::Warn => pal::c(pal::AMBER),
+                ReasonLevel::Info => pal::c(pal::TEXT_DIM),
+            };
+            extras.push(Span::styled(
+                format!("  {text}"),
+                Style::default().fg(colour).add_modifier(Modifier::BOLD),
+            ));
+        }
+        extras.push(Span::styled(
             format!("  {temp:>2.0}°"),
             Style::default().fg(temp_col).add_modifier(Modifier::BOLD),
-        )];
+        ));
         // Memory temperature, on the NVIDIA cards that report it: the second
         // hot spot on an LLM box, and the one that throttles before the die does.
         if let Some(mt) = g.temperature_memory {
@@ -803,8 +1050,31 @@ impl Renderer {
         while !extras.is_empty() && fixed + width_of(&extras) + min_bar > w {
             extras.pop();
         }
+        let mut bar_w = w.saturating_sub(fixed).clamp(4, 30);
+        // The gauge keeps its width so the cards line up; a stat that would
+        // still run past the panel edge goes whole rather than cut mid-number
+        // (a clock-reason badge arriving pushes the last one out this way).
+        let spans_w = |s: &[Span]| -> usize { s.iter().map(Span::width).sum() };
+        let rest_w = |e: &[Span]| name.chars().count() + spans_w(&tail) + spans_w(e);
+        let keep = usize::from(badge.is_some());
+        while extras.len() > keep && rest_w(&extras) + bar_w > w {
+            extras.pop();
+        }
+        // A badge that the loop above kept but the full gauge leaves no room
+        // for takes its cells from the gauge: it is what explains the gauge.
+        bar_w = bar_w.min(w.saturating_sub(rest_w(&extras))).max(4);
+        // The card's peak memory bandwidth, only where it fits whole beside
+        // the bar: every card's bar keeps the same width so they line up.
+        if let Some(peak) = g.mem_peak_gb_s.filter(|_| !g.unified) {
+            let peak = Span::styled(
+                format!("  {}GB/s", fmt_compact(peak)),
+                Style::default().fg(pal::c(pal::TEXT_MUTED)),
+            );
+            if rest_w(&extras) + bar_w + peak.width() <= w {
+                extras.push(peak);
+            }
+        }
         tail.extend(extras);
-        let bar_w = w.saturating_sub(fixed).clamp(4, 30);
         // Highlight cards the focused model is pinned to (affinity /
         // gpu_indices): white for its cards, grey for everyone else's.
         let affinity = d
@@ -831,8 +1101,13 @@ impl Renderer {
                 .get(gi)
                 .copied()
                 .unwrap_or(g.vram_percent() / 100.0);
+            // Replayed, the card's total is logged but not who holds it: no
+            // weights / KV split, the used share drawn as unattributed.
+            let split = d.replay.is_none();
             let weights = d.fade.weight_frac.get(gi).copied().unwrap_or(0.0).min(used);
+            let weights = if split { weights } else { 0.0 };
             let kv = d.fade.kv_alloc_frac.get(gi).copied().unwrap_or(0.0);
+            let kv = if split { kv } else { 0.0 };
             let kv_fill = kv_lit_share(g, d.live, d.fade.kv_frac);
             // Same bar, honest name: on unified-memory parts (GB10 / DGX
             // Spark) the pool is system RAM, not VRAM — labelled per
@@ -855,7 +1130,7 @@ impl Renderer {
             } else {
                 2 + 2 * tenants.len()
             };
-            let legend_w = if w > 78 + tenant_w { 22 } else { 0 };
+            let legend_w = if split && w > 78 + tenant_w { 22 } else { 0 };
             let bar_w = w
                 .saturating_sub(label.len() + txt.len() + legend_w + tenant_w)
                 .clamp(4, 40);
@@ -970,7 +1245,13 @@ impl Renderer {
                 &pwr_h,
                 right_w,
                 spark_rows,
-                g.power_max_watts.max(1.0),
+                // No limit known (a replayed card, some drivers): scale to
+                // the history rather than pin every sample to the top.
+                if g.power_max_watts > 0.0 {
+                    g.power_max_watts
+                } else {
+                    pwr_h.iter().copied().fold(1.0, f32::max)
+                },
                 pal::PREFILL,
             );
             for (i, (u, pw)) in u_rows.into_iter().zip(p_rows).enumerate() {
@@ -1276,6 +1557,15 @@ impl Renderer {
     // -----------------------------------------------------------------------
 
     fn render_spec(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
+        if d.replay.is_some() {
+            return self.render_not_logged(
+                frame,
+                area,
+                " ◆ SPECULATIVE ",
+                pal::AMBER,
+                "draft acceptance is not in the log",
+            );
+        }
         let sp = &d.perf.spec;
         let spec_type = if !d.live.spec_types.is_empty() {
             d.live.spec_types.trim_start_matches("none,").to_string()
@@ -1350,8 +1640,13 @@ impl Renderer {
                 }
             }
             lines.push(Line::from(facts));
-            let hint = if d.detected.is_some_and(|m| m.engine == "strata") {
+            let hint = if d
+                .detected
+                .is_some_and(|m| crate::strata::is_family(&m.engine))
+            {
                 "Strata reports draft acceptance from 0.1.35"
+            } else if d.detected.is_some_and(ollama::is_runner) {
+                "Ollama starts llama-server without --metrics: no acceptance stats"
             } else {
                 "start llama-server with --metrics for acceptance stats"
             };
@@ -1463,6 +1758,15 @@ impl Renderer {
     // -----------------------------------------------------------------------
 
     fn render_layers(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
+        if d.replay.is_some() {
+            return self.render_not_logged(
+                frame,
+                area,
+                " ◆ LAYERS ",
+                pal::BLUE,
+                "the model's layers and their placement are not in the log",
+            );
+        }
         if !d.attention.is_empty() {
             self.render_attention_heatmap(frame, area, d);
             return;
@@ -1482,9 +1786,17 @@ impl Renderer {
             })
             .unwrap_or_else(|| d.gpus.len().max(1));
         let n_gpus = model_gpu_count;
+        // Layers with tensors in system RAM (llama.cpp `-ot` / `--cpu-moe`)
+        // are tagged `C`; the title says how many.
+        let in_ram = f.layer_cpu.iter().take(n).filter(|&&c| c > 0.0).count();
         let title = format!(
-            " ◆ LAYERS  {n} across {n_gpus} GPU{} ",
-            if n_gpus > 1 { "s" } else { "" }
+            " ◆ LAYERS  {n} across {n_gpus} GPU{}{} ",
+            if n_gpus > 1 { "s" } else { "" },
+            if in_ram > 0 {
+                format!(" · C {in_ram} in RAM")
+            } else {
+                String::new()
+            }
         );
         let right = Line::from(Span::styled(
             format!(" theme {} ", self.theme.name),
@@ -1527,6 +1839,19 @@ impl Renderer {
             };
             let tag_col = pal::c(gpu_tags[gpu % gpu_tags.len()]);
             let inner_w = tw.saturating_sub(1); // 1-col gutter between tiles
+                                                // The card, then `C` when some of the layer is in RAM; `C` alone
+                                                // when all of it is, or when the tile has room for one tag only.
+            let cpu = f.layer_cpu.get(layer).copied().unwrap_or(0.0);
+            let ram_tag = (String::from("C"), pal::c(pal::VIOLET));
+            let tags: Vec<(String, ratatui::style::Color)> =
+                if cpu > 0.999 || (cpu > 0.0 && inner_w < 6) {
+                    vec![ram_tag]
+                } else if cpu > 0.0 {
+                    vec![(gpu.to_string(), tag_col), ram_tag]
+                } else {
+                    vec![(gpu.to_string(), tag_col)]
+                };
+            let tag_x = inner_w.saturating_sub(tags.len());
             for dy in 0..th {
                 let y = y0 + dy;
                 if y >= h {
@@ -1556,8 +1881,9 @@ impl Renderer {
                                 .bg(bg)
                                 .add_modifier(Modifier::BOLD),
                         )
-                    } else if dy == 0 && dx == inner_w - 1 && inner_w >= 5 {
-                        Span::styled(format!("{gpu}"), Style::default().fg(tag_col).bg(bg))
+                    } else if dy == 0 && dx >= tag_x && inner_w >= 5 {
+                        let (t, col) = &tags[dx - tag_x];
+                        Span::styled(t.clone(), Style::default().fg(*col).bg(bg))
                     } else if bottom && !hist.is_empty() {
                         let n_h = hist.len();
                         let start = n_h.saturating_sub(inner_w);
@@ -1673,6 +1999,104 @@ impl Renderer {
     // Experts
     // -----------------------------------------------------------------------
 
+    /// Maya's expert tiers: the share of routed experts found in VRAM and
+    /// its recent history, what a token read from RAM or the SSD or promoted
+    /// into VRAM, and how full each tier's slots are.
+    fn render_expert_tiers(&self, frame: &mut Frame, area: Rect, t: &ExpertTiers, d: &Dashboard) {
+        let title = " ◆ EXPERT TIERS ";
+        let block = panel(title, pal::VIOLET);
+        // The engine reports while it generates; between requests the
+        // numbers are the last one's.
+        let block = if d.live.processing {
+            block
+        } else {
+            let right = Line::from(Span::styled(
+                " last request ",
+                Style::default().fg(pal::c(pal::TEXT_MUTED)),
+            ))
+            .right_aligned();
+            with_right(block, title, right, area).0
+        };
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let w = inner.width as usize;
+        let muted = Style::default().fg(pal::c(pal::TEXT_MUTED));
+        let text = Style::default().fg(pal::c(pal::TEXT));
+        let mut lines = Vec::new();
+        if let Some(hit) = t.vram_hit {
+            let label = "VRAM hit ";
+            let num = format!(" {:>5.1}%", hit * 100.0);
+            let rest = w.saturating_sub(label.len() + num.chars().count());
+            // The history takes half of a wide panel; a narrow one keeps
+            // the gauge.
+            let (bar_w, spark_w) = if rest >= 30 && t.hit_history.len() > 1 {
+                (rest / 2, rest - rest / 2 - 1)
+            } else {
+                (rest, 0)
+            };
+            let mut spans = vec![Span::styled(label, muted)];
+            spans.extend(gauge(hit, None, bar_w, GaugeStyle::Flow));
+            spans.push(Span::styled(num, text.add_modifier(Modifier::BOLD)));
+            if spark_w > 0 {
+                spans.push(Span::raw(" "));
+                if let Some(row) = sparkline(&t.hit_history, spark_w, 1, 1.0, pal::FLOW).pop() {
+                    spans.extend(row);
+                }
+            }
+            lines.push(Line::from(spans));
+        }
+        let mut per = vec![Span::styled("per token ", muted)];
+        let items = [
+            ("from RAM", t.ram_fetch, pal::TEXT),
+            // A token waiting on the SSD is the slow path; say it in amber.
+            (
+                "from SSD",
+                t.disk,
+                if t.disk.is_some_and(|v| v >= 0.05) {
+                    pal::AMBER
+                } else {
+                    pal::TEXT
+                },
+            ),
+            ("promoted", t.promo, pal::TEXT),
+            ("on CPU", t.cpu, pal::TEXT),
+        ];
+        for (label, v, colour) in items {
+            let Some(v) = v else { continue };
+            if per.len() > 1 {
+                per.push(Span::styled("  ·  ", muted));
+            }
+            per.push(Span::styled(format!("{label} "), muted));
+            per.push(Span::styled(
+                format!("{v:.1}"),
+                Style::default()
+                    .fg(pal::c(colour))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        if per.len() > 1 {
+            lines.push(Line::from(per));
+        }
+        let tier = |name: &str, used: Option<usize>, slots: Option<usize>| {
+            let (used, slots) = (used?, slots?);
+            Some(format!("{name} {} / {}", fmt_int(used), fmt_int(slots)))
+        };
+        let slots: Vec<String> = [
+            tier("VRAM", t.vram_used, t.vram_slots),
+            tier("RAM", t.ram_used, t.ram_slots),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !slots.is_empty() && lines.len() < inner.height as usize {
+            lines.push(Line::from(vec![
+                Span::styled("slots     ", muted),
+                Span::styled(slots.join("  ·  "), text),
+            ]));
+        }
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
     fn render_experts(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
         if !d.attention.is_empty() {
             let block = panel(" ◆ OUTPUT ", pal::VIOLET);
@@ -1690,6 +2114,36 @@ impl Renderer {
                 inner,
             );
             return;
+        }
+        if d.replay.is_some() {
+            return self.render_not_logged(
+                frame,
+                area,
+                " ◆ EXPERTS ",
+                pal::VIOLET,
+                "expert routing is not in the log",
+            );
+        }
+        // Maya says where each token found its experts — the story of an
+        // engine that streams them in from RAM and the SSD — so that leads
+        // the panel, and the map follows in what is left.
+        let mut area = area;
+        if let Some(t) = d.live.tiers.as_ref().filter(|_| area.height >= 9) {
+            let rows = if area.height >= 16 { 5 } else { 4 };
+            self.render_expert_tiers(
+                frame,
+                Rect {
+                    height: rows,
+                    ..area
+                },
+                t,
+                d,
+            );
+            area = Rect {
+                y: area.y + rows,
+                height: area.height - rows,
+                ..area
+            };
         }
         let f = d.fade;
         let n_l = f.n_layers;
@@ -2059,6 +2513,305 @@ impl Renderer {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Expert balance
+    // -----------------------------------------------------------------------
+
+    /// Router load balance, one row per MoE layer: how many experts the
+    /// layer's picks are effectively spread over, how much of them its
+    /// busiest k take, and its hit counts ranked into a small curve. Only
+    /// the server's counts can say this, so without them the panel says
+    /// what is missing instead of drawing a stand-in.
+    fn render_balance(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
+        let f = d.fade;
+        let n_e = f.n_experts.max(1);
+        let muted = Style::default().fg(pal::c(pal::TEXT_MUTED));
+        let dim = Style::default().fg(pal::c(pal::TEXT_DIM));
+        let live = d.experts.filter(|_| f.real_routing && n_e > 1);
+        let bal = live.map(Balance::of);
+        let mut title = " ◆ EXPERT BALANCE".to_string();
+        if n_e > 1 {
+            title.push_str(&format!("  {} of {} per token", f.n_experts_used, n_e));
+        }
+        let why: Option<Vec<&str>> = if !d.attention.is_empty() {
+            Some(vec![
+                "the attention bridge streams a dense model: no router to balance",
+            ])
+        } else if n_e <= 1 {
+            Some(vec![if f.n_layers == 0 {
+                "waiting on model metadata"
+            } else {
+                "no expert routing — this model is dense (every token uses every FFN)"
+            }])
+        } else if bal.is_none() {
+            Some(vec![
+                "needs the router's hit counts, which only the patched llama-server reports:",
+                "start it with --expert-stats (see patches/README.md).",
+                "",
+                "Without them there is nothing real to measure, so nothing is drawn here.",
+            ])
+        } else if !bal.as_ref().is_some_and(Balance::any_routed) {
+            Some(vec![
+                "no tokens routed yet — the counts fill as the model generates",
+            ])
+        } else {
+            None
+        };
+        if let Some(lines) = why {
+            title.push_str(if live.is_some() { " · live " } else { " " });
+            let block = panel(&title, pal::VIOLET);
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            let text: Vec<Line> = lines
+                .into_iter()
+                .map(|l| Line::from(Span::styled(l, dim)))
+                .collect();
+            frame.render_widget(Paragraph::new(text), inner);
+            return;
+        }
+        let b = bal.expect("checked above");
+        let w = area.width.saturating_sub(2) as usize;
+        let h = area.height.saturating_sub(2) as usize;
+        if h == 0 || w < 20 {
+            return;
+        }
+
+        // Rows: a summary, a column header, then the layers. As many
+        // columns as it takes to show every layer, while each stays wide
+        // enough for its curve; past that, neighbouring layers share a row.
+        const FIXED: usize = 28;
+        const MIN_COL: usize = FIXED + 14;
+        const GAP: usize = 3;
+        let body = h.saturating_sub(2).max(1);
+        let n_l = b.layers.len().max(1);
+        let max_cols = ((w + GAP) / (MIN_COL + GAP)).clamp(1, 4);
+        let mut cols = 1;
+        while cols < max_cols && cols * body < n_l {
+            cols += 1;
+        }
+        let per_row = n_l.div_ceil(body * cols);
+        let n_groups = n_l.div_ceil(per_row);
+        let n_rows = n_groups.div_ceil(cols);
+        let col_w = (w - (cols - 1) * GAP) / cols;
+        let spare = col_w.saturating_sub(FIXED);
+        // The curve needs no more cells than there are experts.
+        let curve_w = (spare * 3 / 5).clamp(4, n_e.max(4));
+        let gauge_w = spare.saturating_sub(curve_w).clamp(3, 20);
+
+        title.push_str(" · live");
+        if per_row > 1 {
+            title.push_str(&format!(" · most lopsided of {per_row} per row"));
+        }
+        title.push(' ');
+        let legend = Line::from(Span::styled(
+            format!(" {} tokens · curve = experts ranked by hits ", b.window),
+            muted,
+        ))
+        .right_aligned();
+        let (block, _) = with_right(panel(&title, pal::VIOLET), &title, legend, area);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let text = Style::default().fg(pal::c(pal::TEXT));
+        let bold = text.add_modifier(Modifier::BOLD);
+        let warn = Style::default()
+            .fg(pal::c(pal::AMBER))
+            .add_modifier(Modifier::BOLD);
+        // Most telling first, so a narrow panel cuts the least of it.
+        let mut summary = vec![
+            Span::styled(" mean ", dim),
+            Span::styled(format!("{:.1}", b.mean_effective()), bold),
+            Span::styled(format!(" effective of {}", b.n_expert), dim),
+        ];
+        match b.n_flagged() {
+            0 => summary.push(Span::styled(" · no layer stands out", dim)),
+            n => {
+                summary.push(Span::styled(" · ", dim));
+                summary.push(Span::styled(
+                    format!("{n} layer{} ●", if n == 1 { "" } else { "s" }),
+                    warn,
+                ));
+                summary.push(Span::styled(
+                    format!(" top-{} ≥ 2× median {:.0}%", b.k, b.median_top * 100.0),
+                    dim,
+                ));
+            }
+        }
+        if let Some((most, least)) = b.extremes() {
+            summary.push(Span::styled(" · most lopsided ", dim));
+            summary.push(Span::styled(
+                format!("L{} {:.0}", least.il, least.effective),
+                text,
+            ));
+            summary.push(Span::styled(" · most even ", dim));
+            summary.push(Span::styled(
+                format!("L{} {:.0}", most.il, most.effective),
+                text,
+            ));
+        }
+        let mut lines: Vec<Line> = vec![Line::from(fit_spans(&summary, w))];
+
+        // One cell per column header, padded to the widths the rows use.
+        let head = |label: &str, width: usize, right: bool| {
+            let label = truncate(label, width);
+            if right {
+                format!("{label:>width$}")
+            } else {
+                format!("{label:<width$}")
+            }
+        };
+        let header = format!(
+            "{}{} {}{}{}{}",
+            head("layer", 6, false),
+            head(
+                if curve_w >= 16 {
+                    "hits, busiest first"
+                } else {
+                    "ranked"
+                },
+                curve_w,
+                false,
+            ),
+            head(
+                if gauge_w >= 12 {
+                    "effective experts"
+                } else {
+                    "effective"
+                },
+                gauge_w + 6,
+                false,
+            ),
+            head("used", 4, true),
+            head(&format!("top{}", b.k), 5, true),
+            head("×even", 6, true),
+        );
+
+        // A row covers `per_row` layers. Sharing a row, they show the one
+        // with the fewest effective experts: averaging would hide the very
+        // layer this view is for, and their expert ids are unrelated, so
+        // their counts cannot be pooled either.
+        let uniform = b.uniform_top().max(1e-6);
+        let row_spans = |g: usize| -> Vec<Span<'static>> {
+            let n = b.layers.len();
+            let group = &b.layers[(g * per_row).min(n)..((g + 1) * per_row).min(n)];
+            let shown = group.iter().filter(|l| l.picks > 0).reduce(|a, l| {
+                if l.effective < a.effective {
+                    l
+                } else {
+                    a
+                }
+            });
+            let il = shown.or(group.first()).map_or(0, |l| l.il);
+            let flagged = group.iter().any(|l| b.flagged(l));
+            let mut spans = vec![
+                Span::styled(format!("{il:>4}"), muted),
+                if flagged {
+                    Span::styled("●", warn)
+                } else {
+                    Span::raw(" ")
+                },
+                Span::raw(" "),
+            ];
+            let Some(l) = shown else {
+                spans.push(Span::styled("no hits in the window", muted));
+                return spans;
+            };
+            let (eff, top) = (l.effective, l.top_share);
+            for v in l.rank_curve(curve_w) {
+                let e = (v.clamp(0.0, 1.0) * 8.0).round() as usize;
+                spans.push(if e == 0 {
+                    Span::styled("▁", Style::default().fg(pal::c(pal::chrome().track)))
+                } else {
+                    let ch = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"][e - 1];
+                    Span::styled(
+                        ch,
+                        Style::default().fg(self.theme.map_intensity(0.3 + 0.7 * v)),
+                    )
+                });
+            }
+            spans.push(Span::raw(" "));
+            spans.extend(gauge(
+                eff / b.n_expert.max(1) as f32,
+                None,
+                gauge_w,
+                GaugeStyle::Flow,
+            ));
+            spans.push(Span::styled(format!(" {eff:>5.1}"), text));
+            spans.push(Span::styled(format!(" {:>3}", l.touched), dim));
+            spans.push(Span::styled(
+                format!(" {:>3.0}%", top * 100.0),
+                if flagged { warn } else { text },
+            ));
+            spans.push(Span::styled(format!(" {:>4.1}×", top / uniform), dim));
+            spans
+        };
+
+        if h >= 2 {
+            let mut hdr = String::new();
+            for c in 0..cols.min(n_groups) {
+                if c > 0 {
+                    hdr.push_str(&" ".repeat(GAP));
+                }
+                hdr.push_str(&format!("{header:<col_w$}"));
+            }
+            lines.push(Line::from(Span::styled(hdr, muted)));
+        }
+        for r in 0..n_rows.min(body) {
+            let mut spans: Vec<Span> = Vec::new();
+            for c in 0..cols {
+                // Column-major, so layers read down and then across.
+                let g = c * n_rows + r;
+                if g >= n_groups {
+                    break;
+                }
+                let cell = fit_spans(&row_spans(g), col_w);
+                let used: usize = cell.iter().map(|s| s.content.chars().count()).sum();
+                if c > 0 {
+                    spans.push(Span::raw(" ".repeat(GAP)));
+                }
+                spans.extend(cell);
+                if c + 1 < cols {
+                    spans.push(Span::raw(" ".repeat(col_w.saturating_sub(used))));
+                }
+            }
+            lines.push(Line::from(spans));
+        }
+
+        // Rows left over under the table carry the whole model at a glance:
+        // effective experts layer by layer, the flagged ones marked beneath.
+        let spare_rows = body.saturating_sub(n_rows);
+        let cell = (w.saturating_sub(4) / n_l).clamp(1, 4);
+        if spare_rows >= 6 && n_l * cell <= w.saturating_sub(4) {
+            let strip_h = (spare_rows - 3).min(6);
+            let values: Vec<f32> = b
+                .layers
+                .iter()
+                .flat_map(|l| std::iter::repeat(l.effective).take(cell))
+                .collect();
+            lines.push(Line::raw(""));
+            lines.push(Line::from(vec![
+                Span::styled(" effective experts by layer", dim),
+                Span::styled(
+                    format!("  L0 → L{} · full height = {}", n_l - 1, b.n_expert),
+                    muted,
+                ),
+            ]));
+            let n_cells = values.len();
+            for row in sparkline(&values, n_cells, strip_h, b.n_expert as f32, pal::FLOW) {
+                let mut spans = vec![Span::raw("    ")];
+                spans.extend(row);
+                lines.push(Line::from(spans));
+            }
+            let mut marks = vec![Span::raw("    ")];
+            for l in &b.layers {
+                let mark = if b.flagged(l) { "●" } else { " " };
+                marks.push(Span::styled(format!("{mark:<cell$}"), warn));
+            }
+            lines.push(Line::from(marks));
+        }
+        frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    }
+
     /// One line describing an engram module: what it hashes, where it is
     /// injected, and how big the table is. Drops detail from the right on
     /// narrow panels.
@@ -2139,7 +2892,8 @@ impl Renderer {
                 .fg(pal::c(pal::TEXT_MUTED))
                 .add_modifier(Modifier::BOLD),
         ))];
-        let now = Instant::now();
+        // A replayed request is as old as it was at that point in the log.
+        let now = d.replay.map_or_else(Instant::now, |r| r.now);
         let rows = p.recent_requests(inner.height.saturating_sub(1) as usize);
         if rows.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -2261,6 +3015,7 @@ impl Renderer {
             ("h", "layers".into(), d.view == ViewMode::Heatmap),
             ("m", "experts".into(), d.view == ViewMode::MoE),
             ("e", "3d".into(), d.view == ViewMode::Landscape),
+            ("u", "balance".into(), d.view == ViewMode::Balance),
             ("b", "bandwidth".into(), d.view == ViewMode::Bandwidth),
         ];
         if multi {
@@ -2275,7 +3030,19 @@ impl Renderer {
         items.push(("s", "settings".into(), d.settings.is_some()));
         items.push(("l", "log".into(), d.log.is_some()));
         items.push(("c", "ctx speed".into(), d.ctx_speed.is_some()));
-        items.push(("r", "rescan".into(), false));
+        if d.bench_running {
+            items.push(("B", "bench".into(), d.bench.is_some()));
+        }
+        match d.replay {
+            Some(r) => {
+                // Ahead of the view keys: playback is what a replay is for.
+                let play = if r.paused { "play" } else { "pause" };
+                items.insert(1, ("␣", play.into(), false));
+                items.insert(2, ("[ ]", "seek".into(), false));
+                items.insert(3, ("< >", format!("×{}", r.speed), false));
+            }
+            None => items.push(("r", "rescan".into(), false)),
+        }
 
         let cost = |it: &[(&str, String, bool)]| -> usize {
             it.iter()
@@ -2287,6 +3054,7 @@ impl Renderer {
                 match *k {
                     "t" => *l = "theme".into(),
                     "b" => *l = "bw".into(),
+                    "u" => *l = "bal".into(),
                     "s" => *l = "set".into(),
                     "c" => *l = "ctx".into(),
                     "↹" => *l = format!("{}/{}", d.focus + 1, d.models.len()),
@@ -2340,6 +3108,69 @@ impl Renderer {
                 .style(Style::default().bg(pal::c(pal::chrome().panel))),
             area,
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Replay (--replay)
+// ---------------------------------------------------------------------------
+
+impl Renderer {
+    /// A panel whose source the log does not keep: said, not simulated.
+    fn render_not_logged(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        title: &str,
+        accent: (u8, u8, u8),
+        why: &str,
+    ) {
+        let block = panel(title, accent);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        // One column of margin, kept on the wrapped lines too.
+        let inner = Rect {
+            x: inner.x + 1,
+            width: inner.width.saturating_sub(1),
+            ..inner
+        };
+        let text = Text::from(vec![
+            Line::from(Span::styled(
+                "not in log",
+                Style::default()
+                    .fg(pal::c(pal::TEXT))
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                why.to_string(),
+                Style::default().fg(pal::c(pal::TEXT_DIM)),
+            )),
+        ]);
+        frame.render_widget(
+            Paragraph::new(text).wrap(ratatui::widgets::Wrap { trim: false }),
+            inner,
+        );
+    }
+
+    /// The header's bottom border becomes the playback position.
+    fn render_replay_progress(&self, frame: &mut Frame, area: Rect, r: Hud) {
+        if area.width < 24 || area.height < 2 {
+            return;
+        }
+        let w = area.width as usize - 2;
+        let done = (r.progress.clamp(0.0, 1.0) * w as f32).round() as usize;
+        let line = Line::from(vec![
+            Span::styled(
+                "━".repeat(done),
+                Style::default().fg(pal::c(pal::accent(pal::AMBER))),
+            ),
+            Span::styled(
+                "─".repeat(w - done),
+                Style::default().fg(pal::c(pal::chrome().border)),
+            ),
+        ]);
+        let bar = Rect::new(area.x + 1, area.y + area.height - 1, w as u16, 1);
+        frame.render_widget(Paragraph::new(line), bar);
     }
 }
 
@@ -2615,6 +3446,158 @@ impl Renderer {
     }
 }
 
+impl Renderer {
+    /// The benchmark table (`B`): one row per prompt length, filled in as
+    /// the run goes, opened by itself when it ends.
+    fn render_bench(&self, frame: &mut Frame, area: Rect, run: &BenchSession) {
+        let width = area.width.saturating_sub(4).min(110);
+        let rows = run.plan.len() + usize::from(!run.skipped.is_empty());
+        let height = ((rows + 13) as u16).min(area.height.saturating_sub(2));
+        let rect = Rect {
+            x: area.x + (area.width - width) / 2,
+            y: area.y + (area.height - height) / 2,
+            width,
+            height,
+        };
+        frame.render_widget(Clear, rect);
+        let block = panel(" ◆ BENCHMARK ", pal::AMBER);
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
+        let w = inner.width as usize;
+        let h = inner.height as usize;
+        let text = Style::default().fg(pal::c(pal::TEXT));
+        let dim = Style::default().fg(pal::c(pal::TEXT_DIM));
+        let head = Style::default()
+            .fg(pal::c(pal::accent(pal::AMBER)))
+            .add_modifier(Modifier::BOLD);
+        let bad = Style::default().fg(pal::c(pal::MAGENTA));
+        let row = |label: &str, value: String, style: Style| {
+            Line::from(vec![
+                Span::styled(format!(" {label:<6}"), dim),
+                Span::styled(truncate(&value, w.saturating_sub(7)), style),
+            ])
+        };
+        let mut lines: Vec<Line> = vec![
+            row("tag", run.tag.clone(), text.add_modifier(Modifier::BOLD)),
+            row(
+                "model",
+                [run.model.as_str(), run.engine.as_str(), run.gpus.as_str()]
+                    .iter()
+                    .filter(|s| !s.is_empty())
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+                text,
+            ),
+        ];
+        let (state, style) = match &run.state {
+            SessionState::Starting => (format!("starting {}", self.spinner()), text),
+            SessionState::Running => match run.current {
+                Some((ctx, rep)) => (
+                    format!(
+                        "running {} {rep}/{} {}",
+                        bench::fmt_ctx(ctx),
+                        run.config.repeat,
+                        self.spinner()
+                    ),
+                    Style::default().fg(pal::c(pal::accent(pal::AMBER))),
+                ),
+                None => (format!("warm-up {}", self.spinner()), text),
+            },
+            SessionState::Done => ("done".into(), Style::default().fg(pal::c(pal::GREEN))),
+            SessionState::Failed(e) => (format!("stopped: {e}"), bad),
+        };
+        lines.push(row("plan", run.config.describe(), text));
+        lines.push(row("state", state, style));
+        lines.push(Line::raw(""));
+        let header = format!(
+            " {:>6} {:>8} {:>5} {:>12} {:>11} {:>8} {:>11} {:>9}",
+            "CTX", "PROMPT", "RUNS", "PREFILL t/s", "DECODE t/s", "TTFT", "ENGINE t/s", "DASH t/s"
+        );
+        lines.push(Line::styled(truncate(&header, w), head));
+        let sums = bench::summarize(&run.results);
+        let cell = |v: Option<f64>| v.map_or("–".to_string(), |v| fmt_rate(v as f32));
+        for &ctx in &run.plan {
+            let current = run.current.is_some_and(|(c, _)| c == ctx);
+            let line = match sums.iter().find(|s| s.ctx == ctx) {
+                None => Line::styled(
+                    truncate(
+                        &format!(
+                            " {:>6} {:>8} {:>5}",
+                            bench::fmt_ctx(ctx),
+                            "",
+                            format!("0/{}", run.config.repeat)
+                        ),
+                        w,
+                    ),
+                    if current { text } else { dim },
+                ),
+                Some(s) => {
+                    let prompt = format!(
+                        "{}{}",
+                        fmt_int(s.prompt_tokens.round() as usize),
+                        if s.prompt_measured { "" } else { "~" }
+                    );
+                    let mut body = format!(
+                        " {:>6} {:>8} {:>5} {:>12} {:>11} {:>8} {:>11} {:>9}",
+                        bench::fmt_ctx(ctx),
+                        if s.ok > 0 { prompt } else { "–".into() },
+                        format!("{}/{}", s.ok + s.failed, run.config.repeat),
+                        cell(s.prefill_tps),
+                        cell(s.decode_tps),
+                        s.ttft_s
+                            .map(|t| fmt_dur(Duration::from_secs_f64(t.max(0.0))))
+                            .unwrap_or_else(|| "–".into()),
+                        cell(s.server_decode_tps),
+                        cell(s.dash_decode_tps),
+                    );
+                    if let Some(e) = &s.error {
+                        body.push_str(&format!("  {e}"));
+                    }
+                    Line::styled(
+                        truncate(&body, w),
+                        if s.error.is_some() { bad } else { text },
+                    )
+                }
+            };
+            lines.push(line);
+        }
+        if !run.skipped.is_empty() {
+            let skipped: Vec<String> = run.skipped.iter().map(|c| bench::fmt_ctx(*c)).collect();
+            lines.push(Line::styled(
+                truncate(
+                    &format!(
+                        " skipped {}: beyond the server's context",
+                        skipped.join(", ")
+                    ),
+                    w,
+                ),
+                dim,
+            ));
+        }
+        lines.push(Line::raw(""));
+        for note in [
+            " prefill = prompt ÷ TTFT and decode = tokens after the first ÷ their time, at the client",
+            " ENGINE = the server's own timings (llama.cpp) · DASH = this dashboard's row · ~ estimated",
+        ] {
+            if lines.len() + 2 < h {
+                lines.push(Line::styled(truncate(note, w), dim));
+            }
+        }
+        while lines.len() + 1 < h {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::from(fit_spans(
+            &[
+                Span::styled(" esc", text.add_modifier(Modifier::BOLD)),
+                Span::styled(" close ", dim),
+            ],
+            w,
+        )));
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+}
+
 /// "900", "1.5k", "12.3k" tokens.
 fn fmt_tokens(n: i64) -> String {
     if n < 1000 {
@@ -2631,6 +3614,7 @@ impl Renderer {
         area: Rect,
         speeds: &Result<Vec<ContextSpeed>, String>,
         sel: usize,
+        d: &Dashboard,
     ) {
         let width = area.width.saturating_sub(4).min(100);
         let height = area.height.saturating_sub(2).min(26);
@@ -2709,25 +3693,36 @@ impl Renderer {
         ));
         lines.push(Line::raw(""));
 
+        // The regression baseline on this screen's own rows: the model's
+        // last hour and its baseline window, both on the GPUs it has now.
+        let running = d.models.iter().find(|v| v.detected.name == m.model);
+        let history = running.and_then(|v| v.regression);
+        let (lo, per) = (m.buckets[0].0 / CTX_GRAIN, m.step / CTX_GRAIN);
+        let windows = history.map(|h| {
+            (
+                h.days,
+                crate::dblog::merge_grains(&h.base, lo, per),
+                crate::dblog::merge_grains(&h.cur, lo, per),
+            )
+        });
         let label_w = 14;
-        let bar_w = w.saturating_sub(label_w + 8 + 9 + 3);
-        lines.push(Line::styled(
-            truncate(
-                &format!(
-                    " {:<label_w$} {:<bar_w$} {:>8} {:>8}",
-                    "CONTEXT", "", "t/s", "SAMPLES"
-                ),
-                w,
-            ),
-            head,
-        ));
+        let extra = if windows.is_some() { 16 } else { 0 };
+        let bar_w = w.saturating_sub(label_w + 8 + 9 + 3 + extra);
+        let mut columns = format!(
+            " {:<label_w$} {:<bar_w$} {:>8} {:>8}",
+            "CONTEXT", "", "t/s", "SAMPLES"
+        );
+        if let Some((days, _, _)) = &windows {
+            columns.push_str(&format!(" {:>7} {:>7}", format!("{days}d"), "1h"));
+        }
+        lines.push(Line::styled(truncate(&columns, w), head));
         let peak = m.buckets.iter().map(|b| b.1).fold(0.0, f64::max);
         let (first, last) = (m.buckets[0].0, m.buckets[m.buckets.len() - 1].0);
         // Every row from the shortest to the longest context, empty ones too,
         // so the vertical axis stays linear in tokens.
         let mut start = first;
-        // Leave a blank line, the summary and the key row below.
-        while start <= last && lines.len() + 3 < h {
+        // Leave a blank line, the two summaries and the key row below.
+        while start <= last && lines.len() + 4 < h {
             let range = format!("{}–{}", fmt_tokens(start), fmt_tokens(start + m.step));
             let mut spans = vec![Span::styled(format!(" {range:<label_w$} "), text)];
             match m.buckets.iter().find(|b| b.0 == start) {
@@ -2737,6 +3732,21 @@ impl Renderer {
                     let st = if n < 5 { dim } else { text };
                     spans.push(Span::styled(format!(" {:>8}", fmt_rate(tps as f32)), st));
                     spans.push(Span::styled(format!(" {:>8}", fmt_int(n as usize)), dim));
+                    if let Some((_, base, cur)) = &windows {
+                        for side in [base, cur] {
+                            spans.push(match side.iter().find(|r| r.0 == start) {
+                                Some(&(_, tps, n)) => Span::styled(
+                                    format!(" {:>7}", fmt_rate(tps as f32)),
+                                    if n < regress::MIN_RANGE_SAMPLES {
+                                        dim
+                                    } else {
+                                        text
+                                    },
+                                ),
+                                None => Span::styled(format!(" {:>7}", "–"), dim),
+                            });
+                        }
+                    }
                 }
                 None => spans.push(Span::styled(format!("{:>w2$}", "–", w2 = bar_w + 9), dim)),
             }
@@ -2758,6 +3768,48 @@ impl Renderer {
                     text.add_modifier(Modifier::BOLD),
                 ),
             ]));
+        }
+        let verdict = match (d.regress_off, history) {
+            (Some(why), _) => Err(why.to_string()),
+            (None, Some(h)) => h.compare(),
+            (None, None) if running.is_none() => Err("not running now".into()),
+            (None, None) => Err("reading the log…".into()),
+        };
+        match verdict {
+            Ok(c) => {
+                let flagged = self.regression_flag(history).map(|(_, rgb)| rgb);
+                lines.push(Line::from(fit_spans(
+                    &[
+                        Span::styled(
+                            format!(" last hour vs 1–{}d ago ", history.map_or(0, |h| h.days)),
+                            dim,
+                        ),
+                        Span::styled(
+                            format!(
+                                "{} → {} t/s ({:+.0}%)",
+                                fmt_rate(c.base_tps as f32),
+                                fmt_rate(c.cur_tps as f32),
+                                c.change * 100.0
+                            ),
+                            flagged
+                                .map_or(text, |rgb| Style::default().fg(pal::c(rgb)))
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!(
+                                " at the same contexts and GPUs, {} samples",
+                                fmt_int(c.samples as usize)
+                            ),
+                            dim,
+                        ),
+                    ],
+                    w,
+                )));
+            }
+            Err(why) => lines.push(Line::styled(
+                truncate(&format!(" baseline: n/a — {why}"), w),
+                dim,
+            )),
         }
         while lines.len() + 1 < h {
             lines.push(Line::raw(""));
@@ -2831,6 +3883,22 @@ impl Renderer {
         let focused = i == d.focus;
         let p = m.perf;
         let (badge_rgb, badge) = phase_badge(p.phase);
+        // An idle Ollama model carries its unload countdown in the badge;
+        // one the daemon has dropped says so.
+        let ps = m.live.ollama.as_ref();
+        let badge = match ps.map(|o| o.loaded.as_ref()) {
+            // A runner's model was unloaded; the daemon's slot has none yet.
+            Some(None) if counters_of(ps) => "evicted".to_string(),
+            Some(None) => "empty".to_string(),
+            Some(Some(loaded)) if p.phase == Phase::Idle => {
+                match ollama::expiry_short(loaded, chrono::Utc::now().timestamp()) {
+                    Some(left) => format!("idle {left}"),
+                    None => badge.to_string(),
+                }
+            }
+            _ => badge.to_string(),
+        };
+        let counters = counters_of(ps);
         let name_style = if focused {
             Style::default()
                 .fg(pal::c(pal::WHITE))
@@ -2847,6 +3915,14 @@ impl Renderer {
         let core = idx_w + phase_w + rate_w;
         let name_w = (w / 4).clamp(8, 24).min(w.saturating_sub(core + 2).max(6));
         let mut spare = w.saturating_sub(core + name_w + 1);
+        // A regression outranks the history and gauges: it is news.
+        let flag = self
+            .regression_flag(m.regression)
+            .map(|(c, rgb)| (format!("▼{:.0}% ", -c.change * 100.0), rgb))
+            .filter(|(f, _)| f.chars().count() <= spare);
+        if let Some((f, _)) = &flag {
+            spare -= f.chars().count();
+        }
         let show_vram = spare >= 10;
         if show_vram {
             spare -= 9;
@@ -2896,7 +3972,11 @@ impl Renderer {
 
         let rate = p.decode_tps_smooth;
         spans.push(Span::styled(
-            format!("{:>6}", fmt_rate(rate)),
+            if counters {
+                format!("{:>6}", fmt_rate(rate))
+            } else {
+                format!("{:>6}", "n/a")
+            },
             Style::default()
                 .fg(if rate > 0.0 {
                     pal::gradient_color(pal::FLOW, 0.85)
@@ -2909,6 +3989,14 @@ impl Renderer {
             " tok/s ",
             Style::default().fg(pal::c(pal::TEXT_MUTED)),
         ));
+        if let Some((f, rgb)) = flag {
+            spans.push(Span::styled(
+                f,
+                Style::default()
+                    .fg(pal::c(rgb))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
 
         if spark_w > 0 {
             let hist: Vec<f32> = p.decode_hist.iter().copied().collect();
@@ -2933,11 +4021,20 @@ impl Renderer {
         }
 
         if show_vram {
-            let gb = m.detected.mem_used_mb as f32 / 1024.0;
-            spans.push(Span::styled(
-                format!("{gb:>5.1}G "),
-                Style::default().fg(pal::c(pal::BLUE)),
-            ));
+            // A daemon found by its port has no process for the driver to
+            // charge; the daemon's own VRAM count stands in.
+            let mb = match ps.and_then(|o| o.loaded.as_ref()) {
+                Some(l) if m.detected.mem_used_mb == 0 => l.size_vram / (1024 * 1024),
+                _ => m.detected.mem_used_mb,
+            };
+            // A replayed model's own VRAM is not in the log; 0.0G would read
+            // as a measurement.
+            let txt = if d.replay.is_some() {
+                format!("{:>5} ", "—")
+            } else {
+                format!("{:>5.1}G ", mb as f32 / 1024.0)
+            };
+            spans.push(Span::styled(txt, Style::default().fg(pal::c(pal::BLUE))));
         }
 
         Line::from(fit_spans(&spans, w))
@@ -3030,7 +4127,7 @@ impl Renderer {
                     .bg(pal::c(pal::dim_rgb(badge_rgb, glow)))
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("  {}", m.detected.engine), muted),
+            Span::styled(format!("  {}", m.detected.engine_label()), muted),
             Span::styled(
                 match m.detected.port {
                     Some(port) => format!(":{port}"),
@@ -3147,7 +4244,11 @@ impl Renderer {
         }
         lines.push(kv(
             "vram",
-            format!("{:.1} G", m.detected.mem_used_mb as f32 / 1024.0),
+            if d.replay.is_some() {
+                "not in log".into()
+            } else {
+                format!("{:.1} G", m.detected.mem_used_mb as f32 / 1024.0)
+            },
             pal::BLUE,
         ));
         if !m.detected.gpu_indices.is_empty() {
@@ -3322,7 +4423,10 @@ impl Renderer {
             } else {
                 pal::TEXT_DIM
             };
-            facts.push(fact("cpu-side", format!("~{}", gb(layout.cpu_bytes)), c));
+            facts.push(fact("cpu-side", fmt_cpu_side(layout), c));
+            if layout.cpu_by_rule > 0 {
+                facts.push(fact("by -ot", gb(layout.cpu_by_rule), pal::TEXT));
+            }
         }
         if let Some(a) = host.mem_available_bytes {
             facts.push(fact("avail", gb(a), pal::TEXT));
@@ -3460,6 +4564,18 @@ impl Renderer {
                 missing: None,
             });
         } else {
+            // With the cards' peak known, the first bar is the weight stream
+            // against it, and the reading is GB/s of peak; the controllers'
+            // busy % stay beside it.
+            let peak = bw.vram_peak_gb_s.filter(|_| layout.known);
+            if let Some(peak) = peak {
+                channels.push(Channel {
+                    label: "bw".into(),
+                    meter: &bw.vram,
+                    text: format!("{:.0}%", bw.vram_gb_s / peak * 100.0),
+                });
+                facts[0] = fact("peak", format!("{} GB/s", fmt_compact(peak)), pal::TEAL);
+            }
             for g in d.gpus {
                 let i = g.index as usize;
                 if let Some(m) = bw.vram_busy.get(i) {
@@ -3471,14 +4587,26 @@ impl Renderer {
                     });
                 }
             }
-            facts.push(dim("mem ctrl busy %".into()));
+            let (value, unit, tag) = match peak {
+                Some(peak) => (
+                    format!("{}/{}", fmt_compact(bw.vram_gb_s), fmt_compact(peak)),
+                    "GB/s",
+                    "est",
+                ),
+                None => (format!("{busiest:.0}"), "%", "busy"),
+            };
+            facts.push(dim(if peak.is_some() {
+                "% of peak, ctrl busy".into()
+            } else {
+                "mem ctrl busy %".into()
+            }));
             stages.push(Stage {
                 id: StageId::Vram,
                 title: "VRAM",
                 accent: pal::TEAL,
-                value: format!("{busiest:.0}"),
-                unit: "%",
-                tag: "busy",
+                value,
+                unit,
+                tag,
                 channels,
                 facts,
                 missing: if d.gpus.is_empty() {
@@ -3572,7 +4700,7 @@ impl Renderer {
                 layout.total_bytes as f32 / 1e9,
                 layout.active_bytes as f32 / 1e9,
                 if layout.cpu_bytes > layout.total_bytes / 50 {
-                    format!("~{:.1} GB on CPU ", layout.cpu_bytes as f32 / 1e9)
+                    format!("{} on CPU ", fmt_cpu_side(layout).replace('G', " GB"))
                 } else if unified {
                     "all in the unified pool ".into()
                 } else {
@@ -4295,6 +5423,17 @@ fn big_digits(s: String) -> [String; 3] {
 }
 
 /// Largest chunky tiles that fit `n` layers in a WxH grid.
+/// Bytes on the CPU side: exact when llama.cpp's override rules put all of
+/// them there, an estimate (`~`) when some are what the cards could not hold.
+fn fmt_cpu_side(layout: &crate::perf::WeightLayout) -> String {
+    let approx = if layout.cpu_by_rule > 0 && layout.cpu_by_rule == layout.cpu_bytes {
+        ""
+    } else {
+        "~"
+    };
+    format!("{approx}{:.1}G", layout.cpu_bytes as f32 / 1e9)
+}
+
 fn layer_tile_size(w: usize, h: usize, n: usize) -> (usize, usize, usize) {
     if w == 0 || h == 0 || n == 0 {
         return (1, 1, 1);
@@ -4332,9 +5471,94 @@ fn max_layer_head(cols: &[&crate::pipeline::TokenColumn]) -> (usize, usize) {
     (l, h)
 }
 
+/// The throughput panel's energy row: the box's GPU energy this session and
+/// what the focused model spent per generated token, with their costs when a
+/// price is set. Least important first to go when the row is too narrow:
+/// session cost, then cost per million tokens, then energy per token.
+fn energy_line(d: &Dashboard, w: usize) -> Line<'static> {
+    let e = d.energy;
+    let st = |rgb| Style::default().fg(pal::c(rgb));
+    let mut spans = vec![Span::styled("GPU energy ", st(pal::TEXT_DIM))];
+    if !e.powered {
+        let why = if d.gpus.is_empty() {
+            "no GPU telemetry"
+        } else {
+            "no power readings"
+        };
+        spans.push(Span::styled(why, st(pal::TEXT_MUTED)));
+        return Line::from(spans);
+    }
+    let currency = e.tariff.currency.as_str();
+    let mine = &d.perf.energy;
+    let mut segs: Vec<(u8, Span<'static>)> = vec![(
+        4,
+        Span::styled(energy::fmt_energy(e.total_j()), st(pal::AMBER)),
+    )];
+    if let Some(cost) = e.session_cost() {
+        segs.push((
+            1,
+            Span::styled(energy::fmt_cost(currency, cost), st(pal::AMBER)),
+        ));
+    }
+    if let Some(wh) = mine.wh_per_1k_tokens() {
+        segs.push((
+            3,
+            Span::styled(
+                format!("{} Wh/1k tok", energy::fmt_wh_per_1k(wh)),
+                st(pal::GREEN),
+            ),
+        ));
+    }
+    if let Some(cost) = e.tariff.price().and_then(|p| mine.cost_per_1m_tokens(p)) {
+        segs.push((
+            2,
+            Span::styled(
+                format!("{}/1M tok", energy::fmt_cost(currency, cost)),
+                st(pal::GREEN),
+            ),
+        ));
+    }
+    const SEP: &str = " · ";
+    let label_w = spans[0].content.chars().count();
+    let width = |segs: &[(u8, Span)]| {
+        label_w
+            + segs
+                .iter()
+                .map(|(_, s)| s.content.chars().count())
+                .sum::<usize>()
+            + SEP.chars().count() * segs.len().saturating_sub(1)
+    };
+    while segs.len() > 1 && width(&segs) > w {
+        let lowest = (0..segs.len()).min_by_key(|&i| segs[i].0).unwrap_or(0);
+        segs.remove(lowest);
+    }
+    for (k, (_, seg)) in segs.into_iter().enumerate() {
+        if k > 0 {
+            spans.push(Span::styled(SEP, st(pal::TEXT_MUTED)));
+        }
+        spans.push(seg);
+    }
+    Line::from(spans)
+}
+
 // ---------------------------------------------------------------------------
 // Formatting
 // ---------------------------------------------------------------------------
+
+/// The clocks-event badge: every limiting reason, worst first, and the level
+/// of the worst. `⚠` marks the driver's power and thermal policy and hardware
+/// slowdown; a configured ceiling (APP, SYNC) is stated, not flagged.
+fn fmt_clock_reasons(reasons: ClockReasons) -> Option<(String, ReasonLevel)> {
+    let labels = reasons.labels();
+    let worst = labels.iter().map(|&(_, level)| level).max()?;
+    let names: Vec<&str> = labels.iter().map(|&(name, _)| name).collect();
+    let mark = if worst >= ReasonLevel::Warn {
+        "⚠"
+    } else {
+        ""
+    };
+    Some((format!("{mark}{}", names.join("+")), worst))
+}
 
 pub fn fmt_int(n: usize) -> String {
     let s = n.to_string();
@@ -4384,6 +5608,26 @@ pub fn fmt_dur(d: Duration) -> String {
 fn fmt_clock(d: Duration) -> String {
     let s = d.as_secs();
     format!("{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+}
+
+/// Greedy word wrap to `width` columns; a word longer than a line is cut.
+fn wrap_words(s: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in s.split_whitespace() {
+        let need = cur.chars().count() + usize::from(!cur.is_empty()) + word.chars().count();
+        if !cur.is_empty() && need > width {
+            lines.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines.into_iter().map(|l| truncate(&l, width)).collect()
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -4450,6 +5694,69 @@ fn vision_label(v: &Vision, gpus: &[GpuStats]) -> Option<(String, Option<String>
     })
 }
 
+/// Whether a slot's own port serves token counters: everything but an
+/// Ollama daemon or legacy runner.
+fn counters_of(ps: Option<&ollama::Status>) -> bool {
+    ps.map_or(true, |o| o.counters)
+}
+
+/// Header segments for an Ollama model, with their keep priorities: when
+/// it unloads (kept longest: a model about to vanish is news), where it
+/// runs, and its size class.
+fn ollama_segments(o: &ollama::Status, busy: bool) -> Vec<(u8, Vec<Span<'static>>)> {
+    let st = |rgb| Style::default().fg(pal::c(rgb));
+    let mut segs = Vec::new();
+    let Some(p) = &o.loaded else {
+        segs.push((
+            9,
+            vec![Span::styled(
+                "not loaded",
+                st(pal::AMBER).add_modifier(Modifier::BOLD),
+            )],
+        ));
+        return segs;
+    };
+    let now = chrono::Utc::now().timestamp();
+    if let Some(label) = ollama::expiry_label(p, now, busy) {
+        let soon = p.expires_at.is_some_and(|t| t - now < 60);
+        segs.push((
+            7,
+            vec![Span::styled(
+                label,
+                st(if soon { pal::AMBER } else { pal::TEXT }),
+            )],
+        ));
+    }
+    let proc = p.processor();
+    if !proc.is_empty() {
+        let all_gpu = p.cpu_bytes() == 0;
+        segs.push((
+            3,
+            vec![Span::styled(
+                proc,
+                st(if all_gpu { pal::TEAL } else { pal::AMBER }),
+            )],
+        ));
+    }
+    if !p.parameter_size.is_empty() {
+        segs.push((
+            2,
+            vec![Span::styled(p.parameter_size.clone(), st(pal::TEXT))],
+        ));
+    }
+    // Only the daemon's own slot lists the rest; each runner has its own.
+    if !o.counters && o.others > 0 {
+        segs.push((
+            1,
+            vec![Span::styled(
+                format!("+{} loaded", o.others),
+                st(pal::TEXT_DIM),
+            )],
+        ));
+    }
+    segs
+}
+
 fn quant_from_path(m: &DetectedModel) -> Option<String> {
     let stem = m.path.as_ref()?.file_stem()?.to_string_lossy().to_string();
     let is_quant = |t: &str| {
@@ -4478,6 +5785,28 @@ fn quant_from_path(m: &DetectedModel) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_reason_badge() {
+        let badge = |bits: u64| fmt_clock_reasons(ClockReasons(bits));
+        assert_eq!(badge(0), None);
+        assert_eq!(badge(ClockReasons::GPU_IDLE), None);
+        assert_eq!(
+            badge(ClockReasons::SW_POWER_CAP),
+            Some(("⚠PWR".to_string(), ReasonLevel::Warn))
+        );
+        assert_eq!(
+            badge(
+                ClockReasons::HW_THERMAL | ClockReasons::HW_SLOWDOWN | ClockReasons::SW_POWER_CAP
+            ),
+            Some(("⚠THERM+PWR".to_string(), ReasonLevel::Severe))
+        );
+        // A configured ceiling is stated, not flagged.
+        assert_eq!(
+            badge(ClockReasons::APP_CLOCKS),
+            Some(("APP".to_string(), ReasonLevel::Info))
+        );
+    }
 
     #[test]
     fn gpu_split_keeps_three_rows_per_card_before_adding_gaps() {
@@ -4620,6 +5949,16 @@ mod tests {
     }
 
     #[test]
+    fn words_wrap_to_the_width() {
+        assert_eq!(
+            wrap_words("Ollama's API has no token counters", 14),
+            vec!["Ollama's API", "has no token", "counters"]
+        );
+        assert_eq!(wrap_words("", 10), Vec::<String>::new());
+        assert_eq!(wrap_words("a b", 80), vec!["a b"]);
+    }
+
+    #[test]
     fn quant_tag_from_gguf_name() {
         let mut m = crate::demo::demo_models(4096, 1).remove(0);
         m.path = Some("/m/Qwen3.6-35B-A3B-MTP-UD-Q3_K_XL.gguf".into());
@@ -4638,6 +5977,20 @@ mod tests {
     /// As `landscape_text`, with a `rival` (layer, expert) routed exactly as
     /// often as the busiest expert.
     fn landscape_text_with(
+        profile: usize,
+        w: u16,
+        h: u16,
+        routed: bool,
+        turns: i32,
+        rival: Option<(usize, usize)>,
+    ) -> String {
+        view_text(ViewMode::Landscape, profile, w, h, routed, turns, rival)
+    }
+
+    /// A frame of `view` for a demo profile, routed as `landscape_text_with`
+    /// describes.
+    fn view_text(
+        view: ViewMode,
         profile: usize,
         w: u16,
         h: u16,
@@ -4677,6 +6030,7 @@ mod tests {
         let sample = FadeSample {
             layer_target: vec![0.5; n_l],
             layer_gpu: vec![0; n_l],
+            layer_cpu: Vec::new(),
             kv_filled: vec![false; crate::fade::KV_BUCKETS],
             processing: true,
             decoded: 1,
@@ -4720,6 +6074,7 @@ mod tests {
             experts: routed.then_some(&stats),
             num_layers: n_l,
             num_heads: 8,
+            regression: None,
         }];
         let dash = Dashboard {
             models: &views,
@@ -4734,7 +6089,7 @@ mod tests {
             generated: &generated,
             num_layers: n_l,
             num_heads: 8,
-            view: ViewMode::Landscape,
+            view,
             camera: &camera,
             status: "",
             theme_name: "defrag",
@@ -4744,6 +6099,13 @@ mod tests {
             settings: None,
             log: None,
             ctx_speed: None,
+            energy: &GpuEnergy::default(),
+            alerts: &[],
+            alert_banner: None,
+            regress_off: None,
+            replay: None,
+            bench: None,
+            bench_running: false,
         };
         let renderer = Renderer::new(pal::get_theme("defrag"), 0, 0, 1);
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -4759,6 +6121,99 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The whole screen as text, with `alerts` raised and the newest on
+    /// the banner when `banner` says so.
+    fn alert_text(w: u16, h: u16, alerts: &[Alert], banner: bool) -> String {
+        let (perf, live, fade) = (PerfTracker::new(), LiveStats::default(), FadeState::new());
+        let (attention, generated) = (TokenBuffer::new(8), GeneratedText::new());
+        let camera = Camera::new();
+        let dash = Dashboard {
+            models: &[],
+            focus: 0,
+            detected: None,
+            gpus: &[],
+            gpu_error: None,
+            fade: &fade,
+            perf: &perf,
+            live: &live,
+            attention: &attention,
+            generated: &generated,
+            num_layers: 0,
+            num_heads: 0,
+            view: ViewMode::All,
+            camera: &camera,
+            status: "",
+            theme_name: "defrag",
+            demo: true,
+            experts: None,
+            gpu_backend: None,
+            settings: None,
+            log: None,
+            ctx_speed: None,
+            alerts,
+            alert_banner: alerts.last().filter(|_| banner),
+            energy: &GpuEnergy::default(),
+            regress_off: None,
+            replay: None,
+            bench: None,
+            bench_running: false,
+        };
+        let renderer = Renderer::new(pal::get_theme("defrag"), 0, 0, 1);
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|frame| renderer.render_view(frame, frame.area(), &dash))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn vram_alert(gpu: u32) -> Alert {
+        Alert {
+            kind: crate::alerts::Kind::Vram,
+            subject: crate::alerts::Subject::Gpu(gpu),
+            text: format!("G{gpu} P100: VRAM 97% full (alert at 95%)"),
+            tag: format!("VRAM G{gpu}"),
+            since: Instant::now(),
+            announced: true,
+        }
+    }
+
+    #[test]
+    fn a_raised_alert_shows_in_the_header_and_the_banner() {
+        let text = alert_text(100, 30, &[vram_alert(1)], true);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].contains("⚠ VRAM G1"), "{}", lines[0]);
+        // The banner stands in for the key row; the panels keep theirs
+        // (the header's clock is left out of the comparison).
+        let banner = lines[29];
+        assert!(
+            banner.contains("⚠ ALERT  G1 P100: VRAM 97% full"),
+            "{banner}"
+        );
+        assert!(banner.contains("since "), "{banner}");
+        let quiet = alert_text(100, 30, &[vram_alert(1)], false);
+        let quiet: Vec<&str> = quiet.lines().collect();
+        assert_eq!(lines[3..29], quiet[3..29]);
+
+        // Several at once: the badge counts, the banner says how many more.
+        let text = alert_text(150, 46, &[vram_alert(0), vram_alert(1)], true);
+        assert!(text.lines().next().unwrap().contains("⚠ 2 alerts"));
+        assert!(text.contains("1 more active"));
+
+        // Past its banner time only the badge is left and the keys return.
+        assert!(quiet[0].contains("⚠ VRAM G1"));
+        assert!(!quiet.concat().contains("ALERT"));
+        assert!(quiet[29].contains("q quit"));
+        assert!(!alert_text(100, 30, &[], false).contains('⚠'));
     }
 
     #[test]
@@ -4827,6 +6282,41 @@ mod tests {
             narrow.contains("◆ EXPERTS  8 of 256") && narrow.contains("◆ CONTEXT"),
             "{narrow}"
         );
+    }
+
+    #[test]
+    fn balance_flags_the_layer_whose_busiest_experts_stand_out() {
+        let text = view_text(ViewMode::Balance, 0, 150, 46, true, 0, None);
+        assert!(text.contains("EXPERT BALANCE  8 of 256 per token · live"));
+        assert!(text.contains("256 tokens · curve = experts ranked by hits"));
+        // Layer 2 has one expert routed twice as often as any other: its
+        // top-8 share is twice the median layer's, and it alone is marked.
+        assert!(text.contains("1 layer ● top-8 ≥ 2× median 6%"));
+        assert!(text.contains("   2● "));
+        assert!(!text.contains("   3● "));
+        assert!(text.contains("most lopsided L2"));
+        // Every layer of the 41 is on screen, in two columns.
+        assert!(text.contains("  40  "));
+        assert!(text.contains("effective experts by layer"));
+    }
+
+    #[test]
+    fn balance_on_a_small_terminal_keeps_the_flagged_layer_in_a_shared_row() {
+        let text = view_text(ViewMode::Balance, 0, 100, 24, true, 0, None);
+        assert!(text.contains("most lopsided of 2 per row"));
+        assert!(text.contains("   2● "));
+    }
+
+    #[test]
+    fn balance_without_hit_counts_or_experts_says_why_instead_of_drawing() {
+        let unpatched = view_text(ViewMode::Balance, 0, 150, 46, false, 0, None);
+        assert!(unpatched.contains("start it with --expert-stats (see patches/README.md)"));
+        assert!(!unpatched.contains("effective experts by layer"));
+        let dense = view_text(ViewMode::Balance, 1, 150, 46, true, 0, None);
+        assert!(dense.contains("this model is dense"));
+        for h in 1..=5 {
+            view_text(ViewMode::Balance, 0, 40, h, true, 0, None);
+        }
     }
 
     #[test]
@@ -4900,6 +6390,95 @@ mod tests {
         let (tw, th, tpr) = layer_tile_size(60, 10, 41);
         let tpc = 10 / th;
         assert!(tpr * tpc >= 41, "{tw}x{th} tpr {tpr}");
+    }
+
+    /// The throughput panel's energy row for one model that decoded alone
+    /// at 360 W for ten seconds and generated 500 tokens.
+    fn energy_text(price: f64, gpus: &[GpuStats], w: usize) -> String {
+        let t0 = Instant::now();
+        let mut energy = GpuEnergy::default();
+        energy.tariff.price_per_kwh = price;
+        let mut perf = PerfTracker::new();
+        energy.observe(t0, gpus, [&mut perf]);
+        perf.phase = Phase::Decode;
+        for s in 1..=10 {
+            perf.session_decoded = 50 * s;
+            energy.observe(t0 + Duration::from_secs(s), gpus, [&mut perf]);
+        }
+        let model = crate::demo::demo_models(4096, 1).remove(0);
+        let (live, fade) = (LiveStats::default(), FadeState::new());
+        let (attention, generated) = (TokenBuffer::new(8), GeneratedText::new());
+        let camera = Camera::new();
+        let dash = Dashboard {
+            models: &[],
+            focus: 0,
+            detected: Some(&model),
+            gpus,
+            gpu_error: None,
+            fade: &fade,
+            perf: &perf,
+            live: &live,
+            attention: &attention,
+            generated: &generated,
+            num_layers: 1,
+            num_heads: 1,
+            view: ViewMode::All,
+            camera: &camera,
+            status: "",
+            theme_name: "defrag",
+            demo: true,
+            experts: None,
+            gpu_backend: None,
+            settings: None,
+            log: None,
+            ctx_speed: None,
+            energy: &energy,
+            alerts: &[],
+            alert_banner: None,
+            regress_off: None,
+            replay: None,
+            bench: None,
+            bench_running: false,
+        };
+        energy_line(&dash, w)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    #[test]
+    fn energy_row_sheds_cost_before_energy() {
+        let gpus = [GpuStats {
+            power_watts: 360.0,
+            ..Default::default()
+        }];
+        // 3600 J = 1 Wh for 500 tokens = 2 Wh per 1k; at 0.30/kWh, 0.60/1M.
+        assert_eq!(
+            energy_text(0.30, &gpus, 80),
+            "GPU energy 1.00 Wh · $0.0003 · 2.00 Wh/1k tok · $0.600/1M tok"
+        );
+        assert_eq!(
+            energy_text(0.30, &gpus, 51),
+            "GPU energy 1.00 Wh · 2.00 Wh/1k tok · $0.600/1M tok"
+        );
+        assert_eq!(
+            energy_text(0.30, &gpus, 50),
+            "GPU energy 1.00 Wh · 2.00 Wh/1k tok"
+        );
+        assert_eq!(energy_text(0.30, &gpus, 30), "GPU energy 1.00 Wh");
+        // No price, no costs.
+        assert_eq!(
+            energy_text(0.0, &gpus, 80),
+            "GPU energy 1.00 Wh · 2.00 Wh/1k tok"
+        );
+    }
+
+    #[test]
+    fn energy_row_says_when_no_card_reports_power() {
+        let gpus = [GpuStats::default()];
+        assert_eq!(energy_text(0.30, &gpus, 80), "GPU energy no power readings");
+        assert_eq!(energy_text(0.30, &[], 80), "GPU energy no GPU telemetry");
     }
 }
 

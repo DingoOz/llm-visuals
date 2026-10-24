@@ -26,6 +26,12 @@ pub struct GpuStats {
     /// Memory temperature, °C. NVIDIA only, and only on parts whose driver
     /// reports the sensor (HBM cards); it reads as missing everywhere else.
     pub temperature_memory: Option<f32>,
+    /// The first temperature the driver acts on for the die, °C: the lower
+    /// of NVML's slowdown and max-operating thresholds. NVML only; what the
+    /// temperature alert is measured against when the card names one.
+    pub temperature_limit: Option<f32>,
+    /// The memory's max operating temperature, °C (NVML, HBM parts).
+    pub temperature_memory_limit: Option<f32>,
     pub clock_sm_mhz: u32,
     pub clock_sm_max_mhz: u32,
     pub clock_mem_mhz: u32,
@@ -48,6 +54,87 @@ pub struct GpuStats {
     /// driver's own count of every GPU process outranks one server's
     /// self-declared occupancy.
     pub unified_measured: bool,
+    /// Theoretical peak memory bandwidth, GB/s, from the driver's own bus
+    /// width and maximum memory clock (`peak_mem_bandwidth_gb_s`). Only NVML reports
+    /// both; every other backend leaves it unknown rather than guessing
+    /// from a table of card names.
+    pub mem_peak_gb_s: Option<f32>,
+    /// Why the driver is holding the clocks down right now. NVIDIA only;
+    /// `None` where the driver does not say, `Some` with no bits where it
+    /// says nothing is.
+    pub clock_reasons: Option<ClockReasons>,
+}
+
+/// NVML's clocks-event reasons bitmask (`nvmlClocksEventReason*` in nvml.h,
+/// formerly "throttle reasons"), exactly as the driver reports it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ClockReasons(pub u64);
+
+/// How much a reason matters to someone watching tokens per second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ReasonLevel {
+    /// A configured ceiling (application clocks, sync boost): the card is
+    /// doing what it was told, but below what it could do.
+    Info,
+    /// The driver's own power or thermal policy is shaving clocks.
+    Warn,
+    /// Hardware slowdown: clocks at half or less.
+    Severe,
+}
+
+impl ClockReasons {
+    pub const GPU_IDLE: u64 = 0x1;
+    pub const APP_CLOCKS: u64 = 0x2;
+    pub const SW_POWER_CAP: u64 = 0x4;
+    pub const HW_SLOWDOWN: u64 = 0x8;
+    pub const SYNC_BOOST: u64 = 0x10;
+    pub const SW_THERMAL: u64 = 0x20;
+    pub const HW_THERMAL: u64 = 0x40;
+    pub const HW_POWER_BRAKE: u64 = 0x80;
+    pub const DISPLAY_CLOCK: u64 = 0x100;
+
+    fn has(self, bit: u64) -> bool {
+        self.0 & bit != 0
+    }
+
+    /// nvidia-smi's `clocks_event_reasons.active` cell: `0x…` hex, or
+    /// `[N/A]` / `Not Supported` on a card that does not report it.
+    pub fn parse_hex(cell: &str) -> Option<Self> {
+        let hex = cell.trim();
+        let hex = hex.strip_prefix("0x").or_else(|| hex.strip_prefix("0X"))?;
+        u64::from_str_radix(hex, 16).ok().map(Self)
+    }
+
+    /// Short labels for the reasons that limit work, worst first. Idle is
+    /// the card having nothing to do and the display clock is a setting for
+    /// the monitor, so neither is shown: neither slows a token down.
+    pub fn labels(self) -> Vec<(&'static str, ReasonLevel)> {
+        let mut out = Vec::new();
+        if self.has(Self::HW_THERMAL) {
+            out.push(("THERM", ReasonLevel::Severe));
+        }
+        if self.has(Self::HW_POWER_BRAKE) {
+            out.push(("BRAKE", ReasonLevel::Severe));
+        }
+        // HW_SLOWDOWN is the umbrella bit the two above also raise; named on
+        // its own only when neither explains it.
+        if self.has(Self::HW_SLOWDOWN) && !self.has(Self::HW_THERMAL | Self::HW_POWER_BRAKE) {
+            out.push(("HW", ReasonLevel::Severe));
+        }
+        if self.has(Self::SW_THERMAL) && !self.has(Self::HW_THERMAL) {
+            out.push(("THERM", ReasonLevel::Warn));
+        }
+        if self.has(Self::SW_POWER_CAP) {
+            out.push(("PWR", ReasonLevel::Warn));
+        }
+        if self.has(Self::SYNC_BOOST) {
+            out.push(("SYNC", ReasonLevel::Info));
+        }
+        if self.has(Self::APP_CLOCKS) {
+            out.push(("APP", ReasonLevel::Info));
+        }
+        out
+    }
 }
 
 impl GpuStats {
@@ -99,6 +186,18 @@ impl GpuStats {
     }
 }
 
+/// Theoretical peak memory bandwidth in GB/s from the bus width (bits) and
+/// the maximum memory clock (MHz) as NVML reports them. NVML's memory clock
+/// is half the data rate on every generation, GDDR5 through HBM3 (a GTX 1070
+/// reads 4004 MHz for 8 Gbps GDDR5, a P100 715 MHz for 1.43 Gbps HBM2), so
+/// one formula holds: bytes per transfer × transfers per second.
+pub fn peak_mem_bandwidth_gb_s(bus_width_bits: u32, mem_clock_max_mhz: u32) -> Option<f32> {
+    if bus_width_bits == 0 || mem_clock_max_mhz == 0 {
+        return None;
+    }
+    Some(bus_width_bits as f32 / 8.0 * mem_clock_max_mhz as f32 * 2.0 / 1000.0)
+}
+
 /// One poll: the stats, or the reason no supported GPU backend produced data.
 pub type GpuSample = Result<Vec<GpuStats>, String>;
 
@@ -138,32 +237,74 @@ pub struct AmdDevice {
 
 const NVIDIA_QUERY: &str = "--query-gpu=index,name,memory.total,memory.used,memory.free,utilization.gpu,utilization.memory,power.draw,power.limit,temperature.gpu,clocks.sm,clocks.max.sm,clocks.mem,fan.speed,pcie.link.gen.current,pcie.link.width.current";
 
-/// `temperature.memory` as an extra trailing column: the one memory-temperature
-/// field NVIDIA exposes to a CLI (NVML's field-value 82 on the in-process
-/// path). R465+ drivers know it; older ones reject the whole `--query-gpu`,
-/// so `nvidia_csv` settles on the base list once that is shown to be the
-/// reason, rather than losing the GPU panel.
-const NVIDIA_QUERY_MEM_FIELD: &str = ",temperature.memory";
+/// Optional trailing columns, asked for after the base list. A driver that
+/// does not know one field rejects the whole `--query-gpu`, and an error here
+/// would drop the GPU panel, so `nvidia_csv` steps down this list, longest
+/// query first, until the driver takes one.
+///
+/// - `temperature.memory`: the one memory-temperature field NVIDIA exposes to
+///   a CLI (NVML's field-value 82 on the in-process path); R465+.
+/// - `clocks_event_reasons.active`: why the clocks are down, as a hex
+///   bitmask. Older drivers know it only as `clocks_throttle_reasons.active`,
+///   a spelling current ones still accept (580 does); that one also
+///   predates `temperature.memory`, so a pre-R465 driver keeps it.
+pub struct SmiExtras {
+    query: &'static str,
+    /// Column of the memory temperature, when asked for.
+    mem_temp: Option<usize>,
+    /// Column of the clocks-event reasons, when asked for.
+    reasons: Option<usize>,
+}
 
-/// nvidia-smi's CSV, with the memory temperature column while the driver
-/// takes it. `no_mem_temp` is set only when the base query answers where the
-/// longer one just failed: that pair is what an unknown field looks like. A
-/// failure of both is nvidia-smi itself failing, which it does now and then on
-/// a busy box, and must not cost the column for the rest of the session.
+const NVIDIA_EXTRAS: &[SmiExtras] = &[
+    SmiExtras {
+        query: ",temperature.memory,clocks_event_reasons.active",
+        mem_temp: Some(16),
+        reasons: Some(17),
+    },
+    SmiExtras {
+        query: ",temperature.memory,clocks_throttle_reasons.active",
+        mem_temp: Some(16),
+        reasons: Some(17),
+    },
+    SmiExtras {
+        query: ",clocks_throttle_reasons.active",
+        mem_temp: None,
+        reasons: Some(16),
+    },
+    NO_EXTRAS,
+];
+
+/// The base list alone (also xpu-smi's layout).
+const NO_EXTRAS: SmiExtras = SmiExtras {
+    query: "",
+    mem_temp: None,
+    reasons: None,
+};
+
+/// nvidia-smi's CSV with the longest column list the driver takes, and the
+/// layout it came back in. `rung` (an index into `NVIDIA_EXTRAS`) moves one
+/// step down only when the base query answers where the longer one just
+/// failed: that pair is what an unknown field looks like. A failure of both
+/// is nvidia-smi itself failing, which it does now and then on a busy box,
+/// and must not cost a column for the rest of the session.
 fn nvidia_csv(
-    no_mem_temp: &std::sync::atomic::AtomicBool,
+    rung: &std::sync::atomic::AtomicUsize,
     run: impl Fn(&str) -> Result<String, String>,
-) -> Result<String, String> {
+) -> Result<(String, &'static SmiExtras), String> {
     use std::sync::atomic::Ordering;
-    if no_mem_temp.load(Ordering::Relaxed) {
-        return run(NVIDIA_QUERY);
+    let base = NVIDIA_EXTRAS.len() - 1;
+    let at = rung.load(Ordering::Relaxed).min(base);
+    let extras = &NVIDIA_EXTRAS[at];
+    if let Ok(out) = run(&format!("{NVIDIA_QUERY}{}", extras.query)) {
+        return Ok((out, extras));
     }
-    if let Ok(out) = run(&format!("{NVIDIA_QUERY}{NVIDIA_QUERY_MEM_FIELD}")) {
-        return Ok(out);
+    if at == base {
+        return run(NVIDIA_QUERY).map(|out| (out, &NVIDIA_EXTRAS[base]));
     }
     let out = run(NVIDIA_QUERY)?;
-    no_mem_temp.store(true, Ordering::Relaxed);
-    Ok(out)
+    rung.store(at + 1, Ordering::Relaxed);
+    Ok((out, &NVIDIA_EXTRAS[base]))
 }
 
 /// xpu-smi spelling of the same fields, in the same order as
@@ -200,13 +341,14 @@ impl GpuMonitor {
 
     /// Parse nvidia-smi CSV output into GpuStats (fallback if NVML is not available).
     ///
-    /// Asks for `temperature.memory` as well, until the driver is shown not
-    /// to know the field: a pre-R465 nvidia-smi rejects the whole query over
-    /// it, and an error here would drop the GPU panel entirely.
+    /// Asks for the memory temperature and the clocks-event reasons as well,
+    /// until the driver is shown not to know a field: an older nvidia-smi
+    /// rejects the whole query over it, and an error here would drop the GPU
+    /// panel entirely.
     pub fn collect_nvidia() -> Result<Vec<GpuStats>, String> {
-        static NO_MEM_TEMP: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        nvidia_csv(&NO_MEM_TEMP, |query| run_smi("nvidia-smi", query)).map(|out| parse_csv(&out))
+        static RUNG: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        nvidia_csv(&RUNG, |query| run_smi("nvidia-smi", query))
+            .map(|(out, extras)| parse_csv(&out, extras))
     }
 
     /// Intel GPUs via xpu-smi, same field order as NVIDIA_QUERY.
@@ -319,7 +461,7 @@ fn xe_fan_rpm_raw(hwmon_root: &Path) -> Vec<u32> {
 /// the SM has left its idle DVFS floor, reconstruct utilization from the
 /// clock ratio — an SM only boosts above the idle P-state with work queued.
 fn parse_xpu_csv(text: &str) -> Vec<GpuStats> {
-    let mut gpus = parse_csv(text);
+    let mut gpus = parse_csv(text, &NO_EXTRAS);
     let fan_map = xe_fan_rpm_by_index();
     // An xe card without hwmon (or one xpu-smi skips) would shift every
     // index; show no fan rather than another card's.
@@ -1169,6 +1311,9 @@ fn apple_stats(name: &str, cores: u32, m: MacmonSample) -> GpuStats {
         power_max_watts: apple_power_max(),
         temperature: (m.temp > 0.0).then_some(m.temp),
         temperature_memory: None,
+        clock_reasons: None,
+        temperature_limit: None,
+        temperature_memory_limit: None,
         clock_sm_mhz: m.freq_mhz,
         clock_sm_max_mhz: 0,
         clock_mem_mhz: 0,
@@ -1183,6 +1328,8 @@ fn apple_stats(name: &str, cores: u32, m: MacmonSample) -> GpuStats {
         unified_measured: false,
         pcie_gen: 0,
         pcie_width: 0,
+        // Unified: the pipeline's VRAM stage is the pool fill here.
+        mem_peak_gb_s: None,
     }
 }
 
@@ -1337,7 +1484,7 @@ pub fn print_gpu_once(as_json: bool) -> bool {
         for g in &stats {
             println!(
                 "gpu idx={} name='{}' util_gpu={:.1}% power={:.3}W/ceil{:.0}W temp={:?} \
-                 mem_temp={:?} clk={}MHz fan={:?}/{:?} mem={}/{}MB unified={}",
+                 mem_temp={:?} clk={}MHz clock_reasons={} fan={:?}/{:?} mem={}/{}MB mem_bw_peak={:?}GB/s unified={}",
                 g.index,
                 g.name,
                 g.utilization_gpu,
@@ -1346,10 +1493,13 @@ pub fn print_gpu_once(as_json: bool) -> bool {
                 g.temperature,
                 g.temperature_memory,
                 g.clock_sm_mhz,
+                g.clock_reasons
+                    .map_or("n/a".to_string(), |r| format!("{:#x}", r.0)),
                 g.fan_pct,
                 g.fan_rpm,
                 g.mem_used_mb,
                 g.mem_total_mb,
+                g.mem_peak_gb_s,
                 g.unified,
             );
         }
@@ -1473,6 +1623,9 @@ fn amd_stats(index: u32, device: &AmdDevice) -> GpuStats {
         power_max_watts,
         temperature,
         temperature_memory: None,
+        clock_reasons: None,
+        temperature_limit: None,
+        temperature_memory_limit: None,
         clock_sm_mhz,
         clock_sm_max_mhz,
         clock_mem_mhz,
@@ -1483,6 +1636,10 @@ fn amd_stats(index: u32, device: &AmdDevice) -> GpuStats {
         unified_measured: apu,
         pcie_gen,
         pcie_width,
+        // sysfs carries the memory clock (`pp_dpm_mclk`) but not the bus
+        // width, which only the AMDGPU_INFO ioctl reports; and the clock's
+        // data-rate multiplier differs between GDDR and HBM generations.
+        mem_peak_gb_s: None,
     }
 }
 
@@ -1594,7 +1751,9 @@ fn parse_pcie_gen(value: &str) -> Option<u32> {
     })
 }
 
-pub fn parse_csv(stdout: &str) -> Vec<GpuStats> {
+/// nvidia-smi-style CSV rows: the base columns, then whatever `extras` says
+/// was asked for after them.
+pub fn parse_csv(stdout: &str, extras: &SmiExtras) -> Vec<GpuStats> {
     let mut stats = Vec::new();
     for line in stdout.lines() {
         let line = line.trim();
@@ -1630,9 +1789,19 @@ pub fn parse_csv(stdout: &str) -> Vec<GpuStats> {
             unified_measured: false,
             pcie_gen: int(14) as u32,
             pcie_width: int(15) as u32,
-            // Column 17: only the NVIDIA query asks for it. N/A on cards
-            // without the sensor, absent for xpu-smi (16 columns).
-            temperature_memory: opt(16),
+            // nvidia-smi has a `clocks.max.memory` column but no bus width
+            // (nor does `nvidia-smi -q`), so the peak needs NVML.
+            mem_peak_gb_s: None,
+            // N/A on cards without the sensor; not asked of an old driver
+            // or of xpu-smi.
+            temperature_memory: extras.mem_temp.and_then(opt),
+            // `[N/A]` / `Not Supported` read as unknown, not as "no reason".
+            clock_reasons: extras
+                .reasons
+                .and_then(|i| parts.get(i))
+                .and_then(|c| ClockReasons::parse_hex(c)),
+            temperature_limit: None,
+            temperature_memory_limit: None,
         });
     }
     stats
@@ -1718,7 +1887,16 @@ pub struct DemoGpu {
     mem_temp: f32,
     clock: f32,
     mem_used: f32,
+    /// Steps taken, for the occasional VRAM squeeze below.
+    ticks: u64,
 }
+
+/// Demo steps (200 ms each) between VRAM squeezes on the second card, and
+/// the stretch of each period the squeeze lasts: about 30 s from the 50 s
+/// mark of every four minutes, so `--demo` shows the VRAM alert without
+/// raising it all the time.
+const DEMO_SQUEEZE_PERIOD: u64 = 1200;
+const DEMO_SQUEEZE: std::ops::Range<u64> = 250..400;
 
 impl DemoGpu {
     pub fn new(index: usize) -> Self {
@@ -1731,6 +1909,7 @@ impl DemoGpu {
             mem_temp: 47.0,
             clock: 0.5,
             mem_used: 0.0,
+            ticks: 0,
         }
     }
 
@@ -1757,11 +1936,25 @@ impl DemoGpu {
         self.temp += (target_temp - self.temp) * 0.03 + jitter(&mut self.seed, 0.3);
         let target_mem_temp = 46.0 + 40.0 * self.power;
         self.mem_temp += (target_mem_temp - self.mem_temp) * 0.03 + jitter(&mut self.seed, 0.3);
-        let target_clock = if self.util > 8.0 { 0.97 } else { 0.35 };
+        // Pressed against its power limit, the driver's power cap shaves the
+        // clock: the state the clocks-event badge exists to explain.
+        let power_capped = self.power > 0.93;
+        let target_clock = if power_capped {
+            0.86
+        } else if self.util > 8.0 {
+            0.97
+        } else {
+            0.35
+        };
         self.clock += (target_clock - self.clock) * 0.4 + jitter(&mut self.seed, 0.02);
         self.clock = self.clock.clamp(0.1, 1.0);
         let weights = mem_total as f32 * 0.68;
-        let target_mem = weights + mem_total as f32 * 0.22 * load.max(0.15);
+        let mut target_mem = weights + mem_total as f32 * 0.22 * load.max(0.15);
+        // Now and then the P100 fills up, as a long prompt's KV cache would.
+        self.ticks += 1;
+        if self.index == 1 && DEMO_SQUEEZE.contains(&(self.ticks % DEMO_SQUEEZE_PERIOD)) {
+            target_mem = mem_total as f32 * 0.97;
+        }
         self.mem_used += (target_mem - self.mem_used) * 0.2;
         let mem_used_mb = self.mem_used.clamp(0.0, mem_total as f32) as u64;
         GpuStats {
@@ -1785,6 +1978,19 @@ impl DemoGpu {
             } else {
                 Some(self.mem_temp)
             },
+            clock_reasons: Some(ClockReasons(
+                if power_capped {
+                    ClockReasons::SW_POWER_CAP
+                } else {
+                    0
+                } | if self.util < 8.0 {
+                    ClockReasons::GPU_IDLE
+                } else {
+                    0
+                },
+            )),
+            temperature_limit: None,
+            temperature_memory_limit: None,
             clock_sm_mhz: (self.clock * cmax as f32) as u32,
             clock_sm_max_mhz: cmax,
             clock_mem_mhz: if self.index == 1 { 715 } else { 3802 },
@@ -1799,6 +2005,13 @@ impl DemoGpu {
             unified_measured: false,
             pcie_gen: 3,
             pcie_width: if self.index == 0 { 8 } else { 16 },
+            // What NVML reports for the cards named above: bus width and
+            // maximum memory clock.
+            mem_peak_gb_s: match self.index {
+                0 => peak_mem_bandwidth_gb_s(256, 4004),
+                1 => peak_mem_bandwidth_gb_s(3072, 715),
+                _ => peak_mem_bandwidth_gb_s(5120, 1593),
+            },
         }
     }
 }
@@ -1811,7 +2024,7 @@ mod tests {
     fn parse_real_nvidia_smi_line() {
         let csv = "0, NVIDIA GeForce GTX 1070, 8192, 7885, 307, 26, 12, 148.04, 151.00, 61, 1873, 1911, 3802, 29, 3, 8\n\
                    1, Tesla P100-PCIE-12GB, 12288, 11799, 489, 32, 5, 46.44, 250.00, 53, 1189, 1328, 715, [N/A], 3, 16\n";
-        let s = parse_csv(csv);
+        let s = parse_csv(csv, &NO_EXTRAS);
         assert_eq!(s.len(), 2);
         assert_eq!(s[0].clock_sm_mhz, 1873);
         assert_eq!(s[0].clock_sm_max_mhz, 1911);
@@ -1820,10 +2033,11 @@ mod tests {
         assert_eq!(s[1].fan_pct, None);
         assert_eq!(s[1].short_name(), "P100");
         assert_eq!(s[0].short_name(), "GTX 1070");
-        // 16-column rows (base query after the mem-temp latch, or xpu-smi):
-        // no memory temperature, not a zero.
+        // 16-column rows (the base query, or xpu-smi): no memory
+        // temperature and no clocks-event reasons, not zeros.
         assert_eq!(s[0].temperature_memory, None);
         assert_eq!(s[1].temperature_memory, None);
+        assert_eq!(s[0].clock_reasons, None);
         let amd = GpuStats {
             name: "Advanced Micro Devices, Inc. [AMD/ATI] Navi 31 [Radeon RX 7900 XTX]".into(),
             ..Default::default()
@@ -1832,38 +2046,81 @@ mod tests {
     }
 
     #[test]
-    fn the_memory_temp_column_is_given_up_only_when_the_base_query_answers() {
+    fn an_optional_column_is_given_up_only_when_the_base_query_answers() {
         use std::cell::RefCell;
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let asked = RefCell::new(Vec::new());
-        // `long` / `base`: what nvidia-smi says to the query with and
-        // without the extra column.
-        let run = |long: Result<&str, &str>, base: Result<&str, &str>, off: &AtomicBool| {
+        // `known`: the extra fields this driver takes. nvidia-smi answers a
+        // query only if it knows every field in it.
+        let run = |known: &[&str], up: bool, rung: &AtomicUsize| {
             asked.borrow_mut().clear();
-            nvidia_csv(off, |query| {
-                let with_column = query.ends_with(NVIDIA_QUERY_MEM_FIELD);
-                asked.borrow_mut().push(with_column);
-                let answer = if with_column { long } else { base };
-                answer.map(str::to_string).map_err(str::to_string)
+            nvidia_csv(rung, |query| {
+                asked.borrow_mut().push(query.to_string());
+                let extras = &query[NVIDIA_QUERY.len()..];
+                let ok = up && extras.split(',').skip(1).all(|f| known.contains(&f));
+                if ok {
+                    Ok(format!("{} extras", extras.split(',').count() - 1))
+                } else if up {
+                    Err(format!("Field \"{extras}\" is not a valid field to query."))
+                } else {
+                    Err("Failed to initialize NVML: Unknown Error".to_string())
+                }
             })
+            .map(|(out, extras)| (out, extras.reasons, extras.mem_temp))
         };
-        let unknown = "Field \"temperature.memory\" is not a valid field to query.";
-        let down = "Failed to initialize NVML: Unknown Error";
+        let current = ["temperature.memory", "clocks_event_reasons.active"];
+        let r470 = ["temperature.memory", "clocks_throttle_reasons.active"];
+        let r450 = ["clocks_throttle_reasons.active"];
 
-        // nvidia-smi failing altogether says nothing about the column, and
+        // nvidia-smi failing altogether says nothing about the columns, and
         // the error shown is the base query's.
-        let off = AtomicBool::new(false);
-        assert_eq!(run(Err(down), Err(down), &off), Err(down.to_string()));
-        assert!(!off.load(Ordering::Relaxed));
-        assert_eq!(run(Ok("long"), Ok("base"), &off), Ok("long".to_string()));
-        assert_eq!(*asked.borrow(), [true]);
+        let rung = AtomicUsize::new(0);
+        assert!(run(&current, false, &rung).is_err());
+        assert_eq!(rung.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            run(&current, true, &rung),
+            Ok(("2 extras".to_string(), Some(17), Some(16)))
+        );
+        assert_eq!(asked.borrow().len(), 1);
 
-        // An old driver: the long query is refused, the base one answers,
-        // and from then on only the base one is asked.
-        assert_eq!(run(Err(unknown), Ok("base"), &off), Ok("base".to_string()));
-        assert!(off.load(Ordering::Relaxed));
-        assert_eq!(run(Err(unknown), Ok("base"), &off), Ok("base".to_string()));
-        assert_eq!(*asked.borrow(), [false]);
+        // A driver that knows only the old reasons spelling: one poll is
+        // answered by the base query, the next by the second rung.
+        let rung = AtomicUsize::new(0);
+        assert_eq!(
+            run(&r470, true, &rung),
+            Ok(("0 extras".to_string(), None, None))
+        );
+        assert_eq!(
+            run(&r470, true, &rung),
+            Ok(("2 extras".to_string(), Some(17), Some(16)))
+        );
+        assert_eq!(rung.load(Ordering::Relaxed), 1);
+
+        // Pre-R465: no memory temperature, but the reasons in column 17.
+        let rung = AtomicUsize::new(0);
+        for _ in 0..3 {
+            let _ = run(&r450, true, &rung);
+        }
+        assert_eq!(
+            run(&r450, true, &rung),
+            Ok(("1 extras".to_string(), Some(16), None))
+        );
+        assert_eq!(
+            *asked.borrow(),
+            [format!("{NVIDIA_QUERY},clocks_throttle_reasons.active")]
+        );
+
+        // Neither: the base query, once per poll and never below it.
+        let rung = AtomicUsize::new(0);
+        for _ in 0..5 {
+            let _ = run(&[], true, &rung);
+        }
+        assert_eq!(rung.load(Ordering::Relaxed), NVIDIA_EXTRAS.len() - 1);
+        assert_eq!(
+            run(&[], true, &rung),
+            Ok(("0 extras".to_string(), None, None))
+        );
+        assert_eq!(*asked.borrow(), [NVIDIA_QUERY.to_string()]);
     }
 
     #[test]
@@ -1872,11 +2129,110 @@ mod tests {
         // an HBM card, N/A on a part without the sensor.
         let csv = "0, NVIDIA A100-SXM4-80GB, 81920, 79112, 2808, 99, 83, 388.41, 400.00, 61, 1410, 1410, 1215, N/A, 3, 16, 67\n\
                    1, NVIDIA GeForce GTX 1070, 8192, 7885, 307, 26, 12, 148.04, 151.00, 61, 1873, 1911, 3802, 29, 3, 8, N/A\n";
-        let s = parse_csv(csv);
+        let s = parse_csv(csv, &NVIDIA_EXTRAS[0]);
         assert_eq!(s.len(), 2);
         assert_eq!(s[0].temperature_memory, Some(67.0));
         assert_eq!(s[1].temperature_memory, None);
         assert_eq!(s[1].fan_pct, Some(29.0)); // the extra column shifts nothing
+                                              // Rows cut short of the reasons column read as unknown.
+        assert_eq!(s[0].clock_reasons, None);
+    }
+
+    #[test]
+    fn parse_nvidia_line_with_clock_reasons() {
+        // Rows 0 and 1 captured on a Tesla P100 + V100 (driver 580.178.04,
+        // the current spelling); the rest are made up in the same format: a
+        // power-capped card, a thermally slowed one, and two that say nothing.
+        let csv = "0, Tesla P100-PCIE-12GB, 12288, 11657, 531, 0, 0, 32.07, 250.00, 45, 1189, 1328, 715, [N/A], 3, 8, N/A, 0x0000000000000000\n\
+                   1, Tesla V100-PCIE-16GB, 16384, 15838, 307, 0, 0, 44.23, 250.00, 58, 1245, 1380, 877, [N/A], 3, 16, 57, 0x0000000000000000\n\
+                   2, Tesla V100-PCIE-16GB, 16384, 15838, 307, 99, 71, 249.10, 250.00, 66, 1245, 1380, 877, [N/A], 3, 16, 75, 0x0000000000000004\n\
+                   3, NVIDIA GeForce RTX 3090, 24576, 23000, 1576, 99, 80, 340.00, 350.00, 91, 1200, 2100, 9751, 100, 4, 16, [N/A], 0x0000000000000068\n\
+                   4, NVIDIA GeForce GTX 1070, 8192, 7885, 307, 26, 12, 148.04, 151.00, 61, 1873, 1911, 3802, 29, 3, 8, [N/A], [N/A]\n\
+                   5, NVIDIA GeForce GTX 1070, 8192, 7885, 307, 26, 12, 148.04, 151.00, 61, 1873, 1911, 3802, 29, 3, 8, [N/A], Not Supported\n";
+        let s = parse_csv(csv, &NVIDIA_EXTRAS[0]);
+        assert_eq!(s.len(), 6);
+        assert_eq!(s[0].clock_reasons, Some(ClockReasons(0)));
+        assert_eq!(s[1].clock_reasons, Some(ClockReasons(0)));
+        assert_eq!(s[1].temperature_memory, Some(57.0));
+        assert_eq!(
+            s[2].clock_reasons,
+            Some(ClockReasons(ClockReasons::SW_POWER_CAP))
+        );
+        assert_eq!(s[3].clock_reasons, Some(ClockReasons(0x68)));
+        assert_eq!(s[4].clock_reasons, None);
+        assert_eq!(s[5].clock_reasons, None);
+
+        // Pre-R465 layout: the reasons straight after the base columns.
+        let old = "0, NVIDIA GeForce GTX 1070, 8192, 7885, 307, 26, 12, 148.04, 151.00, 61, 1873, 1911, 3802, 29, 3, 8, 0x0000000000000001\n";
+        let s = parse_csv(old, &NVIDIA_EXTRAS[2]);
+        assert_eq!(
+            s[0].clock_reasons,
+            Some(ClockReasons(ClockReasons::GPU_IDLE))
+        );
+        assert_eq!(s[0].temperature_memory, None);
+    }
+
+    #[test]
+    fn clock_reason_hex_cells() {
+        assert_eq!(
+            ClockReasons::parse_hex("0x0000000000000000"),
+            Some(ClockReasons(0))
+        );
+        assert_eq!(
+            ClockReasons::parse_hex(" 0x0000000000000104 "),
+            Some(ClockReasons(0x104))
+        );
+        assert_eq!(ClockReasons::parse_hex("0XAB"), Some(ClockReasons(0xab)));
+        assert_eq!(ClockReasons::parse_hex("[N/A]"), None);
+        assert_eq!(ClockReasons::parse_hex("N/A"), None);
+        assert_eq!(ClockReasons::parse_hex("Not Supported"), None);
+        assert_eq!(ClockReasons::parse_hex("0xzz"), None);
+        assert_eq!(ClockReasons::parse_hex(""), None);
+    }
+
+    #[test]
+    fn clock_reason_labels_name_what_limits_work() {
+        let labels = |bits: u64| ClockReasons(bits).labels();
+        // Idle and the display clock limit no work: no label at all.
+        assert!(labels(0).is_empty());
+        assert!(labels(ClockReasons::GPU_IDLE | ClockReasons::DISPLAY_CLOCK).is_empty());
+        assert_eq!(
+            labels(ClockReasons::SW_POWER_CAP),
+            [("PWR", ReasonLevel::Warn)]
+        );
+        assert_eq!(
+            labels(ClockReasons::SW_THERMAL),
+            [("THERM", ReasonLevel::Warn)]
+        );
+        // A hardware thermal slowdown raises the umbrella HW bit too, and the
+        // software thermal cap with it: named once, as the worse.
+        assert_eq!(
+            labels(ClockReasons::HW_THERMAL | ClockReasons::HW_SLOWDOWN | ClockReasons::SW_THERMAL),
+            [("THERM", ReasonLevel::Severe)]
+        );
+        assert_eq!(
+            labels(ClockReasons::HW_POWER_BRAKE | ClockReasons::HW_SLOWDOWN),
+            [("BRAKE", ReasonLevel::Severe)]
+        );
+        assert_eq!(
+            labels(ClockReasons::HW_SLOWDOWN),
+            [("HW", ReasonLevel::Severe)]
+        );
+        // Worst first.
+        assert_eq!(
+            labels(
+                ClockReasons::APP_CLOCKS | ClockReasons::SW_POWER_CAP | ClockReasons::HW_THERMAL
+            ),
+            [
+                ("THERM", ReasonLevel::Severe),
+                ("PWR", ReasonLevel::Warn),
+                ("APP", ReasonLevel::Info)
+            ]
+        );
+        assert_eq!(
+            labels(ClockReasons::SYNC_BOOST),
+            [("SYNC", ReasonLevel::Info)]
+        );
     }
 
     #[test]
@@ -2017,7 +2373,7 @@ mod tests {
     fn parse_xpu_smi_error_line_is_skipped() {
         // xpu-smi prints [Error] lines on stdout for bad field sets;
         // those rows must not become GPUs.
-        assert!(parse_csv("[Error] No valid metrics matched: 'x'\n").is_empty());
+        assert!(parse_csv("[Error] No valid metrics matched: 'x'\n", &NO_EXTRAS).is_empty());
     }
 
     #[test]
@@ -2030,6 +2386,21 @@ mod tests {
             assert!(s.power_watts <= s.power_max_watts);
         }
         assert!(g.step(0.9).utilization_gpu > 50.0);
+    }
+
+    #[test]
+    fn peak_bandwidth_from_bus_width_and_memory_clock() {
+        // NVML's bus width and maximum memory clock for each card, against
+        // the datasheet figure: GDDR5, GDDR6X and three HBM generations.
+        let gb_s = |bits, mhz| peak_mem_bandwidth_gb_s(bits, mhz).unwrap().round();
+        assert_eq!(gb_s(256, 4004), 256.0); // GTX 1070
+        assert_eq!(gb_s(4096, 715), 732.0); // Tesla P100 16 GB
+        assert_eq!(gb_s(3072, 715), 549.0); // Tesla P100 12 GB
+        assert_eq!(gb_s(4096, 877), 898.0); // Tesla V100 PCIe (900)
+        assert_eq!(gb_s(384, 9751), 936.0); // RTX 3090
+        assert_eq!(gb_s(5120, 1215), 1555.0); // A100-SXM4-40GB
+        assert_eq!(peak_mem_bandwidth_gb_s(0, 4004), None);
+        assert_eq!(peak_mem_bandwidth_gb_s(256, 0), None);
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! `--log-db`: append samples and finished requests to a SQLite file so a
 //! session can be queried after the dashboard is closed.
 
+use crate::bench::{BenchResult, BenchSession, RunRecord};
 use crate::gpu::GpuStats;
 use crate::model_detect::DetectedModel;
 use crate::perf::PerfTracker;
@@ -24,6 +25,15 @@ CREATE TABLE IF NOT EXISTS requests (
     prompt_tokens INTEGER NOT NULL, cached_tokens INTEGER NOT NULL, decoded INTEGER NOT NULL,
     ttft_s REAL, duration_s REAL NOT NULL,
     avg_prefill_tps REAL NOT NULL, avg_decode_tps REAL NOT NULL, peak_decode_tps REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS bench_runs (
+    run_id INTEGER PRIMARY KEY, tag TEXT NOT NULL, started_ts REAL NOT NULL,
+    model TEXT NOT NULL, engine TEXT NOT NULL, gpus TEXT NOT NULL, settings TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS bench_results (
+    run_id INTEGER NOT NULL, ctx_target INTEGER NOT NULL, rep INTEGER NOT NULL,
+    prompt_tokens INTEGER NOT NULL, prompt_measured INTEGER NOT NULL, generated INTEGER NOT NULL,
+    ttft_s REAL, duration_s REAL NOT NULL, prefill_tps REAL, decode_tps REAL,
+    server_prefill_tps REAL, server_decode_tps REAL, dash_prefill_tps REAL, dash_decode_tps REAL,
+    error TEXT);
 ";
 
 /// One row per model and per GPU each `every`; one row per finished request.
@@ -37,9 +47,11 @@ pub struct DbLog {
     max_bytes: u64,
 }
 
+/// The tables the size cap trims. The bench tables are left out: a few rows
+/// per run, and a baseline dropped to make room for samples is lost for good.
 const TABLES: [&str; 3] = ["model_samples", "gpu_samples", "requests"];
 
-fn unix_now() -> f64 {
+pub(crate) fn unix_now() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -216,6 +228,122 @@ impl DbLog {
     }
 }
 
+impl DbLog {
+    /// A new `bench_runs` row; its id keys the results.
+    pub fn bench_run(&self, s: &BenchSession) -> rusqlite::Result<i64> {
+        self.conn.execute(
+            "INSERT INTO bench_runs (tag, started_ts, model, engine, gpus, settings) \
+             VALUES (?1,?2,?3,?4,?5,?6)",
+            params![s.tag, s.started_ts, s.model, s.engine, s.gpus, s.settings],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn bench_result(&self, run_id: i64, r: &BenchResult) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO bench_results (run_id, ctx_target, rep, prompt_tokens, \
+             prompt_measured, generated, ttft_s, duration_s, prefill_tps, decode_tps, \
+             server_prefill_tps, server_decode_tps, dash_prefill_tps, dash_decode_tps, error) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            params![
+                run_id,
+                r.ctx as i64,
+                r.rep as i64,
+                r.prompt_tokens as i64,
+                r.prompt_measured,
+                r.generated as i64,
+                r.ttft_s,
+                r.duration_s,
+                r.prefill_tps,
+                r.decode_tps,
+                r.server_prefill_tps,
+                r.server_decode_tps,
+                r.dash_prefill_tps,
+                r.dash_decode_tps,
+                r.error
+            ],
+        )?;
+        Ok(())
+    }
+}
+
+/// Every logged benchmark run with its results, for `--bench-report`. A
+/// file from before benchmarks existed has no runs, not an error.
+pub fn bench_runs(path: &Path) -> Result<Vec<RunRecord>, String> {
+    let conn = open_read_only(path)?;
+    let err = |e: rusqlite::Error| format!("{}: {e}", path.display());
+    let has_table: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'bench_results'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(err)?;
+    if has_table == 0 {
+        return Ok(Vec::new());
+    }
+    let mut runs: Vec<RunRecord> = conn
+        .prepare(
+            "SELECT run_id, tag, started_ts, model, engine, gpus, settings FROM bench_runs \
+             ORDER BY run_id",
+        )
+        .and_then(|mut q| {
+            q.query_map([], |r| {
+                Ok(RunRecord {
+                    run_id: r.get(0)?,
+                    tag: r.get(1)?,
+                    started_ts: r.get(2)?,
+                    model: r.get(3)?,
+                    engine: r.get(4)?,
+                    gpus: r.get(5)?,
+                    settings: r.get(6)?,
+                    results: Vec::new(),
+                })
+            })?
+            .collect()
+        })
+        .map_err(err)?;
+    let results: Vec<(i64, BenchResult)> = conn
+        .prepare(
+            "SELECT run_id, ctx_target, rep, prompt_tokens, prompt_measured, generated, ttft_s, \
+             duration_s, prefill_tps, decode_tps, server_prefill_tps, server_decode_tps, \
+             dash_prefill_tps, dash_decode_tps, error FROM bench_results ORDER BY rowid",
+        )
+        .and_then(|mut q| {
+            q.query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    BenchResult {
+                        ctx: r.get::<_, i64>(1)? as usize,
+                        rep: r.get::<_, i64>(2)? as usize,
+                        prompt_tokens: r.get::<_, i64>(3)? as usize,
+                        prompt_measured: r.get(4)?,
+                        generated: r.get::<_, i64>(5)? as usize,
+                        ttft_s: r.get(6)?,
+                        duration_s: r.get(7)?,
+                        prefill_tps: r.get(8)?,
+                        decode_tps: r.get(9)?,
+                        server_prefill_tps: r.get(10)?,
+                        server_decode_tps: r.get(11)?,
+                        dash_prefill_tps: r.get(12)?,
+                        dash_decode_tps: r.get(13)?,
+                        error: r.get(14)?,
+                    },
+                ))
+            })?
+            .collect()
+        })
+        .map_err(err)?;
+    for (id, r) in results {
+        if let Some(run) = runs.iter_mut().find(|run| run.run_id == id) {
+            run.results.push(r);
+        }
+    }
+    // A run interrupted before its first result says nothing to compare.
+    runs.retain(|r| !r.results.is_empty());
+    Ok(runs)
+}
+
 /// Per-model totals over every logged request.
 pub struct ModelTotals {
     pub model: String,
@@ -248,7 +376,7 @@ pub struct LogSummary {
     pub recent: Vec<LoggedRequest>,
 }
 
-fn open_read_only(path: &Path) -> Result<Connection, String> {
+pub(crate) fn open_read_only(path: &Path) -> Result<Connection, String> {
     let err = |e: rusqlite::Error| format!("{}: {e}", path.display());
     // Open fails on a missing file instead of creating it.
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
@@ -260,7 +388,38 @@ fn open_read_only(path: &Path) -> Result<Connection, String> {
 /// Rows the context-speed screen (`c`) aims for per model.
 const CTX_ROWS: i64 = 12;
 /// Tokens per bucket of the one grouping query; screen rows merge these.
-const CTX_GRAIN: i64 = 256;
+pub(crate) const CTX_GRAIN: i64 = 256;
+/// The samples that measure decode speed: taken while the model was
+/// decoding and not also prefilling (a sample straddling the two reads a
+/// partly empty window).
+pub(crate) const DECODING: &str =
+    "processing = 1 AND decode_tps > 0 AND prefill_tps = 0 AND ctx_used > 0";
+
+/// Fine grains per screen row when grains `lo..=hi` are to fit in about
+/// `CTX_ROWS` rows.
+pub(crate) fn grains_per_row(lo: i64, hi: i64) -> i64 {
+    (hi - lo) / CTX_ROWS + 1
+}
+
+/// Merges `(grain, sum of tok/s, samples)`, ascending by grain, into rows of
+/// `per` grains counted from grain `lo`: `(first token, mean tok/s, samples)`.
+pub(crate) fn merge_grains(grains: &[(i64, f64, i64)], lo: i64, per: i64) -> Vec<(i64, f64, i64)> {
+    let mut rows: Vec<(i64, f64, i64)> = Vec::new();
+    for &(fine, sum, n) in grains {
+        let start = (lo + (fine - lo).div_euclid(per) * per) * CTX_GRAIN;
+        match rows.last_mut() {
+            Some(b) if b.0 == start => {
+                b.1 += sum;
+                b.2 += n;
+            }
+            _ => rows.push((start, sum, n)),
+        }
+    }
+    for b in &mut rows {
+        b.1 /= b.2 as f64;
+    }
+    rows
+}
 
 /// Mean decode rate against context length for one model.
 pub struct ContextSpeed {
@@ -282,8 +441,7 @@ pub fn context_speed(path: &Path) -> Result<Vec<ContextSpeed>, String> {
     let rows: Vec<(String, i64, f64, i64)> = conn
         .prepare(&format!(
             "SELECT model, ctx_used / {CTX_GRAIN}, SUM(decode_tps), COUNT(*) FROM model_samples \
-             WHERE processing = 1 AND decode_tps > 0 AND prefill_tps = 0 AND ctx_used > 0 \
-             GROUP BY 1, 2 ORDER BY 1, 2"
+             WHERE {DECODING} GROUP BY 1, 2 ORDER BY 1, 2"
         ))
         .and_then(|mut q| {
             q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
@@ -301,21 +459,9 @@ pub fn context_speed(path: &Path) -> Result<Vec<ContextSpeed>, String> {
         let group = &rows[i..end];
         i = end;
         let (lo, hi) = (group[0].1, group[group.len() - 1].1);
-        let per = (hi - lo) / CTX_ROWS + 1; // fine buckets per screen row
-        let mut buckets: Vec<(i64, f64, i64)> = Vec::new();
-        for &(_, fine, sum, n) in group {
-            let start = (lo + (fine - lo) / per * per) * CTX_GRAIN;
-            match buckets.last_mut() {
-                Some(b) if b.0 == start => {
-                    b.1 += sum;
-                    b.2 += n;
-                }
-                _ => buckets.push((start, sum, n)),
-            }
-        }
-        for b in &mut buckets {
-            b.1 /= b.2 as f64;
-        }
+        let per = grains_per_row(lo, hi);
+        let grains: Vec<(i64, f64, i64)> = group.iter().map(|g| (g.1, g.2, g.3)).collect();
+        let buckets = merge_grains(&grains, lo, per);
         out.push(ContextSpeed {
             model: group[0].0.clone(),
             samples: group.iter().map(|g| g.3).sum(),
@@ -567,5 +713,68 @@ mod tests {
         for ext in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
         }
+    }
+
+    #[test]
+    fn bench_runs_round_trip_and_an_old_file_has_none() {
+        let path = std::env::temp_dir().join(format!("llm-visuals-bench-{}", std::process::id()));
+        let cleanup = |p: &Path| {
+            for ext in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(format!("{}{ext}", p.display()));
+            }
+        };
+        cleanup(&path);
+        // A log file written before benchmarks existed.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE requests (ended_ts REAL);")
+                .unwrap();
+        }
+        assert!(bench_runs(&path).unwrap().is_empty());
+        cleanup(&path);
+
+        let log = DbLog::open(&path, Duration::ZERO, 0).unwrap();
+        let cfg = crate::bench::Config {
+            ctx: vec![512],
+            repeat: 2,
+            gen: 64,
+        };
+        let mut s = BenchSession::new("q4".into(), "m".into(), "llama.cpp".into(), cfg);
+        s.gpus = "RTX 3090".into();
+        s.settings = "ctx=512 repeat=2 gen=64".into();
+        let id = log.bench_run(&s).unwrap();
+        let ok = BenchResult {
+            ctx: 512,
+            rep: 1,
+            prompt_tokens: 514,
+            prompt_measured: true,
+            generated: 64,
+            ttft_s: Some(0.25),
+            duration_s: 1.7,
+            prefill_tps: Some(2056.0),
+            decode_tps: Some(43.2),
+            server_decode_tps: Some(44.0),
+            dash_decode_tps: Some(42.9),
+            ..Default::default()
+        };
+        let failed = BenchResult {
+            ctx: 512,
+            rep: 2,
+            error: Some("HTTP 500: boom".into()),
+            ..Default::default()
+        };
+        log.bench_result(id, &ok).unwrap();
+        log.bench_result(id, &failed).unwrap();
+        // A run with no results is left out of the report.
+        log.bench_run(&s).unwrap();
+        let runs = bench_runs(&path).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            (runs[0].run_id, runs[0].tag.as_str(), runs[0].gpus.as_str()),
+            (id, "q4", "RTX 3090")
+        );
+        assert_eq!(runs[0].results, vec![ok, failed]);
+        drop(log);
+        cleanup(&path);
     }
 }
