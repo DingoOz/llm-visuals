@@ -60,17 +60,21 @@ GPUs and the disk are shared.
 | `dblog.rs` | `--log-db` SQLite writer (on by default at the per-user data path) with a size cap |
 | `model_detect.rs` | finds inference processes via `nvidia-smi --query-compute-apps` and `/proc`, parses their command lines (model path, port, ctx size, tensor split, spec mode); returns every server found, best first, minus this process and idle daemons |
 | `vision.rs` | vision encoder detection and placement: llama.cpp projector flags and environment, the GPU runtime from `/proc/<pid>/maps`, and CUDA ordinal → host card via a `--cuda-bus-ids` child process that queries `libcuda` under the server's `CUDA_VISIBLE_DEVICES` / `CUDA_DEVICE_ORDER` |
-| `gguf.rs` | reads the GGUF header without loading tensors; maps layers to GPUs from `--tensor-split`; `read_tensor_summary` walks the tensor table and sizes each tensor from the gap to the next offset (no quant type table needed) |
+| `gguf.rs` | reads the GGUF header without loading tensors; maps layers to GPUs from `--tensor-split`; `read_tensor_table` walks the tensor table and sizes each tensor from the gap to the next offset (no quant type table needed), `read_tensor_summary` totals it |
+| `offload.rs` | llama.cpp's buffer-type overrides (`-ot`, `--cpu-moe`, `--n-cpu-moe`, `--n-cpu-ffn`, their `LLAMA_ARG_*` variables) parsed into regex rules and applied to the tensor table at detection: bytes in RAM (and read per step), bytes pinned to each card, and per layer the share in RAM and the card it is pinned to |
 | `observe.rs` | HTTP GET with timeouts; parsers for `/slots`, `/metrics` (Prometheus text) and `/experts` |
 | `vllm.rs` | vLLM `/metrics` adapter: reconstructs per-request `LiveStats` from engine-wide Prometheus counters |
+| `ollama.rs` | Ollama: `GET /api/ps` (tag, size / size_vram, context, expiry), the manifest walk that names a runner's blob, `OLLAMA_HOST` parsing, the store lookup that finds a daemon slot's GGUF |
 | `sglang.rs` | SGLang adapter: `GET /v1/loads?include=all` plus one-shot `/server_info`; optional `sglang:realtime_tokens_total` |
 | `gpu.rs` | in-process NVML telemetry collector (falling back to `nvidia-smi` CSV) or Linux amdgpu sysfs on a `spawn_blocking` thread; smooth random-walk demo GPUs |
 | `nvml.rs` | dynamically loads `nvml.dll` or `libnvidia-ml.so`; maintains a persistent in-process session for GPU metrics and PCIe throughput without subprocess overhead |
-| `perf.rs` | turns counter samples into rates with `RateWindow` (sliding window), tracks requests, TTFT, peaks, MTP acceptance, history ring buffers; `Meter` (VU channel with peak hold and auto scale) and `BandwidthStats` for the pipeline view |
+| `perf.rs` | turns counter samples into rates with `RateWindow` (sliding window), tracks requests, TTFT, peaks, MTP acceptance, history ring buffers, the clocks-event reason hold; `Meter` (VU channel with peak hold and auto scale) and `BandwidthStats` for the pipeline view |
+| `energy.rs` | GPU energy: summed board power integrated over time (trapezoid, gaps over 5 s skipped) for the box, plus each model's share — energy and tokens over the intervals it was the only model working — and the `--energy-price` tariff |
 | `host.rs` | host counters: `/proc/diskstats`, `/proc/<pid>/io`, `/proc/<pid>/stat` (major faults), `/proc/<pid>/status` (`RssFile`), `/proc/meminfo`, and PCIe rx/tx per GPU via NVML `nvmlDeviceGetPcieThroughput` (with `nvidia-smi dmon` fallback). In-process NVML eliminates the repeated CLI subprocess spawns on the NVML path; the `dmon` fallback still spawns one per poll |
 | `bandwidth.rs` | `weight_layout` (bytes total / active / CPU-side from the GGUF tensor table and VRAM use) and `assess`, the rule chain that names the bottleneck stage |
 | `fade.rs` | time-based smoothing so the UI breathes: fast attack, slow release; per-expert heat that cools exponentially; per-expert usage (the server's hit counts as a share of the busiest expert's) eased for the landscape |
 | `landscape.rs` | the expert landscape (`e`), free of terminal types: a `Camera` that rests at the four isometric corners, the projection, `Grid` (experts and layers grouped to what the canvas resolves) and a small rasteriser — boxes in painter's order, supersampled, with a blurred glow — that returns an RGB image `render.rs` paints with half blocks |
+| `balance.rs` | router load balance for the balance view (`u`), free of terminal types: per layer, from the `/experts` hit counts, effective experts (exp entropy), top-k share, a ranked-hits curve, and which layers stand out against the median layer |
 | `demo.rs` | synthetic servers (`--demo-models N`, each a prefill → decode → idle loop with its own profile) emitting `LiveStats`, `SpecMetrics` and `ExpertStats` through the same tagged channels; one extra task walks the shared GPUs and host counters from their combined load |
 | `alerts.rs` | the alert conditions (VRAM growth past the level each card settled at, GPU / memory hot, slow decode against the model's own context-matched baseline, server gone), each a hold → raise → hysteresis → clear episode with a per-subject announcement cooldown; free of terminal types, fed by the frame loop four times a second; plus the desktop notifier (`notify-send` / `osascript`) |
 | `colors.rs` | truecolor / 256-colour gating, gradients, palette constants, themes |
@@ -109,6 +113,18 @@ acceptance is `generated − steps`, drafted tokens are
 `steps × (num_draft_tokens − 1)`. The SGLang poller never runs faster than
 400 ms (each GET is a uvicorn access-log line).
 
+**Ollama `/api/ps`** lists the loaded models with `size` (bytes resident),
+`size_vram`, `context_length`, `expires_at` and `details`. Current Ollama
+serves each model from a bundled llama-server, which is polled through
+`/slots` like any other; its poller also asks the daemon every 5 s and puts
+the matching entry on every `LiveStats` (`ollama`). A runner's entry is the
+tag whose manifest names its blob, the slot is renamed to the tag the daemon
+reports, and `size − size_vram` replaces the tensor-split estimate of
+CPU-side bytes. While `/slots` is silent the daemon is asked every 2 s instead:
+the runner exits with its model, and a sample saying so marks the slot
+evicted. A daemon slot or a pre-llama-server `ollama runner` has no counters,
+so its poller sends `/api/ps` alone every 2 s.
+
 **HuggingFace `config.json`** (safetensors dirs, including nested
 `text_config`) fills the same architecture fields as a GGUF header, so the
 layers and experts panels work for vLLM and SGLang.
@@ -126,9 +142,24 @@ above the PCIe link cap (`pcie_link_mb_s(gen, width)`) is dropped.
 **Weight streams** are estimates, labelled as such on screen:
 `bytes_per_step = total − embedding − experts × (1 − used/total)`;
 `cpu_bytes = file − Σ min(file × split share, VRAM used)`; RAM GB/s =
-`cpu_bytes × active fraction × steps/s`, VRAM GB/s = the rest. Steps/s is
+`cpu_bytes × active fraction × steps/s`, VRAM GB/s = the rest. When
+llama.cpp's override rules place tensors (`offload.rs`), the split share
+covers only the tensors no rule placed: `cpu_bytes = file − Σ min(unplaced
+× split share + pinned to that card, VRAM used)`, so the rules' RAM tensors
+are always CPU-side. Per step the RAM reads those tensors at their own
+active bytes (routed experts × used/total) plus any spill at the rest of the
+model's active fraction. Steps/s is
 `spec.steps_per_sec` when `/metrics` is served, else decode tok/s; during
 prefill it is `prefill tok/s ÷ ubatch`.
+
+**Peak memory bandwidth** is driver arithmetic, not an estimate:
+`bus width / 8 × max memory clock × 2` from NVML
+(`nvmlDeviceGetMemoryBusWidth`, `nvmlDeviceGetMaxClockInfo(MEM)`), read once
+per card. The VRAM stream's ceiling combines the cards that hold weights:
+`Σ bytes_i / Σ (bytes_i / peak_i)` under llama.cpp's layer split, where the
+cards read their shares one after another, and `Σ bytes_i / max (bytes_i /
+peak_i)` under a parallel one (tensor-parallel safetensors servers,
+`--split-mode row`). It is unknown unless every such card has a peak.
 
 ## Timing model
 
@@ -158,8 +189,13 @@ prefill it is `prefill tok/s ÷ ubatch`.
   by level with a gradient.
 - Layout sheds the models strip first (it needs 14 rows of body beneath it),
   then requests below 22 body rows and context/MTP below 16; the GPU line
-  sheds PCIe, fan, clock, temperature before shrinking its gauge, and the key
-  row shortens its own labels before dropping keys from the end.
+  sheds PCIe, fan, clock, temperature before shrinking its gauge (whole
+  items, never cut at the panel edge), keeps a clocks-event badge longest
+  and lets it take cells from the gauge, and the key row shortens its own
+  labels before dropping keys from the end.
+- Clocks-event reasons are held per bit for 1.5 s after the driver last
+  reported them (`perf::ReasonHold`), so a one-poll power cap is readable;
+  the hold stretches a reported reason and never adds one.
 - The models strip gives each row a fixed budget — index, name, phase and rate
   always survive — and spends what is left on history, then context, then
   VRAM, so every row's columns line up at any width.

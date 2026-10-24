@@ -280,6 +280,20 @@ impl SettingsForm {
                 "Oldest rows are dropped past this size; 0 = no cap".into(),
             ),
             field(
+                "Energy price (/kWh)",
+                "energy-price",
+                Kind::Number,
+                args.energy_price.to_string(),
+                "Electricity price per kWh for GPU energy costs; 0 hides them".into(),
+            ),
+            field(
+                "Currency",
+                "currency",
+                Kind::Text,
+                args.currency.clone(),
+                "Symbol shown before energy costs, e.g. $, €, £".into(),
+            ),
+            field(
                 "Alerts",
                 "alerts",
                 Kind::Choice(&["off", "banner", "bell", "notify"]),
@@ -553,6 +567,33 @@ mod tests {
         assert_eq!(saved.get("theme").map(String::as_str), Some("neon"));
         assert!(!saved.contains_key("poll-ms"));
         assert_eq!(saved.get("model").map(String::as_str), Some("auto"));
+    }
+
+    #[test]
+    fn energy_price_is_validated_and_zero_is_the_default() {
+        let launch = argv(&[APP]);
+        let args = Args::try_parse_from(&launch).unwrap();
+        assert_eq!(args.energy_price, 0.0);
+        assert_eq!(args.currency, "$");
+        let mut form = SettingsForm::new(&args);
+        let i = form
+            .fields
+            .iter()
+            .position(|f| f.flag == "energy-price")
+            .unwrap();
+        form.fields[i].value = "0.30".into();
+        assert_eq!(form.resolve(&launch).unwrap().energy_price, 0.30);
+        for bad in ["-1", "nan", "cheap"] {
+            form.fields[i].value = bad.into();
+            let err = form.resolve(&launch).unwrap_err();
+            assert!(err.contains("energy-price"), "{bad}: {err}");
+        }
+        // The default price is not pinned into the saved file.
+        let defaults = SettingsForm::new(&args);
+        form.fields[i].value = "0".into();
+        let mut saved = Saved::new();
+        merge(&mut saved, form.flags(), defaults.flags());
+        assert!(!saved.contains_key("energy-price"));
     }
 
     #[test]
