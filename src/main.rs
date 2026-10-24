@@ -1,3 +1,4 @@
+mod alerts;
 mod balance;
 mod bandwidth;
 mod colors;
@@ -69,6 +70,8 @@ struct ModelSlot {
     ctx_max: usize,
     /// The tag Ollama last said this slot holds; empty until it has.
     ollama_tag: String,
+    /// When the poller last delivered a sample, for the gone alert.
+    last_answer: Instant,
 }
 
 impl ModelSlot {
@@ -92,6 +95,23 @@ impl ModelSlot {
             experts_seen: 0,
             routing: None,
             ollama_tag: String::new(),
+            last_answer: Instant::now(),
+        }
+    }
+
+    /// What the alerts are told about this model.
+    fn alert_input(&self, now: Instant) -> alerts::ModelInput<'_> {
+        // Ollama ends a runner by design when its keep-alive runs out, and a
+        // refused key is already the status line's story: silence means
+        // nothing for either.
+        let watch = self.model.engine != "ollama" && self.live.auth_denied.is_none();
+        alerts::ModelInput {
+            key: self.model.key(),
+            name: &self.model.name,
+            phase: self.perf.phase,
+            decode_tps: self.perf.decode_tps,
+            ctx_used: self.live.ctx_used(),
+            silent_for: watch.then(|| now.duration_since(self.last_answer)),
         }
     }
 
@@ -589,6 +609,27 @@ async fn poll_server(
     }
 }
 
+/// How often the alert conditions are judged: often enough that the
+/// hold times mean what they say, rarely enough to cost nothing.
+const ALERT_EVERY: Duration = Duration::from_millis(250);
+
+/// Rings and notifies for a newly raised alert as `--alerts` asks; the
+/// banner and badge come from the renderer. A notifier that cannot run is
+/// named once in the status line and the bell carries on alone.
+fn announce(mode: alerts::Mode, alert: &alerts::Alert, notify_ok: &mut bool, status: &mut String) {
+    use std::io::Write;
+    if matches!(mode, alerts::Mode::Bell | alerts::Mode::Notify) {
+        let mut out = io::stdout();
+        let _ = out.write_all(b"\x07").and_then(|_| out.flush());
+    }
+    if mode == alerts::Mode::Notify && *notify_ok {
+        if let Err(e) = alerts::notify(&alert.text) {
+            *notify_ok = false;
+            *status = format!("{e}: alerts ring the bell instead");
+        }
+    }
+}
+
 /// Opens the log database `args` asks for; `Ok(None)` when logging is off.
 fn open_db(args: &Args) -> Result<Option<dblog::DbLog>, String> {
     let Some(path) = args.log_db_path() else {
@@ -902,6 +943,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let read_log = |args: &Args| log_path(args).and_then(|p| dblog::summarize(&p));
     let read_ctx = |args: &Args| log_path(args).and_then(|p| dblog::context_speed(&p));
     let mut last_visual_activity = Instant::now();
+    let mut alert_mode = alerts::Mode::parse(&args.alerts);
+    let mut alert_state = alerts::Alerts::new(args.alert_limits());
+    let mut last_alert_check = Instant::now();
+    // Cleared the first time the desktop notifier fails, which says so once.
+    let mut notify_ok = true;
 
     loop {
         tokio::task::yield_now().await;
@@ -944,6 +990,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             || new.pid != args.pid);
                                     let gpu_changed = new.gpu != args.gpu;
                                     args = new;
+                                    alert_mode = alerts::Mode::parse(&args.alerts);
+                                    alert_state.set_limits(args.alert_limits());
+                                    if alert_mode == alerts::Mode::Off {
+                                        alert_state.clear();
+                                    }
                                     poll = Duration::from_millis(args.poll_ms.max(50));
                                     status = match saved {
                                         Some(Ok(path)) => {
@@ -1065,6 +1116,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             slots = kept;
+            // What the models now on the cards preallocated is the new normal.
+            alert_state.rebaseline_vram();
             focus = focus.min(slots.len().saturating_sub(1));
             slot_of = slots
                 .iter()
@@ -1188,6 +1241,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(loaded) = s.ollama.as_ref().and_then(|o| o.loaded.as_ref()) {
                     slot.adopt_ollama_tag(&loaded.name);
                 }
+                slot.last_answer = now;
                 slot.perf.observe(&s, now);
                 slot.live = s;
             }
@@ -1196,6 +1250,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // A server starting or stopping to refuse our key changes the
             // story the status line tells; say it while it is news.
             status = status_for(&slots, false);
+        }
+
+        // Judged before the idle check below, so an alert is raised (and
+        // rings) on a dashboard nobody is looking at.
+        if alert_mode != alerts::Mode::Off && now.duration_since(last_alert_check) >= ALERT_EVERY {
+            last_alert_check = now;
+            let inputs: Vec<alerts::ModelInput> =
+                slots.iter().map(|s| s.alert_input(now)).collect();
+            let out = alert_state.observe(&latest_gpu, &inputs, now);
+            ui_changed |= out.changed;
+            for alert in &out.announced {
+                announce(alert_mode, alert, &mut notify_ok, &mut status);
+            }
         }
 
         while let Ok(event) = events_rx.try_recv() {
@@ -1336,6 +1403,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             log: log_view.as_ref(),
             ctx_speed: ctx_view.as_ref().map(|(s, i)| (s, *i)),
             energy: &gpu_energy,
+            alerts: alert_state.active(),
+            alert_banner: alert_state.banner(now),
         };
         renderer.render_frame(&mut terminal, &dash);
 

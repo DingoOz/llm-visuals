@@ -10,6 +10,7 @@ use ratatui::{
     Frame, Terminal,
 };
 
+use crate::alerts::Alert;
 use crate::balance::Balance;
 use crate::bandwidth::{self, StageId};
 use crate::colors::{self as pal, ColorTheme};
@@ -83,6 +84,10 @@ pub struct Dashboard<'a> {
     pub ctx_speed: Option<(&'a Result<Vec<ContextSpeed>, String>, usize)>,
     /// GPU energy drawn this session (box total) and the price to cost it at.
     pub energy: &'a GpuEnergy,
+    /// Raised alerts, oldest first; empty with `--alerts off`.
+    pub alerts: &'a [Alert],
+    /// The alert the banner row shows, while it is news.
+    pub alert_banner: Option<&'a Alert>,
 }
 
 pub struct Renderer {
@@ -175,7 +180,52 @@ impl Renderer {
             ViewMode::Bandwidth => self.render_bandwidth(frame, rows[2], d),
             _ => self.render_panels(frame, rows[2], d),
         }
-        self.render_footer(frame, rows[3], d);
+        // A fresh alert has the key row to itself for a while: the panels
+        // above keep their layout, and the keys still work unseen.
+        match d.alert_banner {
+            Some(alert) => self.render_alert_banner(frame, rows[3], alert, d.alerts.len()),
+            None => self.render_footer(frame, rows[3], d),
+        }
+    }
+
+    /// The key row's stand-in while an alert is news: what was raised, when,
+    /// and how many others are still up.
+    fn render_alert_banner(&self, frame: &mut Frame, area: Rect, alert: &Alert, active: usize) {
+        let w = area.width as usize;
+        let when = chrono::Local::now()
+            - chrono::Duration::from_std(alert.since.elapsed()).unwrap_or_default();
+        let mut tail = format!("  since {}", when.format("%H:%M:%S"));
+        if active > 1 {
+            tail.push_str(&format!(" · {} more active", active - 1));
+        }
+        let head = " ⚠ ALERT ";
+        let room = w.saturating_sub(head.chars().count() + 1);
+        let text = truncate(&alert.text, room);
+        let tail = if text.chars().count() + tail.chars().count() <= room {
+            tail
+        } else {
+            String::new()
+        };
+        let line = Line::from(vec![
+            Span::styled(
+                head,
+                Style::default()
+                    .fg(pal::c((10, 12, 18)))
+                    .bg(pal::c(pal::RED))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {text}"),
+                Style::default()
+                    .fg(pal::c(pal::WHITE))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(tail, Style::default().fg(pal::c(pal::TEXT_DIM))),
+        ]);
+        frame.render_widget(
+            Paragraph::new(line).style(Style::default().bg(pal::c(pal::dim_rgb(pal::RED, 0.22)))),
+            area,
+        );
     }
 
     fn render_bandwidth(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
@@ -316,6 +366,20 @@ impl Renderer {
             self.spinner()
         };
         let mut right_spans: Vec<Span> = Vec::new();
+        if let Some(newest) = d.alerts.last() {
+            let label = match d.alerts.len() {
+                1 => format!(" ⚠ {} ", newest.tag),
+                n => format!(" ⚠ {n} alerts "),
+            };
+            right_spans.push(Span::styled(
+                label,
+                Style::default()
+                    .fg(pal::c((10, 12, 18)))
+                    .bg(pal::c(pal::dim_rgb(pal::RED, 0.8 + 0.2 * self.pulse())))
+                    .add_modifier(Modifier::BOLD),
+            ));
+            right_spans.push(Span::raw(" "));
+        }
         if d.models.len() > 1 {
             right_spans.push(Span::styled(
                 format!(" model {}/{} ", d.focus + 1, d.models.len()),
@@ -5468,6 +5532,8 @@ mod tests {
             log: None,
             ctx_speed: None,
             energy: &GpuEnergy::default(),
+            alerts: &[],
+            alert_banner: None,
         };
         let renderer = Renderer::new(pal::get_theme("defrag"), 0, 0, 1);
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -5483,6 +5549,95 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// The whole screen as text, with `alerts` raised and the newest on
+    /// the banner when `banner` says so.
+    fn alert_text(w: u16, h: u16, alerts: &[Alert], banner: bool) -> String {
+        let (perf, live, fade) = (PerfTracker::new(), LiveStats::default(), FadeState::new());
+        let (attention, generated) = (TokenBuffer::new(8), GeneratedText::new());
+        let camera = Camera::new();
+        let dash = Dashboard {
+            models: &[],
+            focus: 0,
+            detected: None,
+            gpus: &[],
+            gpu_error: None,
+            fade: &fade,
+            perf: &perf,
+            live: &live,
+            attention: &attention,
+            generated: &generated,
+            num_layers: 0,
+            num_heads: 0,
+            view: ViewMode::All,
+            camera: &camera,
+            status: "",
+            theme_name: "defrag",
+            demo: true,
+            experts: None,
+            gpu_backend: None,
+            settings: None,
+            log: None,
+            ctx_speed: None,
+            alerts,
+            alert_banner: alerts.last().filter(|_| banner),
+            energy: &GpuEnergy::default(),
+        };
+        let renderer = Renderer::new(pal::get_theme("defrag"), 0, 0, 1);
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|frame| renderer.render_view(frame, frame.area(), &dash))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn vram_alert(gpu: u32) -> Alert {
+        Alert {
+            kind: crate::alerts::Kind::Vram,
+            subject: crate::alerts::Subject::Gpu(gpu),
+            text: format!("G{gpu} P100: VRAM 97% full (alert at 95%)"),
+            tag: format!("VRAM G{gpu}"),
+            since: Instant::now(),
+            announced: true,
+        }
+    }
+
+    #[test]
+    fn a_raised_alert_shows_in_the_header_and_the_banner() {
+        let text = alert_text(100, 30, &[vram_alert(1)], true);
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].contains("⚠ VRAM G1"), "{}", lines[0]);
+        // The banner stands in for the key row; the panels keep theirs
+        // (the header's clock is left out of the comparison).
+        let banner = lines[29];
+        assert!(
+            banner.contains("⚠ ALERT  G1 P100: VRAM 97% full"),
+            "{banner}"
+        );
+        assert!(banner.contains("since "), "{banner}");
+        let quiet = alert_text(100, 30, &[vram_alert(1)], false);
+        let quiet: Vec<&str> = quiet.lines().collect();
+        assert_eq!(lines[3..29], quiet[3..29]);
+
+        // Several at once: the badge counts, the banner says how many more.
+        let text = alert_text(150, 46, &[vram_alert(0), vram_alert(1)], true);
+        assert!(text.lines().next().unwrap().contains("⚠ 2 alerts"));
+        assert!(text.contains("1 more active"));
+
+        // Past its banner time only the badge is left and the keys return.
+        assert!(quiet[0].contains("⚠ VRAM G1"));
+        assert!(!quiet.concat().contains("ALERT"));
+        assert!(quiet[29].contains("q quit"));
+        assert!(!alert_text(100, 30, &[], false).contains('⚠'));
     }
 
     #[test]
@@ -5702,6 +5857,8 @@ mod tests {
             log: None,
             ctx_speed: None,
             energy: &energy,
+            alerts: &[],
+            alert_banner: None,
         };
         energy_line(&dash, w)
             .spans

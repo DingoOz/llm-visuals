@@ -28,6 +28,7 @@ a Tesla P100 under llama.cpp, mid-request.</sub>
 - [Building and cross-compiling](#building-and-cross-compiling)
 - [What you see](#what-you-see)
 - [Several models at once](#several-models-at-once)
+- [Alerts](#alerts)
 - [Keys](#keys)
 - [Where every number comes from](#where-every-number-comes-from)
 - [Server setup: metrics and real expert routing](#server-setup-metrics-and-real-expert-routing)
@@ -591,6 +592,68 @@ watched and `--pid A,B` restricts it to named processes.
 
 ---
 
+## Alerts
+
+A few conditions are worth hearing about even when nobody is looking at the
+dashboard. Each is judged four times a second from numbers already on screen:
+
+| Alert | Raised when | Clears when |
+|---|---|---|
+| VRAM pressure | for 3 s, a card's memory has grown past where it settled **and** either is at or above `--alert-vram-pct` (95 %) having grown by at least 2 % of the card (512 MB minimum), or has less than 1 % (256 MB minimum) left having grown by more than that | it is back within 1 % (256 MB) of the settled level, or 3 points under the threshold, for 2 s |
+| GPU hot | the die stays at or above its limit for 3 s: `--alert-temp-c` if given, else the first threshold the NVIDIA driver acts on (the lower of NVML's slowdown and max-operating temperatures), else 85 °C | it is 5 °C under for 2 s |
+| memory hot | the HBM sensor stays at or above the driver's memory max-operating temperature (95 °C if it names none) for 3 s | 5 °C under for 2 s |
+| slow decode | while decoding, the rate stays under `--alert-slow-pct` (50 %) of the model's usual rate for 5 s | it is back above that share + 10 points for 2 s, or the request ends |
+| server gone | the server has not answered its poller for 10 s | the next answer |
+
+A full card is usually the intended configuration — vLLM, SGLang and Strata
+preallocate their KV pool, and llama.cpp users fit to ~95 % — so the VRAM
+alert is about *growth*: another process taking memory, a second model
+loading, a leak. A card **settles** at its high-water mark once that has not
+grown by more than 1 % (256 MB) for 20 s; a card still loading keeps raising
+the mark and so settles where the load ends, and one whose use swings with
+load settles at the top of the swing. Nothing is judged before that, so a
+card already at 97 % when the dashboard starts never fires for being full.
+The settled level then stays put — a model swapped out and back in returns
+to it — until a rescan (`r`), after which every card settles afresh at what
+the models now on it hold.
+
+"Usual" is the median of the model's own decode rate, one sample a second
+over its last ten minutes of decoding, taken only from samples within a
+factor of two of the current context length (contexts under 1k tokens count
+together): decode slows as the context fills, and a 100k-token request is
+not judged against 2k-token ones. Until 15 such samples exist there is no
+usual rate and the alert stays quiet; a slow stretch is never learnt as the
+new usual. A zero rate is not judged at all (an engine that reports rates
+only at completion would otherwise always be "slow"). A synthesised unified
+pool (GB10 / DGX Spark, where the bar is a server's own reservation over
+system RAM) does not raise the VRAM alert; a driver-measured APU pool does.
+The NVML temperature limits were read on a P100 (82 °C) and a V100 (83 °C
+die, 85 °C memory).
+Ollama, whose poller reports only once, and a server refusing the API key,
+which the status line already names, are not watched for silence.
+
+An alert is announced once per episode: the header shows a red `⚠ VRAM G1`
+badge (`⚠ 3 alerts` for several) for as long as it lasts, and for its first
+30 s a banner takes the place of the key row with the full line and the time
+it was raised (the keys still work meanwhile). The same alert on the same card or model is not announced again within
+60 s of its last announcement — an episode inside that window shows only in
+the badge — so a value hovering at its threshold cannot ring every few
+seconds.
+
+`--alerts` sets how far an announcement reaches: `banner` (the default) is
+on screen only, `bell` also rings the terminal bell, `notify` also sends a
+desktop notification — `notify-send` on Linux, `osascript` on macOS. Where
+that cannot run (the helper is not installed, or on Windows, which has no
+notifier here) the status line says so once and the bell carries on alone.
+`--alerts off` turns the lot off. All four settings are on the settings
+screen.
+
+In `--demo` the second card settles at about 90 % in its first half
+minute, then fills to 97 % for half a minute every four minutes, starting
+50 s in, so the VRAM alert can be seen.
+
+---
+
 ## Keys
 
 | Key | Action |
@@ -631,6 +694,7 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | impossible tok/s samples | a displayed rate is finite, under 10⁶ (decode) / 10⁷ (prefill) tok/s, and (decode only) not above both 4× the median of the recently accepted samples of that server and that median + 20 tok/s; glitch polls are cut and the display holds the last real reading, six rejections in a row re-anchor to a genuinely faster engine |
 | tok/J | decode tok/s ÷ summed GPU power draw |
 | GPU energy, Wh/1k tok, cost | summed GPU board power (the same reading as tok/J) integrated over time by the trapezoid rule between GPU polls; an interval longer than 5 s between readings is not integrated. Wh/1k tok: energy drawn while the focused model was the only model working (prefill or decode), ÷ the tokens it generated over the same intervals. Cost: Wh × `--energy-price` per kWh |
+| temperature limits (alerts) | NVML `nvmlDeviceGetTemperatureThreshold`: the lower of `SLOWDOWN` and `GPU_MAX` for the die, `MEM_MAX` for the memory. Not available from `nvidia-smi --query-gpu`, AMD, Intel or Apple, where the alert falls back to its default |
 | cache hit | llama.cpp: `n_prompt_tokens_cache / n_prompt_tokens`. vLLM: the window's `prefix_cache_hits_total / prefix_cache_queries_total` delta — exact even when several requests share the poll window, since both counters move in the same scheduler step; a request row whose window held more than one request shows its own cached count as `—` instead of a blend. SGLang without `--enable-metrics` is unknown (shown as "—"). Strata: the finished request's `reused`, unknown ("—") while it runs |
 | request log | one record per `id_task`; averages from accumulated deltas |
 | util, VRAM, power, °C, clocks, fan, PCIe link | NVIDIA in-process NVML (`nvidia-smi --query-gpu=…` fallback), Intel `xpu-smi --query-gpu=…`, or Linux amdgpu sysfs and hwmon, every poll. NVIDIA additionally reports the memory temperature — NVML field value 82 on the in-process path, `temperature.memory` on the CLI one — shown as `mem 71°` beside the die temperature on cards whose driver reports the sensor (HBM parts such as the CMP 170HX it was verified on); it reads blank elsewhere. The clocks-event reasons badge is NVML `nvmlDeviceGetCurrentClocksEventReasons` (`…ClocksThrottleReasons` on drivers that predate the rename) in process, and `clocks_event_reasons.active` (else `clocks_throttle_reasons.active`) on the CLI, a bitmask decoded per `nvml.h`. On Intel, fan speed is the `xe` driver's hwmon tachometer (RPM); utilization that samples ~0 while clocks are boosted is reconstructed from the clock ratio and marked `~`; PCIe link and an unsupported temperature read blank. Unified-memory parts (NVIDIA GB10 / DGX Spark) report no device memory, fan or memory-busy counter at all: NVML stays the backend for the fields that *do* answer, and the memory bar relabels itself (see `VRAM weights vs KV` and Troubleshooting). AMD APUs (BC-250 / Cyan Skillfish, Strix Halo) are unified too but *measured*: the driver reports a 512 MiB VRAM carve-out plus a GTT heap spanning the shared RAM pool, and the backend shows the sum of both heaps as the `UNIFIED` pool — the same figures nvtop prints for an integrated GPU |
@@ -856,6 +920,11 @@ acceptance is not available for its models.
 --log-db-max-mb 1024 size cap for --log-db; oldest rows are dropped (0 = none)
 --energy-price 0     electricity price per kWh for GPU energy costs (0 = hide costs)
 --currency '$'       symbol printed before energy costs
+--alerts banner      off | banner | bell | notify (see Alerts)
+--alert-vram-pct 95  VRAM alert threshold, percent of a card's memory, for
+                     growth past where it settled (see Alerts)
+--alert-temp-c auto  GPU temperature alert, °C; auto = the card's own limit
+--alert-slow-pct 50  slow-decode alert, percent of the model's usual rate
 --version, -v        print the version and exit
 ```
 
@@ -870,7 +939,7 @@ the account running the dashboard.
 ### Settings screen and saved defaults
 
 Press `s` to change the theme, colour depth, poll interval, model limits,
-GPUs, logging and the energy price and currency while the dashboard runs. `a` applies the values to this
+GPUs, logging, alerts and the energy price and currency while the dashboard runs. `a` applies the values to this
 session; `w` also saves them as the launch default, in
 `~/.config/llm-visuals/settings.json` (`%APPDATA%\llm-visuals` on Windows,
 `~/Library/Application Support/llm-visuals` on macOS). The file maps flag

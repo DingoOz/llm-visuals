@@ -33,6 +33,8 @@ is put together.
   CPU/GPU split and the CPU-side bytes; daemon-only slots labelled
   `throughput n/a`.
 - GPU energy per session and per generated token, priced with `--energy-price`.
+- Alerts (`--alerts`): VRAM growth past its settled level, GPU / memory hot, slow decode against the
+  model's own baseline, server gone; banner, bell or desktop notification.
 
 ## Ideas not yet done
 
