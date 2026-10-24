@@ -13,6 +13,7 @@ use ratatui::{
 use crate::alerts::Alert;
 use crate::balance::Balance;
 use crate::bandwidth::{self, StageId};
+use crate::bench::{self, BenchSession, SessionState};
 use crate::colors::{self as pal, ColorTheme};
 use crate::config::ViewMode;
 use crate::dblog::{ContextSpeed, LogSummary, CTX_GRAIN};
@@ -98,6 +99,10 @@ pub struct Dashboard<'a> {
     pub regress_off: Option<&'a str>,
     /// Playback position when the numbers come from `--replay`, not servers.
     pub replay: Option<Hud>,
+    /// The benchmark table (`B`), while it is open.
+    pub bench: Option<&'a BenchSession>,
+    /// A benchmark ran or is running this session, so `B` has a table.
+    pub bench_running: bool,
 }
 
 pub struct Renderer {
@@ -154,6 +159,9 @@ impl Renderer {
             }
             if let Some((speeds, sel)) = d.ctx_speed {
                 self.render_ctx_speed(frame, area, speeds, sel, d);
+            }
+            if let Some(run) = d.bench {
+                self.render_bench(frame, area, run);
             }
             if let Some(form) = d.settings {
                 self.render_settings(frame, area, form);
@@ -2899,6 +2907,9 @@ impl Renderer {
         items.push(("s", "settings".into(), d.settings.is_some()));
         items.push(("l", "log".into(), d.log.is_some()));
         items.push(("c", "ctx speed".into(), d.ctx_speed.is_some()));
+        if d.bench_running {
+            items.push(("B", "bench".into(), d.bench.is_some()));
+        }
         match d.replay {
             Some(r) => {
                 // Ahead of the view keys: playback is what a replay is for.
@@ -3308,6 +3319,158 @@ impl Renderer {
             lines.push(Line::raw(""));
         }
         lines.push(keys);
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+}
+
+impl Renderer {
+    /// The benchmark table (`B`): one row per prompt length, filled in as
+    /// the run goes, opened by itself when it ends.
+    fn render_bench(&self, frame: &mut Frame, area: Rect, run: &BenchSession) {
+        let width = area.width.saturating_sub(4).min(110);
+        let rows = run.plan.len() + usize::from(!run.skipped.is_empty());
+        let height = ((rows + 13) as u16).min(area.height.saturating_sub(2));
+        let rect = Rect {
+            x: area.x + (area.width - width) / 2,
+            y: area.y + (area.height - height) / 2,
+            width,
+            height,
+        };
+        frame.render_widget(Clear, rect);
+        let block = panel(" ◆ BENCHMARK ", pal::AMBER);
+        let inner = block.inner(rect);
+        frame.render_widget(block, rect);
+        let w = inner.width as usize;
+        let h = inner.height as usize;
+        let text = Style::default().fg(pal::c(pal::TEXT));
+        let dim = Style::default().fg(pal::c(pal::TEXT_DIM));
+        let head = Style::default()
+            .fg(pal::c(pal::accent(pal::AMBER)))
+            .add_modifier(Modifier::BOLD);
+        let bad = Style::default().fg(pal::c(pal::MAGENTA));
+        let row = |label: &str, value: String, style: Style| {
+            Line::from(vec![
+                Span::styled(format!(" {label:<6}"), dim),
+                Span::styled(truncate(&value, w.saturating_sub(7)), style),
+            ])
+        };
+        let mut lines: Vec<Line> = vec![
+            row("tag", run.tag.clone(), text.add_modifier(Modifier::BOLD)),
+            row(
+                "model",
+                [run.model.as_str(), run.engine.as_str(), run.gpus.as_str()]
+                    .iter()
+                    .filter(|s| !s.is_empty())
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+                text,
+            ),
+        ];
+        let (state, style) = match &run.state {
+            SessionState::Starting => (format!("starting {}", self.spinner()), text),
+            SessionState::Running => match run.current {
+                Some((ctx, rep)) => (
+                    format!(
+                        "running {} {rep}/{} {}",
+                        bench::fmt_ctx(ctx),
+                        run.config.repeat,
+                        self.spinner()
+                    ),
+                    Style::default().fg(pal::c(pal::accent(pal::AMBER))),
+                ),
+                None => (format!("warm-up {}", self.spinner()), text),
+            },
+            SessionState::Done => ("done".into(), Style::default().fg(pal::c(pal::GREEN))),
+            SessionState::Failed(e) => (format!("stopped: {e}"), bad),
+        };
+        lines.push(row("plan", run.config.describe(), text));
+        lines.push(row("state", state, style));
+        lines.push(Line::raw(""));
+        let header = format!(
+            " {:>6} {:>8} {:>5} {:>12} {:>11} {:>8} {:>11} {:>9}",
+            "CTX", "PROMPT", "RUNS", "PREFILL t/s", "DECODE t/s", "TTFT", "ENGINE t/s", "DASH t/s"
+        );
+        lines.push(Line::styled(truncate(&header, w), head));
+        let sums = bench::summarize(&run.results);
+        let cell = |v: Option<f64>| v.map_or("–".to_string(), |v| fmt_rate(v as f32));
+        for &ctx in &run.plan {
+            let current = run.current.is_some_and(|(c, _)| c == ctx);
+            let line = match sums.iter().find(|s| s.ctx == ctx) {
+                None => Line::styled(
+                    truncate(
+                        &format!(
+                            " {:>6} {:>8} {:>5}",
+                            bench::fmt_ctx(ctx),
+                            "",
+                            format!("0/{}", run.config.repeat)
+                        ),
+                        w,
+                    ),
+                    if current { text } else { dim },
+                ),
+                Some(s) => {
+                    let prompt = format!(
+                        "{}{}",
+                        fmt_int(s.prompt_tokens.round() as usize),
+                        if s.prompt_measured { "" } else { "~" }
+                    );
+                    let mut body = format!(
+                        " {:>6} {:>8} {:>5} {:>12} {:>11} {:>8} {:>11} {:>9}",
+                        bench::fmt_ctx(ctx),
+                        if s.ok > 0 { prompt } else { "–".into() },
+                        format!("{}/{}", s.ok + s.failed, run.config.repeat),
+                        cell(s.prefill_tps),
+                        cell(s.decode_tps),
+                        s.ttft_s
+                            .map(|t| fmt_dur(Duration::from_secs_f64(t.max(0.0))))
+                            .unwrap_or_else(|| "–".into()),
+                        cell(s.server_decode_tps),
+                        cell(s.dash_decode_tps),
+                    );
+                    if let Some(e) = &s.error {
+                        body.push_str(&format!("  {e}"));
+                    }
+                    Line::styled(
+                        truncate(&body, w),
+                        if s.error.is_some() { bad } else { text },
+                    )
+                }
+            };
+            lines.push(line);
+        }
+        if !run.skipped.is_empty() {
+            let skipped: Vec<String> = run.skipped.iter().map(|c| bench::fmt_ctx(*c)).collect();
+            lines.push(Line::styled(
+                truncate(
+                    &format!(
+                        " skipped {}: beyond the server's context",
+                        skipped.join(", ")
+                    ),
+                    w,
+                ),
+                dim,
+            ));
+        }
+        lines.push(Line::raw(""));
+        for note in [
+            " prefill = prompt ÷ TTFT and decode = tokens after the first ÷ their time, at the client",
+            " ENGINE = the server's own timings (llama.cpp) · DASH = this dashboard's row · ~ estimated",
+        ] {
+            if lines.len() + 2 < h {
+                lines.push(Line::styled(truncate(note, w), dim));
+            }
+        }
+        while lines.len() + 1 < h {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::from(fit_spans(
+            &[
+                Span::styled(" esc", text.add_modifier(Modifier::BOLD)),
+                Span::styled(" close ", dim),
+            ],
+            w,
+        )));
         frame.render_widget(Paragraph::new(lines), inner);
     }
 }
@@ -5818,6 +5981,8 @@ mod tests {
             alert_banner: None,
             regress_off: None,
             replay: None,
+            bench: None,
+            bench_running: false,
         };
         let renderer = Renderer::new(pal::get_theme("defrag"), 0, 0, 1);
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -5869,6 +6034,8 @@ mod tests {
             energy: &GpuEnergy::default(),
             regress_off: None,
             replay: None,
+            bench: None,
+            bench_running: false,
         };
         let renderer = Renderer::new(pal::get_theme("defrag"), 0, 0, 1);
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
@@ -6147,6 +6314,8 @@ mod tests {
             alert_banner: None,
             regress_off: None,
             replay: None,
+            bench: None,
+            bench_running: false,
         };
         energy_line(&dash, w)
             .spans

@@ -57,13 +57,14 @@ GPUs and the disk are shared.
 | `main.rs` | CLI parsing, terminal setup, the `ModelSlot` list, spawning one poller per model, routing samples by PID, the frame loop, key handling |
 | `config.rs` | clap arguments and `ViewMode` |
 | `settings.rs` | per-user config/data paths; loads `settings.json` and places its flags ahead of the command line; the settings screen's fields, keys, validation (re-parsing through clap) and saving |
-| `dblog.rs` | `--log-db` SQLite writer (on by default at the per-user data path) with a size cap |
+| `dblog.rs` | `--log-db` SQLite writer (on by default at the per-user data path) with a size cap; the `bench_runs` / `bench_results` tables and their read-back for `--bench-report` |
+| `bench.rs` | `--bench`: the plan (lengths that fit the server's context), deterministic prompts with a per-request unique first word, the streamed `/v1/completions` client timing (TTFT, decode), tokens-per-word calibration from the server's `usage` / `timings` / `/tokenize`, per-length summaries, and the text tables printed on exit and by `--bench-report` |
 | `regress.rs` | the regression flag: reads the last hour and the baseline window of decode samples from the log on a blocking thread (rowid binary search as the time index, baseline cached for an hour), keeps spans logged with the model's current GPU set, and compares the two per context range |
 | `model_detect.rs` | finds inference processes via `nvidia-smi --query-compute-apps` and `/proc`, parses their command lines (model path, port, ctx size, tensor split, spec mode); returns every server found, best first, minus this process and idle daemons |
 | `vision.rs` | vision encoder detection and placement: llama.cpp projector flags and environment, the GPU runtime from `/proc/<pid>/maps`, and CUDA ordinal → host card via a `--cuda-bus-ids` child process that queries `libcuda` under the server's `CUDA_VISIBLE_DEVICES` / `CUDA_DEVICE_ORDER` |
 | `gguf.rs` | reads the GGUF header without loading tensors; maps layers to GPUs from `--tensor-split`; `read_tensor_table` walks the tensor table and sizes each tensor from the gap to the next offset (no quant type table needed), `read_tensor_summary` totals it |
 | `offload.rs` | llama.cpp's buffer-type overrides (`-ot`, `--cpu-moe`, `--n-cpu-moe`, `--n-cpu-ffn`, their `LLAMA_ARG_*` variables) parsed into regex rules and applied to the tensor table at detection: bytes in RAM (and read per step), bytes pinned to each card, and per layer the share in RAM and the card it is pinned to |
-| `observe.rs` | HTTP GET with timeouts; parsers for `/slots`, `/metrics` (Prometheus text) and `/experts` |
+| `observe.rs` | HTTP GET with timeouts; `HttpStream`, a POST whose body is read as it arrives (chunked transfer decoding included), for the benchmark; parsers for `/slots`, `/metrics` (Prometheus text) and `/experts` |
 | `vllm.rs` | vLLM `/metrics` adapter: reconstructs per-request `LiveStats` from engine-wide Prometheus counters |
 | `ollama.rs` | Ollama: `GET /api/ps` (tag, size / size_vram, context, expiry), the manifest walk that names a runner's blob, `OLLAMA_HOST` parsing, the store lookup that finds a daemon slot's GGUF |
 | `sglang.rs` | SGLang adapter: `GET /v1/loads?include=all` plus one-shot `/server_info`; optional `sglang:realtime_tokens_total` |
@@ -188,6 +189,16 @@ computed as they were live. Within a request, tokens follow the interpolated
 session counters, scaled to the request row's totals; its start, first token
 and end come from that row. `fade.rs` keeps wall-clock time: smoothing is a
 display effect, not part of the record.
+
+**Benchmark (`--bench`)** is the one place the dashboard sends requests
+rather than only reading. `bench::run` is a tokio task that posts streamed
+completions to the focused server and reports `BenchEvent`s (plan, progress,
+one result per request) on a channel the frame loop drains. The frame loop
+owns the `BenchSession` the `B` table draws, writes the run and its results
+to the log, and gives each result the dashboard's own row for the request:
+it notes the slot's `PerfTracker::finished` when a request is sent, and the
+first request row closed after that is the one (waited for up to 3 s, else
+left empty). The task paces requests one second apart for that reason.
 
 ## Timing model
 

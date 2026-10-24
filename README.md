@@ -29,6 +29,7 @@ a Tesla P100 under llama.cpp, mid-request.</sub>
 - [What you see](#what-you-see)
 - [Several models at once](#several-models-at-once)
 - [Alerts](#alerts)
+- [Benchmark](#benchmark)
 - [Keys](#keys)
 - [Where every number comes from](#where-every-number-comes-from)
 - [Server setup: metrics and real expert routing](#server-setup-metrics-and-real-expert-routing)
@@ -653,6 +654,84 @@ In `--demo` the second card settles at about 90 % in its first half
 minute, then fills to 97 % for half a minute every four minutes, starting
 50 s in, so the VRAM alert can be seen.
 
+## Benchmark
+
+The dashboard normally only watches. `--bench` makes it send a fixed workload
+to the focused server and measure it, while every panel shows the run live:
+
+```sh
+llm-visuals --bench --bench-tag q4-baseline
+# change the quant, a flag, the driver … then
+llm-visuals --bench --bench-tag q5
+llm-visuals --bench-report q4-baseline q5
+```
+
+For each prompt length in `--bench-ctx` (default `512,2k,8k,16k,32k`, `k` =
+1024) it sends `--bench-repeat` requests (3) that each generate `--bench-gen`
+tokens (256), one at a time with a one-second gap so the dashboard's poller
+gives every request its own row. Lengths that do not fit the server's context
+with the generation are skipped and named as skipped. A warm-up request goes
+first and is not counted: it absorbs graph capture and allocator growth, and
+it teaches the benchmark the server's tokens per word.
+
+The requests go to the OpenAI-compatible `POST /v1/completions` (llama.cpp,
+vLLM, SGLang, Ollama, LM Studio, Strata), streamed, with the model id the
+server lists in `/v1/models`. To keep runs comparable:
+
+- **The text is the same every run**: deterministic prose from a fixed word
+  list, sized to each target from the measured tokens per word.
+- **No prompt cache**: the first word of every prompt is unique to that
+  request, so a prefix cache cannot serve any of it, and llama.cpp is also
+  sent `cache_prompt: false`.
+- **A fixed length**: `ignore_eos` and `min_tokens` make the model generate
+  every requested token on llama.cpp, vLLM and SGLang.
+- **Real token counts**: the prompt length is the server's `usage` (asked for
+  with `stream_options.include_usage`), llama.cpp's `timings`, or its
+  `/tokenize`; only if all three are missing is it the word estimate, marked
+  `~`.
+
+A server that rejects one of those optional fields is retried without them,
+and the status line says so. A refused length (too long for the server, say)
+is recorded with its error and the run moves on; a server that stops answering
+ends the run.
+
+| Column | What it is |
+|---|---|
+| PREFILL t/s | prompt tokens ÷ time to first token, timed at the client — includes queueing and the first decode step, so slightly under the engine's own figure |
+| DECODE t/s | tokens after the first ÷ the time from the first streamed token to the last |
+| TTFT | send → first streamed token |
+| ENGINE t/s | the engine's own decode rate, where it reports one (llama.cpp `timings.predicted_per_second`) |
+| DASH t/s | the dashboard's request row for the same request (`/slots` or `/metrics` deltas) |
+
+The status line shows progress (`bench 8k 2/3 · last 3,914 pp / 59.2 tg
+tok/s`). The results table opens by itself when the run ends; `B` reopens it.
+On exit the same table is printed to the terminal.
+
+Runs are logged to the `--log-db` file as `bench_runs` and `bench_results`,
+under `--bench-tag` (default: the model's short name and the start time),
+with the GPU names, the settings and the server's command line (its
+`--api-key` replaced by `***`). With `--log-db off` nothing is written; the
+table printed on exit is the only record. The size cap never trims these
+tables.
+
+`--bench-report [TAG …]` prints a comparison and exits without starting the
+dashboard: the newest run of each tag given, in that order, or with no tags
+the newest run of each of the last four tags, oldest first. Prompt lengths go
+down, runs across, one table each for prefill, decode and TTFT, and every run
+after the first shows its change from the first:
+
+```
+DECODE tok/s
+    CTX                 A                 B
+    512              59.2       74.3 +25.4%
+     2k              59.1       74.2 +25.7%
+     8k              59.0       73.8 +25.1%
+```
+
+`--bench` loads the server for as long as it runs (with the defaults, 15
+requests of up to 32k prompt tokens): run it on a machine you are not using
+for anything else.
+
 ---
 
 ## Keys
@@ -674,6 +753,7 @@ minute, then fills to 97 % for half a minute every four minutes, starting
 | `s` | settings screen (shows the version): change launch options, apply them now or save them as the default |
 | `l` | log viewer: per-model totals and the latest requests from the SQLite log (`r` refreshes) |
 | `c` | decode speed vs context length from the SQLite log, one model at a time (`←` `→` switch model, `r` refreshes) |
+| `B` | the `--bench` results table (opens by itself when the run ends) |
 | `q` / `Esc` | quit |
 
 Under `--replay` (see [Replay](#replay)) a few more keys drive playback, in
@@ -731,6 +811,8 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 
 Per-request `timings` only appear inside completion responses, which the
 dashboard never sees, so everything is reconstructed from polled counters.
+The one exception is a `--bench` run, whose requests the dashboard sends
+itself (see [Benchmark](#benchmark)).
 
 ---
 
@@ -944,6 +1026,12 @@ acceptance is not available for its models.
 --replay [FILE]      play a session back from a --log-db file (default: the auto one)
 --replay-from TIME   start of the range: Unix time, -2h, 'YYYY-MM-DD HH:MM', 'HH:MM'
 --replay-to TIME     end of the range, in the same forms
+--bench              benchmark the focused server (see Benchmark)
+--bench-ctx LIST     prompt lengths to measure (default 512,2k,8k,16k,32k)
+--bench-repeat 3     requests per length
+--bench-gen 256      tokens generated per request
+--bench-tag NAME     name of the run in the log (default: model and time)
+--bench-report [TAG…] compare logged runs and exit
 --version, -v        print the version and exit
 ```
 
@@ -983,7 +1071,10 @@ Three tables are written (timestamps are Unix seconds):
 `model_samples` (decode/prefill tok/s, context fill, session totals per model),
 `gpu_samples` (utilisation, VRAM, power, die and memory temperature per card)
 and `requests` (one row per finished request: tokens, TTFT, duration, average
-rates). The file
+rates). `--bench` adds `bench_runs` (tag, start, model, engine, GPUs,
+settings) and `bench_results` (one row per benchmark request: target length,
+prompt and generated tokens, TTFT, client, engine and dashboard rates, error).
+The file
 uses WAL, so it can be queried while the dashboard runs. Once the data passes
 `--log-db-max-mb` (1 GB by default) the oldest tenth of each table is deleted;
 SQLite reuses the freed pages, so the file stops growing at about that size.
