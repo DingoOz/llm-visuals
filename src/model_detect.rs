@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::gguf::{self, GgufInfo};
+use crate::offload::{self, Offload};
 use crate::vision::{self, Place, Vision};
 
 /// Information about a detected running LLM process
@@ -28,6 +29,9 @@ pub struct DetectedModel {
     pub gguf: Option<GgufInfo>,
     /// Weight byte layout from the tensor table (for bandwidth estimates).
     pub tensors: Option<gguf::TensorSummary>,
+    /// Where llama.cpp's `-ot` / `--cpu-moe` / `--n-cpu-moe` rules put the
+    /// tensors; `None` when the server was started without any.
+    pub offload: Option<Offload>,
     /// Vision encoder, when the server has (or may have) one.
     pub vision: Option<Vision>,
 }
@@ -151,8 +155,49 @@ pub fn load_gguf_metadata(model: &mut DetectedModel, path: PathBuf) {
             model.name = info.name.clone();
         }
         model.gguf = Some(info);
-        model.tensors = gguf::read_tensor_summary(&path).ok();
+        match gguf::read_tensor_table(&path) {
+            Ok(table) => {
+                model.offload = offload_for(model, &table);
+                model.tensors = Some(gguf::summarize_tensors(&table));
+            }
+            Err(_) => model.tensors = None,
+        }
     }
+}
+
+/// llama.cpp's buffer-type overrides applied to the tensor table.
+fn offload_for(m: &DetectedModel, table: &[(String, u64)]) -> Option<Offload> {
+    if m.engine != "llama.cpp" {
+        return None;
+    }
+    let env = vision::read_environ(m.pid);
+    let rules = offload::parse_rules(&m.cmdline, &env);
+    if rules.is_empty() {
+        return None;
+    }
+    // A process on one card can only have pinned tensors to that card.
+    let single = (m.gpu_indices.len() == 1).then(|| m.gpu_indices[0]);
+    // The CUDA probe is a child process; run it once, and only if a rule
+    // names a CUDA device.
+    let mut cuda: Option<Option<Vec<Option<u32>>>> = None;
+    Some(offload::place(
+        table,
+        &rules,
+        m.n_experts(),
+        m.n_experts_used(),
+        |family, ordinal| {
+            if family == "CUDA" {
+                let map = cuda.get_or_insert_with(|| vision::cuda_host_indices(&env));
+                if let Some(g) = map
+                    .as_ref()
+                    .and_then(|v| v.get(ordinal as usize).copied().flatten())
+                {
+                    return Some(g);
+                }
+            }
+            single
+        },
+    ))
 }
 
 /// The vision encoder a detected server has (or may have) loaded, from its
@@ -614,6 +659,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
             cmdline: cmdline.clone(),
             gguf: None,
             tensors: None,
+            offload: None,
             vision: None,
         });
         if !entry.gpu_indices.contains(&app.gpu_index) {
@@ -666,6 +712,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
                 cmdline,
                 gguf: None,
                 tensors: None,
+                offload: None,
                 vision: None,
             },
         );
@@ -2045,6 +2092,7 @@ pub async fn probe_endpoint(
         cmdline: format!("{final_name} --port {port}"),
         gguf: gguf_info,
         tensors: tensor_summary,
+        offload: None,
         vision,
     })
 }
@@ -2639,6 +2687,7 @@ mod tests {
             cmdline: "test --port 7000".into(),
             gguf: None,
             tensors: None,
+            offload: None,
             vision: None,
         };
         assert_eq!(m.key(), (7000_u32) | 0x8000_0000);
