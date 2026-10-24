@@ -40,6 +40,10 @@ pub struct RequestRecord {
     pub measured_prefill_tps: Option<f32>,
     pub decode_secs: f32,
     pub peak_decode_tps: f32,
+    /// The request was already running when the dashboard first saw it:
+    /// the tokens it had decoded by then. Its first token came before the
+    /// watching did, and its rate counts only the tokens that were watched.
+    pub attached_after: Option<usize>,
 }
 
 impl RequestRecord {
@@ -60,6 +64,7 @@ impl RequestRecord {
             measured_prefill_tps: None,
             decode_secs: 0.0,
             peak_decode_tps: 0.0,
+            attached_after: None,
         }
     }
 
@@ -70,6 +75,9 @@ impl RequestRecord {
     pub fn ttft(&self) -> Option<Duration> {
         if let Some(secs) = self.ttft {
             return Some(Duration::from_secs_f64(secs as f64));
+        }
+        if self.attached_after.is_some() {
+            return None;
         }
         self.first_token.map(|t| t - self.started)
     }
@@ -91,7 +99,8 @@ impl RequestRecord {
             }
         }
         if self.decode_secs > 0.05 {
-            self.decoded as f32 / self.decode_secs
+            let watched = self.decoded - self.attached_after.unwrap_or(0).min(self.decoded);
+            watched as f32 / self.decode_secs
         } else {
             0.0
         }
@@ -832,7 +841,9 @@ impl PerfTracker {
         let Some((t0, prev)) = self.last_sample.clone() else {
             self.last_sample = Some((now, s.clone()));
             if s.processing {
-                self.current = Some(RequestRecord::new(s.id_task, now, s));
+                let mut rec = RequestRecord::new(s.id_task, now, s);
+                rec.attached_after = Some(s.decoded);
+                self.current = Some(rec);
                 self.session_requests += 1;
             }
             return;
@@ -1165,6 +1176,35 @@ fn push(h: &mut VecDeque<f32>, v: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_seen_mid_flight_counts_only_what_was_watched() {
+        let t0 = Instant::now();
+        let busy = |decoded: usize| LiveStats {
+            processing: true,
+            id_task: 7,
+            prompt_tokens: 40,
+            prompt_processed: 40,
+            decoded,
+            decoded_present: true,
+            ..Default::default()
+        };
+        let mut p = PerfTracker::new();
+        // Attached 8,000 tokens into a long answer, then 12 tokens a second.
+        p.observe(&busy(8000), t0);
+        for i in 1..=5u64 {
+            p.observe(&busy(8000 + 12 * i as usize), t0 + Duration::from_secs(i));
+        }
+        let r = p.current.as_ref().unwrap();
+        assert!(
+            (r.avg_decode_tps() - 12.0).abs() < 0.5,
+            "{}",
+            r.avg_decode_tps()
+        );
+        // Its first token came before the dashboard was watching.
+        assert_eq!(r.ttft(), None);
+        assert_eq!(r.decoded, 8060);
+    }
 
     #[test]
     fn clock_reasons_are_held_briefly_and_bit_by_bit() {

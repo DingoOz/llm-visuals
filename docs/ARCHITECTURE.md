@@ -68,6 +68,7 @@ GPUs and the disk are shared.
 | `vllm.rs` | vLLM `/metrics` adapter: reconstructs per-request `LiveStats` from engine-wide Prometheus counters |
 | `ollama.rs` | Ollama: `GET /api/ps` (tag, size / size_vram, context, expiry), the manifest walk that names a runner's blob, `OLLAMA_HOST` parsing, the store lookup that finds a daemon slot's GGUF |
 | `sglang.rs` | SGLang adapter: `GET /v1/loads?include=all` plus one-shot `/server_info`; optional `sglang:realtime_tokens_total` |
+| `strata.rs` | Strata and Project Maya adapter: JSON `GET /metrics` (live request, finished-request totals, MTP drafts; Maya's `tiers` expert-tier counters and `gpu_map` VRAM split), `/health`, the server's `--config` JSON (Maya's pack and cards), and which processes are the server, its native engine and Maya's vision helper |
 | `gpu.rs` | in-process NVML telemetry collector (falling back to `nvidia-smi` CSV) or Linux amdgpu sysfs on a `spawn_blocking` thread; smooth random-walk demo GPUs |
 | `nvml.rs` | dynamically loads `nvml.dll` or `libnvidia-ml.so`; maintains a persistent in-process session for GPU metrics and PCIe throughput without subprocess overhead |
 | `perf.rs` | turns counter samples into rates with `RateWindow` (sliding window), tracks requests, TTFT, peaks, MTP acceptance, history ring buffers, the clocks-event reason hold; `Meter` (VU channel with peak hold and auto scale) and `BandwidthStats` for the pipeline view |

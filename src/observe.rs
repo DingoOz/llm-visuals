@@ -158,6 +158,9 @@ pub struct LiveStats {
     /// not, how much is in VRAM, when it unloads. `None` for other engines
     /// and while the daemon has not answered.
     pub ollama: Option<crate::ollama::Status>,
+    /// Maya's expert tiers: where this model's tokens found their experts.
+    /// `None` for other engines.
+    pub tiers: Option<crate::strata::ExpertTiers>,
 }
 
 /// Per-request decode count when `/slots` does not carry `n_decoded`.
@@ -482,6 +485,7 @@ pub fn parse_slots(body: &str) -> Option<LiveStats> {
         kv_usage_perc: None,
         auth_denied: None,
         ollama: None,
+        tiers: None,
     })
 }
 

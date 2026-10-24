@@ -29,6 +29,7 @@ use crate::pipeline::{GeneratedText, TokenBuffer};
 use crate::regress::{self, Comparison, History};
 use crate::replay::Hud;
 use crate::settings::{Kind, SettingsForm};
+use crate::strata::ExpertTiers;
 use crate::vision::{Place, Vision};
 
 const HEATMAP_TOKEN_WIDTH: usize = 40;
@@ -1639,7 +1640,10 @@ impl Renderer {
                 }
             }
             lines.push(Line::from(facts));
-            let hint = if d.detected.is_some_and(|m| m.engine == "strata") {
+            let hint = if d
+                .detected
+                .is_some_and(|m| crate::strata::is_family(&m.engine))
+            {
                 "Strata reports draft acceptance from 0.1.35"
             } else if d.detected.is_some_and(ollama::is_runner) {
                 "Ollama starts llama-server without --metrics: no acceptance stats"
@@ -1995,6 +1999,104 @@ impl Renderer {
     // Experts
     // -----------------------------------------------------------------------
 
+    /// Maya's expert tiers: the share of routed experts found in VRAM and
+    /// its recent history, what a token read from RAM or the SSD or promoted
+    /// into VRAM, and how full each tier's slots are.
+    fn render_expert_tiers(&self, frame: &mut Frame, area: Rect, t: &ExpertTiers, d: &Dashboard) {
+        let title = " ◆ EXPERT TIERS ";
+        let block = panel(title, pal::VIOLET);
+        // The engine reports while it generates; between requests the
+        // numbers are the last one's.
+        let block = if d.live.processing {
+            block
+        } else {
+            let right = Line::from(Span::styled(
+                " last request ",
+                Style::default().fg(pal::c(pal::TEXT_MUTED)),
+            ))
+            .right_aligned();
+            with_right(block, title, right, area).0
+        };
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let w = inner.width as usize;
+        let muted = Style::default().fg(pal::c(pal::TEXT_MUTED));
+        let text = Style::default().fg(pal::c(pal::TEXT));
+        let mut lines = Vec::new();
+        if let Some(hit) = t.vram_hit {
+            let label = "VRAM hit ";
+            let num = format!(" {:>5.1}%", hit * 100.0);
+            let rest = w.saturating_sub(label.len() + num.chars().count());
+            // The history takes half of a wide panel; a narrow one keeps
+            // the gauge.
+            let (bar_w, spark_w) = if rest >= 30 && t.hit_history.len() > 1 {
+                (rest / 2, rest - rest / 2 - 1)
+            } else {
+                (rest, 0)
+            };
+            let mut spans = vec![Span::styled(label, muted)];
+            spans.extend(gauge(hit, None, bar_w, GaugeStyle::Flow));
+            spans.push(Span::styled(num, text.add_modifier(Modifier::BOLD)));
+            if spark_w > 0 {
+                spans.push(Span::raw(" "));
+                if let Some(row) = sparkline(&t.hit_history, spark_w, 1, 1.0, pal::FLOW).pop() {
+                    spans.extend(row);
+                }
+            }
+            lines.push(Line::from(spans));
+        }
+        let mut per = vec![Span::styled("per token ", muted)];
+        let items = [
+            ("from RAM", t.ram_fetch, pal::TEXT),
+            // A token waiting on the SSD is the slow path; say it in amber.
+            (
+                "from SSD",
+                t.disk,
+                if t.disk.is_some_and(|v| v >= 0.05) {
+                    pal::AMBER
+                } else {
+                    pal::TEXT
+                },
+            ),
+            ("promoted", t.promo, pal::TEXT),
+            ("on CPU", t.cpu, pal::TEXT),
+        ];
+        for (label, v, colour) in items {
+            let Some(v) = v else { continue };
+            if per.len() > 1 {
+                per.push(Span::styled("  ·  ", muted));
+            }
+            per.push(Span::styled(format!("{label} "), muted));
+            per.push(Span::styled(
+                format!("{v:.1}"),
+                Style::default()
+                    .fg(pal::c(colour))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        if per.len() > 1 {
+            lines.push(Line::from(per));
+        }
+        let tier = |name: &str, used: Option<usize>, slots: Option<usize>| {
+            let (used, slots) = (used?, slots?);
+            Some(format!("{name} {} / {}", fmt_int(used), fmt_int(slots)))
+        };
+        let slots: Vec<String> = [
+            tier("VRAM", t.vram_used, t.vram_slots),
+            tier("RAM", t.ram_used, t.ram_slots),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !slots.is_empty() && lines.len() < inner.height as usize {
+            lines.push(Line::from(vec![
+                Span::styled("slots     ", muted),
+                Span::styled(slots.join("  ·  "), text),
+            ]));
+        }
+        frame.render_widget(Paragraph::new(lines), inner);
+    }
+
     fn render_experts(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
         if !d.attention.is_empty() {
             let block = panel(" ◆ OUTPUT ", pal::VIOLET);
@@ -2021,6 +2123,27 @@ impl Renderer {
                 pal::VIOLET,
                 "expert routing is not in the log",
             );
+        }
+        // Maya says where each token found its experts — the story of an
+        // engine that streams them in from RAM and the SSD — so that leads
+        // the panel, and the map follows in what is left.
+        let mut area = area;
+        if let Some(t) = d.live.tiers.as_ref().filter(|_| area.height >= 9) {
+            let rows = if area.height >= 16 { 5 } else { 4 };
+            self.render_expert_tiers(
+                frame,
+                Rect {
+                    height: rows,
+                    ..area
+                },
+                t,
+                d,
+            );
+            area = Rect {
+                y: area.y + rows,
+                height: area.height - rows,
+                ..area
+            };
         }
         let f = d.fade;
         let n_l = f.n_layers;
