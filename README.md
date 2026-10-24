@@ -852,12 +852,19 @@ A llama-server started with `--api-key` or `--api-key-file` answers `/slots`,
 `/metrics` and `/props` with 401. The dashboard reads the key from that
 server's command line and sends it as a bearer token, so no setup is needed.
 If the key is not on the command line, `--api-key-file` supplies one for
-every server.
+every server that does not name its own.
 
 A Strata server started with a key answers `/metrics` and `/v1/models` with
 401 as well. Reached by `--endpoint` without the key it is still recognised:
 its `/health` is open and names the server, the model and the context. The
-live numbers come from `/metrics`, so they need the key.
+live numbers come from `/metrics`, so they need the key. Strata keeps that key
+in the JSON config its command line names (`--config server.json`, key
+`api_key` — as Strata 0.2.1's upgrade tooling started writing on every
+server, not only keyed launches): the dashboard reads it from that file too,
+first string or list entry, so a Strata server needs no setup either. A
+relative `--config` is read from the server's own working directory, the key
+also reaches a server watched by `--endpoint`, and it wins over
+`--api-key-file`.
 
 An SGLang server started with a key leaves `/metrics` open but answers
 `/v1/loads`, where its numbers come from, with 401. vLLM checks its key only

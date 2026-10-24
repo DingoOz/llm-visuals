@@ -171,9 +171,14 @@ impl ModelSlot {
     }
 }
 
-/// Cmdline `--api-key` / `--api-key-file` wins; otherwise the launch key file.
+/// The server's own key wins — cmdline `--api-key` / `--api-key-file`, then
+/// the `api_key` in its config file (Strata) — otherwise the launch key file,
+/// which is meant for servers that do not name their own.
 fn auth_for(model: &DetectedModel, fallback: &HttpAuth) -> HttpAuth {
-    HttpAuth::from_token(model_detect::api_key_from(&model.cmdline)).or(fallback)
+    HttpAuth::from_token(
+        model_detect::api_key_from(&model.cmdline).or_else(|| model.api_key.clone()),
+    )
+    .or(fallback)
 }
 
 /// The servers to watch: everything detected, minus anything the `--pid`
@@ -244,6 +249,11 @@ async fn discover(args: &Args, auth: &HttpAuth) -> (Vec<DetectedModel>, Option<S
                 }
                 if fm.mem_used_mb == 0 {
                     fm.mem_used_mb = m.mem_used_mb;
+                }
+                // An endpoint probe has a synthetic cmdline; the key the
+                // server's own command line or config names is on `m`.
+                if fm.api_key.is_none() {
+                    fm.api_key = model_detect::api_key_from(&m.cmdline).or(m.api_key);
                 }
                 if fm.gguf.is_none() {
                     fm.gguf = m.gguf;
@@ -2152,6 +2162,7 @@ mod tests {
                 tensors: None,
                 offload: None,
                 vision: None,
+                api_key: None,
             });
             s.live.kv_usage_perc = kv;
             s
@@ -2263,6 +2274,40 @@ mod tests {
     }
 
     #[test]
+    fn auth_prefers_the_servers_own_key() {
+        let model = |cmdline: &str, api_key: Option<&str>| DetectedModel {
+            name: "m".into(),
+            path: None,
+            pid: 1,
+            process_name: "python".into(),
+            engine: "strata".into(),
+            gpu_indices: vec![],
+            mem_used_mb: 0,
+            host: "127.0.0.1".into(),
+            port: Some(8080),
+            ctx_max: None,
+            spec_type: None,
+            n_gpu_layers: None,
+            tensor_split: vec![],
+            cmdline: cmdline.into(),
+            gguf: None,
+            tensors: None,
+            offload: None,
+            vision: None,
+            api_key: api_key.map(str::to_string),
+        };
+        let fleet = HttpAuth::from_token(Some("fleet".into()));
+        let sent = |m: &DetectedModel| format!("{:?}", auth_for(m, &fleet));
+        let strata = "python server.py --engine strata --config s.json";
+        assert!(
+            sent(&model(strata, Some("own"))).contains("own"),
+            "config key beats --api-key-file"
+        );
+        assert!(sent(&model(&format!("{strata} --api-key cli"), Some("own"))).contains("cli"));
+        assert!(sent(&model(strata, None)).contains("fleet"));
+    }
+
+    #[test]
     fn a_server_is_watched_for_silence_only_once_it_has_answered() {
         let mut slot = ModelSlot::new(DetectedModel {
             name: "m".into(),
@@ -2283,6 +2328,7 @@ mod tests {
             tensors: None,
             offload: None,
             vision: None,
+            api_key: None,
         });
         let t0 = Instant::now();
         // Detected as an engine but never answering: not gone, never there.
@@ -2324,6 +2370,7 @@ mod tests {
             tensors: None,
             offload: None,
             vision: None,
+            api_key: None,
         };
         let mut refused = ModelSlot::new(model("sglang"));
         refused.live.auth_denied = Some(401);

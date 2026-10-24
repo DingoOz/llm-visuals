@@ -34,6 +34,10 @@ pub struct DetectedModel {
     pub offload: Option<Offload>,
     /// Vision encoder, when the server has (or may have) one.
     pub vision: Option<Vision>,
+    /// Bearer key the server names outside `cmdline`: the `api_key` in
+    /// Strata's `--config` JSON, or the key of the process an `--endpoint`
+    /// probe was merged with (its own cmdline is synthetic).
+    pub api_key: Option<String>,
 }
 
 impl std::fmt::Display for DetectedModel {
@@ -676,6 +680,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
             tensors: None,
             offload: None,
             vision: None,
+            api_key: None,
         });
         if !entry.gpu_indices.contains(&app.gpu_index) {
             entry.gpu_indices.push(app.gpu_index);
@@ -741,6 +746,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
                 tensors: None,
                 offload: None,
                 vision: None,
+                api_key: None,
             },
         );
     }
@@ -863,8 +869,12 @@ fn apply_strata_config(m: &mut DetectedModel) {
     let Some(path) = crate::strata::config_path(&m.cmdline, process_cwd(m.pid).as_deref()) else {
         return;
     };
-    let Some(cfg) = std::fs::read_to_string(&path)
-        .ok()
+    // A server config is a small regular file; a FIFO (`--config
+    // /dev/stdin`) would block the read, and a huge file is not a config.
+    let small_file = std::fs::metadata(&path).is_ok_and(|md| md.is_file() && md.len() <= 4 << 20);
+    let Some(cfg) = small_file
+        .then(|| std::fs::read_to_string(&path).ok())
+        .flatten()
         .and_then(|body| crate::strata::parse_config(&body))
     else {
         return;
@@ -883,6 +893,7 @@ fn apply_strata_config(m: &mut DetectedModel) {
     if m.ctx_max.is_none() {
         m.ctx_max = cfg.max_context;
     }
+    m.api_key = cfg.api_key;
     // The engine's own GPU memory names its cards; the config is the
     // fallback when the driver lists no processes.
     if m.gpu_indices.is_empty() {
@@ -2143,6 +2154,7 @@ pub async fn probe_endpoint(
         tensors: tensor_summary,
         offload: None,
         vision,
+        api_key: None,
     })
 }
 
@@ -2738,6 +2750,7 @@ mod tests {
             tensors: None,
             offload: None,
             vision: None,
+            api_key: None,
         };
         assert_eq!(m.key(), (7000_u32) | 0x8000_0000);
         assert_eq!(format!("{m}"), "test-model (:7000 · vllm · GPU ? · 0 MB)");

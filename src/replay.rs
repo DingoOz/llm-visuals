@@ -882,6 +882,7 @@ fn load_series(conn: &Connection, lo: f64, hi: f64) -> rusqlite::Result<Vec<Seri
                 tensors: None,
                 offload: None,
                 vision: None,
+                api_key: None,
             },
             rows,
             reqs,
