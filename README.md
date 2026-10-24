@@ -605,7 +605,7 @@ dashboard. Each is judged four times a second from numbers already on screen:
 | GPU hot | the die stays at or above its limit for 3 s: `--alert-temp-c` if given, else the first threshold the NVIDIA driver acts on (the lower of NVML's slowdown and max-operating temperatures), else 85 °C | it is 5 °C under for 2 s |
 | memory hot | the HBM sensor stays at or above the driver's memory max-operating temperature (95 °C if it names none) for 3 s | 5 °C under for 2 s |
 | slow decode | while decoding, the rate stays under `--alert-slow-pct` (50 %) of the model's usual rate for 5 s | it is back above that share + 10 points for 2 s, or the request ends |
-| server gone | the server has not answered its poller for 10 s | the next answer |
+| server gone | a server that has answered its poller stops answering for 10 s | the next answer |
 
 A full card is usually the intended configuration — vLLM, SGLang and Strata
 preallocate their KV pool, and llama.cpp users fit to ~95 % — so the VRAM
@@ -631,8 +631,10 @@ pool (GB10 / DGX Spark, where the bar is a server's own reservation over
 system RAM) does not raise the VRAM alert; a driver-measured APU pool does.
 The NVML temperature limits were read on a P100 (82 °C) and a V100 (83 °C
 die, 85 °C memory).
-Ollama, whose poller reports only once, and a server refusing the API key,
-which the status line already names, are not watched for silence.
+An Ollama runner, which exits by design when its keep-alive runs out, a
+server refusing the API key, which the status line already names, and a
+process that has never answered at all (detected as an engine, but serving
+no API) are not watched for silence.
 
 An alert is announced once per episode: the header shows a red `⚠ VRAM G1`
 badge (`⚠ 3 alerts` for several) for as long as it lasts, and for its first
