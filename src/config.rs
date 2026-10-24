@@ -190,6 +190,36 @@ pub struct Args {
     #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u32).range(2..=365))]
     pub regress_days: u32,
 
+    /// Play a session back from a --log-db file instead of watching live
+    /// servers; with no FILE, the file `--log-db auto` writes
+    #[arg(
+        long,
+        value_name = "FILE",
+        num_args = 0..=1,
+        default_missing_value = "auto",
+        conflicts_with = "demo"
+    )]
+    pub replay: Option<String>,
+
+    /// Replay from this time: a Unix time, -30m / -2h / -1d, 'YYYY-MM-DD HH:MM'
+    /// or 'HH:MM' (default: the start of the newest session)
+    #[arg(
+        long,
+        value_name = "TIME",
+        requires = "replay",
+        allow_hyphen_values = true
+    )]
+    pub replay_from: Option<String>,
+
+    /// Replay up to this time, in the same forms (default: the end of the log)
+    #[arg(
+        long,
+        value_name = "TIME",
+        requires = "replay",
+        allow_hyphen_values = true
+    )]
+    pub replay_to: Option<String>,
+
     /// Print the version and exit
     #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
     version: Option<bool>,
@@ -242,9 +272,21 @@ impl Args {
     /// Where `--log-db` writes, or None when logging is off. `auto` stays off
     /// in `--demo` so synthetic numbers never mix into the real history.
     pub fn log_db_path(&self) -> Option<PathBuf> {
+        // A replay never writes: the file being played may be this one.
+        if self.replay.is_some() {
+            return None;
+        }
         match self.log_db.as_str() {
             "off" | "none" | "" => None,
             "auto" if self.demo => None,
+            "auto" => crate::settings::default_db_path(),
+            path => Some(PathBuf::from(path)),
+        }
+    }
+
+    /// The log `--replay` plays, when replaying.
+    pub fn replay_path(&self) -> Option<PathBuf> {
+        match self.replay.as_deref()? {
             "auto" => crate::settings::default_db_path(),
             path => Some(PathBuf::from(path)),
         }
@@ -350,6 +392,29 @@ mod tests {
         assert_eq!((l.vram_pct, l.temp_c, l.slow_frac), (90.0, Some(78.0), 0.4));
         assert!(Args::try_parse_from(["llm-visuals", "--alerts=loud"]).is_err());
         assert!(Args::try_parse_from(["llm-visuals", "--alert-slow-pct=0"]).is_err());
+    }
+
+    #[test]
+    fn replay_takes_an_optional_file_and_never_logs() {
+        let args = Args::try_parse_from(["llm-visuals", "--replay", "--theme", "neon"]).unwrap();
+        assert_eq!(args.replay.as_deref(), Some("auto"));
+        assert_eq!(args.theme, "neon");
+        assert_eq!(args.replay_path(), crate::settings::default_db_path());
+        assert_eq!(args.log_db_path(), None, "replay must not write a log");
+        let args = Args::try_parse_from([
+            "llm-visuals",
+            "--replay=/tmp/x.db",
+            "--replay-from",
+            "-2h",
+            "--log-db",
+            "/tmp/x.db",
+        ])
+        .unwrap();
+        assert_eq!(args.replay_path(), Some(PathBuf::from("/tmp/x.db")));
+        assert_eq!(args.replay_from.as_deref(), Some("-2h"));
+        assert_eq!(args.log_db_path(), None);
+        assert!(Args::try_parse_from(["llm-visuals", "--replay", "--demo"]).is_err());
+        assert!(Args::try_parse_from(["llm-visuals", "--replay-from", "-2h"]).is_err());
     }
 
     #[test]

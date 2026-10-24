@@ -26,6 +26,7 @@ use crate::ollama;
 use crate::perf::{Meter, PerfTracker, Phase, RequestRecord};
 use crate::pipeline::{GeneratedText, TokenBuffer};
 use crate::regress::{self, Comparison, History};
+use crate::replay::Hud;
 use crate::settings::{Kind, SettingsForm};
 use crate::vision::{Place, Vision};
 
@@ -95,6 +96,8 @@ pub struct Dashboard<'a> {
     /// Why no model has a regression baseline at all (logging off, or the
     /// log could not be read).
     pub regress_off: Option<&'a str>,
+    /// Playback position when the numbers come from `--replay`, not servers.
+    pub replay: Option<Hud>,
 }
 
 pub struct Renderer {
@@ -240,6 +243,16 @@ impl Renderer {
     }
 
     fn render_bandwidth(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
+        if d.replay.is_some() {
+            return self.render_not_logged(
+                frame,
+                area,
+                " ◆ MEMORY PIPELINE ",
+                pal::CYAN,
+                "the log keeps token rates and GPU totals, not the disk, RAM, PCIe and \
+                 memory-controller counters or the tensor table this view is drawn from",
+            );
+        }
         let verdict_h = if area.height >= 20 { 4 } else { 0 };
         let rows = Layout::default()
             .direction(Direction::Vertical)
@@ -411,27 +424,37 @@ impl Renderer {
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        let right = Line::from({
-            right_spans.extend([
-                Span::styled(
-                    format!(" {spinner} {badge_txt} "),
+        right_spans.push(Span::styled(
+            format!(" {spinner} {badge_txt} "),
+            Style::default()
+                .fg(badge_fg)
+                .bg(badge_bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+        match d.replay {
+            // Replayed numbers carry the time they were logged, not the clock.
+            Some(r) => {
+                right_spans.push(Span::styled(
+                    format!(" REPLAY {} ", fmt_unix(r.ts)),
                     Style::default()
-                        .fg(badge_fg)
-                        .bg(badge_bg)
+                        .fg(pal::c(pal::AMBER))
                         .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(
-                        " up {}  {} ",
-                        fmt_clock(d.perf.uptime()),
-                        chrono::Local::now().format("%H:%M:%S")
-                    ),
+                ));
+                right_spans.push(Span::styled(
+                    format!("×{} {} ", r.speed, if r.paused { "⏸" } else { "▶" }),
                     Style::default().fg(pal::c(pal::TEXT_DIM)),
+                ));
+            }
+            None => right_spans.push(Span::styled(
+                format!(
+                    " up {}  {} ",
+                    fmt_clock(d.perf.uptime()),
+                    chrono::Local::now().format("%H:%M:%S")
                 ),
-            ]);
-            right_spans
-        })
-        .right_aligned();
+                Style::default().fg(pal::c(pal::TEXT_DIM)),
+            )),
+        }
+        let right = Line::from(right_spans).right_aligned();
 
         let (block, _) = with_right(
             panel(" ◆ LLM VISUALS ", pal::CYAN),
@@ -441,6 +464,9 @@ impl Renderer {
         );
         let inner = block.inner(area);
         frame.render_widget(block, area);
+        if let Some(r) = d.replay {
+            self.render_replay_progress(frame, area, r);
+        }
 
         let mut spans: Vec<Span> = Vec::new();
         let sep = || Span::styled("  ·  ", Style::default().fg(pal::c(pal::TEXT_MUTED)));
@@ -1066,8 +1092,13 @@ impl Renderer {
                 .get(gi)
                 .copied()
                 .unwrap_or(g.vram_percent() / 100.0);
+            // Replayed, the card's total is logged but not who holds it: no
+            // weights / KV split, the used share drawn as unattributed.
+            let split = d.replay.is_none();
             let weights = d.fade.weight_frac.get(gi).copied().unwrap_or(0.0).min(used);
+            let weights = if split { weights } else { 0.0 };
             let kv = d.fade.kv_alloc_frac.get(gi).copied().unwrap_or(0.0);
+            let kv = if split { kv } else { 0.0 };
             let kv_fill = kv_lit_share(g, d.live, d.fade.kv_frac);
             // Same bar, honest name: on unified-memory parts (GB10 / DGX
             // Spark) the pool is system RAM, not VRAM — labelled per
@@ -1090,7 +1121,7 @@ impl Renderer {
             } else {
                 2 + 2 * tenants.len()
             };
-            let legend_w = if w > 78 + tenant_w { 22 } else { 0 };
+            let legend_w = if split && w > 78 + tenant_w { 22 } else { 0 };
             let bar_w = w
                 .saturating_sub(label.len() + txt.len() + legend_w + tenant_w)
                 .clamp(4, 40);
@@ -1205,7 +1236,13 @@ impl Renderer {
                 &pwr_h,
                 right_w,
                 spark_rows,
-                g.power_max_watts.max(1.0),
+                // No limit known (a replayed card, some drivers): scale to
+                // the history rather than pin every sample to the top.
+                if g.power_max_watts > 0.0 {
+                    g.power_max_watts
+                } else {
+                    pwr_h.iter().copied().fold(1.0, f32::max)
+                },
                 pal::PREFILL,
             );
             for (i, (u, pw)) in u_rows.into_iter().zip(p_rows).enumerate() {
@@ -1511,6 +1548,15 @@ impl Renderer {
     // -----------------------------------------------------------------------
 
     fn render_spec(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
+        if d.replay.is_some() {
+            return self.render_not_logged(
+                frame,
+                area,
+                " ◆ SPECULATIVE ",
+                pal::AMBER,
+                "draft acceptance is not in the log",
+            );
+        }
         let sp = &d.perf.spec;
         let spec_type = if !d.live.spec_types.is_empty() {
             d.live.spec_types.trim_start_matches("none,").to_string()
@@ -1700,6 +1746,15 @@ impl Renderer {
     // -----------------------------------------------------------------------
 
     fn render_layers(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
+        if d.replay.is_some() {
+            return self.render_not_logged(
+                frame,
+                area,
+                " ◆ LAYERS ",
+                pal::BLUE,
+                "the model's layers and their placement are not in the log",
+            );
+        }
         if !d.attention.is_empty() {
             self.render_attention_heatmap(frame, area, d);
             return;
@@ -1949,6 +2004,15 @@ impl Renderer {
                 inner,
             );
             return;
+        }
+        if d.replay.is_some() {
+            return self.render_not_logged(
+                frame,
+                area,
+                " ◆ EXPERTS ",
+                pal::VIOLET,
+                "expert routing is not in the log",
+            );
         }
         let f = d.fade;
         let n_l = f.n_layers;
@@ -2697,7 +2761,8 @@ impl Renderer {
                 .fg(pal::c(pal::TEXT_MUTED))
                 .add_modifier(Modifier::BOLD),
         ))];
-        let now = Instant::now();
+        // A replayed request is as old as it was at that point in the log.
+        let now = d.replay.map_or_else(Instant::now, |r| r.now);
         let rows = p.recent_requests(inner.height.saturating_sub(1) as usize);
         if rows.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -2834,7 +2899,16 @@ impl Renderer {
         items.push(("s", "settings".into(), d.settings.is_some()));
         items.push(("l", "log".into(), d.log.is_some()));
         items.push(("c", "ctx speed".into(), d.ctx_speed.is_some()));
-        items.push(("r", "rescan".into(), false));
+        match d.replay {
+            Some(r) => {
+                // Ahead of the view keys: playback is what a replay is for.
+                let play = if r.paused { "play" } else { "pause" };
+                items.insert(1, ("␣", play.into(), false));
+                items.insert(2, ("[ ]", "seek".into(), false));
+                items.insert(3, ("< >", format!("×{}", r.speed), false));
+            }
+            None => items.push(("r", "rescan".into(), false)),
+        }
 
         let cost = |it: &[(&str, String, bool)]| -> usize {
             it.iter()
@@ -2900,6 +2974,69 @@ impl Renderer {
                 .style(Style::default().bg(pal::c(pal::chrome().panel))),
             area,
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Replay (--replay)
+// ---------------------------------------------------------------------------
+
+impl Renderer {
+    /// A panel whose source the log does not keep: said, not simulated.
+    fn render_not_logged(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        title: &str,
+        accent: (u8, u8, u8),
+        why: &str,
+    ) {
+        let block = panel(title, accent);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        // One column of margin, kept on the wrapped lines too.
+        let inner = Rect {
+            x: inner.x + 1,
+            width: inner.width.saturating_sub(1),
+            ..inner
+        };
+        let text = Text::from(vec![
+            Line::from(Span::styled(
+                "not in log",
+                Style::default()
+                    .fg(pal::c(pal::TEXT))
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                why.to_string(),
+                Style::default().fg(pal::c(pal::TEXT_DIM)),
+            )),
+        ]);
+        frame.render_widget(
+            Paragraph::new(text).wrap(ratatui::widgets::Wrap { trim: false }),
+            inner,
+        );
+    }
+
+    /// The header's bottom border becomes the playback position.
+    fn render_replay_progress(&self, frame: &mut Frame, area: Rect, r: Hud) {
+        if area.width < 24 || area.height < 2 {
+            return;
+        }
+        let w = area.width as usize - 2;
+        let done = (r.progress.clamp(0.0, 1.0) * w as f32).round() as usize;
+        let line = Line::from(vec![
+            Span::styled(
+                "━".repeat(done),
+                Style::default().fg(pal::c(pal::accent(pal::AMBER))),
+            ),
+            Span::styled(
+                "─".repeat(w - done),
+                Style::default().fg(pal::c(pal::chrome().border)),
+            ),
+        ]);
+        let bar = Rect::new(area.x + 1, area.y + area.height - 1, w as u16, 1);
+        frame.render_widget(Paragraph::new(line), bar);
     }
 }
 
@@ -3604,11 +3741,14 @@ impl Renderer {
                 Some(l) if m.detected.mem_used_mb == 0 => l.size_vram / (1024 * 1024),
                 _ => m.detected.mem_used_mb,
             };
-            let gb = mb as f32 / 1024.0;
-            spans.push(Span::styled(
-                format!("{gb:>5.1}G "),
-                Style::default().fg(pal::c(pal::BLUE)),
-            ));
+            // A replayed model's own VRAM is not in the log; 0.0G would read
+            // as a measurement.
+            let txt = if d.replay.is_some() {
+                format!("{:>5} ", "—")
+            } else {
+                format!("{:>5.1}G ", mb as f32 / 1024.0)
+            };
+            spans.push(Span::styled(txt, Style::default().fg(pal::c(pal::BLUE))));
         }
 
         Line::from(fit_spans(&spans, w))
@@ -3818,7 +3958,11 @@ impl Renderer {
         }
         lines.push(kv(
             "vram",
-            format!("{:.1} G", m.detected.mem_used_mb as f32 / 1024.0),
+            if d.replay.is_some() {
+                "not in log".into()
+            } else {
+                format!("{:.1} G", m.detected.mem_used_mb as f32 / 1024.0)
+            },
             pal::BLUE,
         ));
         if !m.detected.gpu_indices.is_empty() {
@@ -5673,6 +5817,7 @@ mod tests {
             alerts: &[],
             alert_banner: None,
             regress_off: None,
+            replay: None,
         };
         let renderer = Renderer::new(pal::get_theme("defrag"), 0, 0, 1);
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -5723,6 +5868,7 @@ mod tests {
             alert_banner: alerts.last().filter(|_| banner),
             energy: &GpuEnergy::default(),
             regress_off: None,
+            replay: None,
         };
         let renderer = Renderer::new(pal::get_theme("defrag"), 0, 0, 1);
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
@@ -6000,6 +6146,7 @@ mod tests {
             alerts: &[],
             alert_banner: None,
             regress_off: None,
+            replay: None,
         };
         energy_line(&dash, w)
             .spans

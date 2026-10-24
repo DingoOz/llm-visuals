@@ -76,6 +76,7 @@ GPUs and the disk are shared.
 | `fade.rs` | time-based smoothing so the UI breathes: fast attack, slow release; per-expert heat that cools exponentially; per-expert usage (the server's hit counts as a share of the busiest expert's) eased for the landscape |
 | `landscape.rs` | the expert landscape (`e`), free of terminal types: a `Camera` that rests at the four isometric corners, the projection, `Grid` (experts and layers grouped to what the canvas resolves) and a small rasteriser — boxes in painter's order, supersampled, with a blurred glow — that returns an RGB image `render.rs` paints with half blocks |
 | `balance.rs` | router load balance for the balance view (`u`), free of terminal types: per layer, from the `/experts` hit counts, effective experts (exp entropy), top-k share, a ranked-hits curve, and which layers stand out against the median layer |
+| `replay.rs` | `--replay`: reads a `--log-db` file read-only, splits it into sessions on five-minute holes, and turns its rows back into the `LiveStats` and GPU frames a live poller would have produced, stamped on a clock that runs in logged seconds; pause, seek (with a minute of warm-up) and speed |
 | `demo.rs` | synthetic servers (`--demo-models N`, each a prefill → decode → idle loop with its own profile) emitting `LiveStats`, `SpecMetrics` and `ExpertStats` through the same tagged channels; one extra task walks the shared GPUs and host counters from their combined load |
 | `alerts.rs` | the alert conditions (VRAM growth past the level each card settled at, GPU / memory hot, slow decode against the model's own context-matched baseline, server gone), each a hold → raise → hysteresis → clear episode with a per-subject announcement cooldown; free of terminal types, fed by the frame loop four times a second; plus the desktop notifier (`notify-send` / `osascript`) |
 | `colors.rs` | truecolor / 256-colour gating, gradients, palette constants, themes |
@@ -161,6 +162,32 @@ per card. The VRAM stream's ceiling combines the cards that hold weights:
 cards read their shares one after another, and `Σ bytes_i / max (bytes_i /
 peak_i)` under a parallel one (tensor-parallel safetensors servers,
 `--split-mode row`). It is unknown unless every such card has a peak.
+
+**Replay** (`--replay`) replaces every poller and hardware collector with
+one source driven from the frame loop rather than its own task, because
+seeking has to restart the trackers in step with the samples:
+
+```
+ llm.db (read-only) ─► replay.rs ─ step(wall dt × speed) ─► Event::Reset
+   model_samples       one LiveStats per model per 0.2 s     Event::Live{ts,pid}
+   requests            of logged time; GPU rows at their ts  Event::Gpu{ts}
+   gpu_samples                         │
+                                       ▼
+                     main.rs: PerfTracker::observe(_, replay.instant(ts))
+```
+
+Sessions are found without a scan of the log: rows are appended in time
+order and trimmed oldest first, so rowid order is time order and a binary
+search over rowids stands in for the index `ts` does not have. The newest
+session is read by looking back from the end through a window that grows
+until the session's start is inside it.
+
+`replay.instant(ts)` maps logged time onto an `Instant` one logged second per
+second at any speed, so rate windows, peak holds and request durations are
+computed as they were live. Within a request, tokens follow the interpolated
+session counters, scaled to the request row's totals; its start, first token
+and end come from that row. `fade.rs` keeps wall-clock time: smoothing is a
+display effect, not part of the record.
 
 ## Timing model
 
