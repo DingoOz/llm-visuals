@@ -9,11 +9,12 @@
 //! If NVML is not available on the machine (e.g. non-NVIDIA GPUs, or driver missing),
 //! it cleanly returns `None` and allows graceful fallback.
 
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use crate::gpu::GpuStats;
+use crate::gpu::{peak_mem_bandwidth_gb_s, ClockReasons, GpuStats};
 
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy)]
@@ -99,10 +100,12 @@ type FnNvmlDeviceGetPowerUsage = unsafe extern "C" fn(*mut c_void, *mut u32) -> 
 type FnNvmlDeviceGetPowerLimit = unsafe extern "C" fn(*mut c_void, *mut u32) -> u32;
 type FnNvmlDeviceGetClockInfo = unsafe extern "C" fn(*mut c_void, u32, *mut u32) -> u32;
 type FnNvmlDeviceGetMaxClockInfo = unsafe extern "C" fn(*mut c_void, u32, *mut u32) -> u32;
+type FnNvmlDeviceGetMemoryBusWidth = unsafe extern "C" fn(*mut c_void, *mut u32) -> u32;
 type FnNvmlDeviceGetFanSpeed = unsafe extern "C" fn(*mut c_void, *mut u32) -> u32;
 type FnNvmlDeviceGetPcieGen = unsafe extern "C" fn(*mut c_void, *mut u32) -> u32;
 type FnNvmlDeviceGetPcieWidth = unsafe extern "C" fn(*mut c_void, *mut u32) -> u32;
 type FnNvmlDeviceGetPcieThroughput = unsafe extern "C" fn(*mut c_void, u32, *mut u32) -> u32;
+type FnNvmlDeviceGetClocksEventReasons = unsafe extern "C" fn(*mut c_void, *mut u64) -> u32;
 
 #[cfg(windows)]
 pub(crate) mod os {
@@ -213,10 +216,15 @@ pub struct NvmlSession {
     device_get_power_limit_fn: Option<FnNvmlDeviceGetPowerLimit>,
     device_get_clock_info_fn: Option<FnNvmlDeviceGetClockInfo>,
     device_get_max_clock_info_fn: Option<FnNvmlDeviceGetMaxClockInfo>,
+    device_get_memory_bus_width_fn: Option<FnNvmlDeviceGetMemoryBusWidth>,
     device_get_fan_speed_fn: Option<FnNvmlDeviceGetFanSpeed>,
     device_get_pcie_gen_fn: Option<FnNvmlDeviceGetPcieGen>,
     device_get_pcie_width_fn: Option<FnNvmlDeviceGetPcieWidth>,
     device_get_pcie_throughput_fn: Option<FnNvmlDeviceGetPcieThroughput>,
+    device_get_clocks_event_reasons_fn: Option<FnNvmlDeviceGetClocksEventReasons>,
+    /// Peak memory bandwidth per device index, GB/s. The inputs are fixed
+    /// properties of the card, so each is asked for until it answers once.
+    mem_peak_cache: Mutex<HashMap<u32, f32>>,
     initialized: AtomicBool,
 }
 
@@ -329,6 +337,12 @@ impl NvmlSession {
             b"nvmlDeviceGetMaxClockInfo\0",
             FnNvmlDeviceGetMaxClockInfo
         );
+        // R384+; an older driver leaves the peak bandwidth unknown.
+        let device_get_memory_bus_width_fn = opt_sym!(
+            lib,
+            b"nvmlDeviceGetMemoryBusWidth\0",
+            FnNvmlDeviceGetMemoryBusWidth
+        );
         let device_get_fan_speed_fn =
             opt_sym!(lib, b"nvmlDeviceGetFanSpeed\0", FnNvmlDeviceGetFanSpeed);
         let device_get_pcie_gen_fn = opt_sym!(
@@ -346,6 +360,22 @@ impl NvmlSession {
             b"nvmlDeviceGetPcieThroughput\0",
             FnNvmlDeviceGetPcieThroughput
         );
+
+        // Same call under two names: "throttle" became "event" in later
+        // headers, and the old symbol stays as a deprecated alias. A driver
+        // older than either leaves the badge off.
+        let device_get_clocks_event_reasons_fn = opt_sym!(
+            lib,
+            b"nvmlDeviceGetCurrentClocksEventReasons\0",
+            FnNvmlDeviceGetClocksEventReasons
+        )
+        .or_else(|| {
+            opt_sym!(
+                lib,
+                b"nvmlDeviceGetCurrentClocksThrottleReasons\0",
+                FnNvmlDeviceGetClocksEventReasons
+            )
+        });
 
         // Initialize driver session.
         // NOTE: init_fn() MUST remain the last fallible step before returning Self.
@@ -372,10 +402,13 @@ impl NvmlSession {
             device_get_power_limit_fn,
             device_get_clock_info_fn,
             device_get_max_clock_info_fn,
+            device_get_memory_bus_width_fn,
             device_get_fan_speed_fn,
             device_get_pcie_gen_fn,
             device_get_pcie_width_fn,
             device_get_pcie_throughput_fn,
+            device_get_clocks_event_reasons_fn,
+            mem_peak_cache: Mutex::new(HashMap::new()),
             initialized: AtomicBool::new(true),
         }))
     }
@@ -387,6 +420,10 @@ impl NvmlSession {
     fn reinit(&self) -> bool {
         if self.initialized.swap(false, Ordering::SeqCst) {
             unsafe { (self.shutdown_fn)() };
+        }
+        // A reset or driver reload can renumber the devices.
+        if let Ok(mut cache) = self.mem_peak_cache.lock() {
+            cache.clear();
         }
         let ok = unsafe { (self.init_fn)() } == NVML_SUCCESS;
         self.initialized.store(ok, Ordering::SeqCst);
@@ -424,6 +461,35 @@ impl NvmlSession {
         }
         let mut m = NvmlMemory::default();
         (unsafe { (self.device_get_memory_info_fn)(handle, &mut m) } == NVML_SUCCESS).then_some(m)
+    }
+
+    /// Peak memory bandwidth from the bus width and the maximum memory clock,
+    /// cached once both have answered. A card or driver that cannot answer
+    /// (NOT_SUPPORTED, a pre-R384 library) stays unknown and is asked again
+    /// next poll: two cheap calls, and a transient failure does not stick.
+    fn mem_peak_gb_s(&self, index: u32, handle: *mut c_void) -> Option<f32> {
+        if let Some(peak) = self
+            .mem_peak_cache
+            .lock()
+            .ok()
+            .and_then(|c| c.get(&index).copied())
+        {
+            return Some(peak);
+        }
+        let bus_fn = self.device_get_memory_bus_width_fn?;
+        let max_clock_fn = self.device_get_max_clock_info_fn?;
+        let mut bus_bits = 0u32;
+        let mut mem_mhz = 0u32;
+        if unsafe { bus_fn(handle, &mut bus_bits) } != NVML_SUCCESS
+            || unsafe { max_clock_fn(handle, NVML_CLOCK_MEM, &mut mem_mhz) } != NVML_SUCCESS
+        {
+            return None;
+        }
+        let peak = peak_mem_bandwidth_gb_s(bus_bits, mem_mhz)?;
+        if let Ok(mut cache) = self.mem_peak_cache.lock() {
+            cache.insert(index, peak);
+        }
+        Some(peak)
     }
 
     /// Query stats for all NVIDIA GPUs currently online.
@@ -555,6 +621,15 @@ impl NvmlSession {
                 let _ = unsafe { width_fn(handle, &mut pcie_width) };
             }
 
+            // NOT_SUPPORTED (some GeForce and virtual GPUs) reads as unknown.
+            let clock_reasons = self
+                .device_get_clocks_event_reasons_fn
+                .and_then(|reasons_fn| {
+                    let mut bits = 0u64;
+                    (unsafe { reasons_fn(handle, &mut bits) } == NVML_SUCCESS)
+                        .then_some(ClockReasons(bits))
+                });
+
             stats_list.push(GpuStats {
                 index,
                 name,
@@ -567,6 +642,7 @@ impl NvmlSession {
                 power_max_watts,
                 temperature,
                 temperature_memory,
+                clock_reasons,
                 clock_sm_mhz: sm_clock,
                 clock_sm_max_mhz: sm_clock_max,
                 clock_mem_mhz: mem_clock,
@@ -577,6 +653,7 @@ impl NvmlSession {
                 unified_measured: false,
                 pcie_gen,
                 pcie_width,
+                mem_peak_gb_s: self.mem_peak_gb_s(index, handle),
             });
         }
 

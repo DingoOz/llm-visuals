@@ -1,3 +1,4 @@
+mod balance;
 mod bandwidth;
 mod colors;
 mod config;
@@ -14,6 +15,8 @@ mod model_detect;
 mod ninfer;
 pub mod nvml;
 mod observe;
+mod offload;
+mod ollama;
 mod perf;
 mod pipeline;
 mod render;
@@ -64,6 +67,8 @@ struct ModelSlot {
     num_layers: usize,
     num_heads: usize,
     ctx_max: usize,
+    /// The tag Ollama last said this slot holds; empty until it has.
+    ollama_tag: String,
 }
 
 impl ModelSlot {
@@ -86,7 +91,34 @@ impl ModelSlot {
             experts: None,
             experts_seen: 0,
             routing: None,
+            ollama_tag: String::new(),
         }
+    }
+
+    /// The tag Ollama says is loaded. A runner's blob can belong to several
+    /// tags, and the daemon's own slot does not know its model until asked.
+    /// That slot has no command line to have read the GGUF from, and holds
+    /// whichever model was loaded last, so its header is read from the
+    /// local store each time the tag changes.
+    fn adopt_ollama_tag(&mut self, name: &str) {
+        if name.is_empty() || self.ollama_tag == name {
+            return;
+        }
+        self.ollama_tag = name.to_string();
+        self.model.name = name.to_string();
+        // A runner's GGUF is its own blob's; only the daemon's slot changes model.
+        let daemon =
+            self.model.engine == "ollama" && !ollama::is_legacy_runner(&self.model.cmdline);
+        if self.model.gguf.is_some() && !daemon {
+            return;
+        }
+        self.model.gguf = None;
+        self.model.tensors = None;
+        if let Some(blob) = ollama::blob_for_name(name) {
+            model_detect::load_gguf_metadata(&mut self.model, blob);
+        }
+        self.num_layers = self.model.n_layers();
+        self.num_heads = self.model.n_heads();
     }
 
     fn view(&self) -> ModelView<'_> {
@@ -155,6 +187,13 @@ async fn discover(args: &Args, auth: &HttpAuth) -> (Vec<DetectedModel>, Option<S
             (fm.port.is_some() && fm.port == m.port) || (!fm.name.is_empty() && fm.name == m.name)
         });
         if let Some(fm) = duplicate {
+            // An Ollama daemon named at the command line, and the runner
+            // serving its loaded model: the runner has the token counters,
+            // and finds its daemon by itself.
+            if fm.engine == "ollama" && m.engine == "llama.cpp" && ollama::is_runner(&m) {
+                *fm = m;
+                continue;
+            }
             let is_loopback = matches!(
                 fm.host.as_str(),
                 "127.0.0.1" | "localhost" | "0.0.0.0" | "::1" | "[::1]"
@@ -172,6 +211,7 @@ async fn discover(args: &Args, auth: &HttpAuth) -> (Vec<DetectedModel>, Option<S
                 if fm.gguf.is_none() {
                     fm.gguf = m.gguf;
                     fm.tensors = m.tensors;
+                    fm.offload = m.offload;
                 }
                 // The process scan can place the encoder; a port probe can't.
                 if m.vision.is_some()
@@ -456,15 +496,24 @@ async fn poll_server(
             tokio::time::sleep(delay).await;
         }
     }
-    if model.engine == "ollama" {
-        // Ollama exposes /v1/models and /api/tags, but no /slots or Prometheus /metrics.
-        // Populate initial slot metadata and keep alive without spamming 404s.
-        let stats = LiveStats {
-            ctx_max: model.ctx_max.unwrap_or(0),
-            ..Default::default()
-        };
-        let _ = live_tx.try_send((pid, stats));
+    let ollama = ollama::Link::for_model(&model);
+    if let Some(link) = ollama.as_ref().filter(|l| !l.counters) {
+        // The daemon, or an `ollama runner` from before the llama-server
+        // one: no token counters anywhere, so `/api/ps` is all there is.
         loop {
+            let status = link.poll(&auth).await;
+            let stats = LiveStats {
+                ctx_max: status
+                    .as_ref()
+                    .and_then(|s| s.loaded.as_ref())
+                    .map(|p| p.context_length)
+                    .filter(|&c| c > 0)
+                    .or(model.ctx_max)
+                    .unwrap_or(0),
+                ollama: status,
+                ..Default::default()
+            };
+            let _ = live_tx.try_send((pid, stats));
             tokio::time::sleep(poll.max(Duration::from_secs(2))).await;
         }
     }
@@ -474,8 +523,36 @@ async fn poll_server(
     let mut experts_misses = 0u32;
     let mut decode_fallback = observe::DecodeFallback::default();
     let host = model.host.clone();
+    // A llama-server that Ollama started: `/slots` has the live numbers, the
+    // daemon the tag, the VRAM share and the unload time. Those change at
+    // load and per request, and every `/api/ps` is a line in Ollama's log.
+    let mut ollama_status: Option<ollama::Status> = None;
+    let mut ollama_due = Instant::now();
     loop {
         let mut stats_opt = observe::poll_llama(&host, port, &auth).await;
+        if let Some(link) = &ollama {
+            if Instant::now() >= ollama_due {
+                // A runner that stopped answering has usually been unloaded
+                // (keep-alive ran out), so ask sooner while it is silent.
+                let next = if stats_opt.is_some() { 5 } else { 2 };
+                ollama_due = Instant::now() + Duration::from_secs(next);
+                // A daemon that does not answer keeps the last word it gave.
+                if let Some(s) = link.poll(&auth).await {
+                    ollama_status = Some(s);
+                }
+            }
+            match stats_opt.as_mut() {
+                Some(stats) => stats.ollama = ollama_status.clone(),
+                None if ollama_status.as_ref().is_some_and(|s| s.loaded.is_none()) => {
+                    // Its process is gone with the model: idle, and saying why.
+                    stats_opt = Some(LiveStats {
+                        ollama: ollama_status.clone(),
+                        ..Default::default()
+                    });
+                }
+                None => {}
+            }
+        }
         // Draft/MTP counters live on /metrics; skip once we know this server
         // was started without --metrics. The same scrape fills decode when
         // /slots left `n_decoded` out.
@@ -546,7 +623,11 @@ fn status_for(slots: &[ModelSlot], rescanned: bool) -> String {
                 .auth_denied
                 .map(|code| format!(" — HTTP {code}: {REMEDY}"))
                 .unwrap_or_default();
-            format!("{prefix}attached to {}{note}", slots[0].model)
+            format!(
+                "{prefix}attached to {}{note}{}",
+                slots[0].model,
+                offload_note(slots)
+            )
         }
         n => {
             let refused: Vec<String> = slots
@@ -562,14 +643,31 @@ fn status_for(slots: &[ModelSlot], rescanned: bool) -> String {
                 format!(" — {}: {REMEDY}", refused.join(", "))
             };
             format!(
-                "{prefix}watching {n} models: {}{note}",
+                "{prefix}watching {n} models: {}{note}{}",
                 slots
                     .iter()
                     .map(|s| s.model.short_name())
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                offload_note(slots)
             )
         }
+    }
+}
+
+/// Override rules the server accepted but this dashboard cannot read: the
+/// tensors they place are shown by `--tensor-split` share instead, so the
+/// CPU-side figures may be off and the status line says which rule.
+fn offload_note(slots: &[ModelSlot]) -> String {
+    let bad: Vec<&str> = slots
+        .iter()
+        .filter_map(|s| s.model.offload.as_ref())
+        .flat_map(|o| o.invalid.iter().map(String::as_str))
+        .collect();
+    if bad.is_empty() {
+        String::new()
+    } else {
+        format!(" — -ot rule not understood: {}", bad.join(", "))
     }
 }
 
@@ -905,6 +1003,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char(' ') if view_mode == ViewMode::Landscape => {
                             camera.toggle_orbit()
                         }
+                        KeyCode::Char('u') => view_mode = ViewMode::Balance,
                         KeyCode::Char('b') => view_mode = ViewMode::Bandwidth,
                         KeyCode::Char('v') => view_mode = ViewMode::Models,
                         KeyCode::Tab => focus = (focus + 1) % n,
@@ -1086,6 +1185,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Compared slot by slot, so a second server refusing, or one
                 // that comes back after `r` and refuses again, is news too.
                 refusal_changed |= slot.live.auth_denied != s.auth_denied;
+                if let Some(loaded) = s.ollama.as_ref().and_then(|o| o.loaded.as_ref()) {
+                    slot.adopt_ollama_tag(&loaded.name);
+                }
                 slot.perf.observe(&s, now);
                 slot.live = s;
             }
@@ -1172,7 +1274,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if slot.live.ctx_max == 0 {
                 slot.live.ctx_max = slot.ctx_max;
             }
-            let layout = bandwidth::weight_layout(Some(&slot.model), &latest_gpu);
+            let mut layout = bandwidth::weight_layout(Some(&slot.model), &latest_gpu);
+            // Ollama measures what it left in system RAM from llama-server's
+            // own buffer report; that beats a guess from the tensor split,
+            // which Ollama's servers are not started with.
+            if let Some(p) = slot.live.ollama.as_ref().and_then(|o| o.loaded.as_ref()) {
+                if layout.known {
+                    layout.cpu_bytes = p.cpu_bytes().min(layout.total_bytes);
+                }
+            }
             slot.perf.tick_bandwidth(&layout, now, frame_dt);
             let mut sample =
                 fade_sample_from_live(Some(&slot.model), &latest_gpu, &slot.live, fade::KV_BUCKETS);
@@ -1375,14 +1485,31 @@ fn fade_sample_from_live(
     }
     let n_layers = n_layers.max(1);
     let model_gpus: Vec<u32> = detected.map(|d| d.gpu_indices.clone()).unwrap_or_default();
+    let offload = detected.and_then(|d| d.offload.as_ref());
     let layer_gpu: Vec<usize> = (0..n_layers)
-        .map(|l| layer_device(l, n_layers, &split, &model_gpus))
+        .map(|l| {
+            offload
+                .and_then(|o| o.block_gpu.get(l).copied().flatten())
+                .map(|g| g as usize)
+                .unwrap_or_else(|| layer_device(l, n_layers, &split, &model_gpus))
+        })
         .collect();
+    let layer_cpu: Vec<f32> = offload
+        .filter(|o| o.cpu_bytes > 0)
+        .map(|o| (0..n_layers).map(|l| o.block_cpu_frac(l)).collect())
+        .unwrap_or_default();
     let processing = live.processing;
     let layer_target: Vec<f32> = (0..n_layers)
         .map(|l| {
             let dev = layer_gpu[l];
-            let u = util.get(dev).copied().unwrap_or(0.0) / 100.0;
+            // A layer wholly in RAM is not lit by any card's load, and the
+            // CPU's share of the work is not measured: it shows as merely busy.
+            let in_ram = layer_cpu.get(l).is_some_and(|&c| c > 0.999);
+            let u = if in_ram {
+                0.0
+            } else {
+                util.get(dev).copied().unwrap_or(0.0) / 100.0
+            };
             if processing {
                 u.clamp(0.08, 1.0)
             } else {
@@ -1413,6 +1540,12 @@ fn fade_sample_from_live(
         })
         .or_else(|| detected.map(|d| d.mem_used_mb))
         .unwrap_or(0);
+    // Ollama says how much of the model is on the GPUs at all: a model it
+    // runs on the CPU has no weights on the cards, whatever the file size.
+    let file_mb = match live.ollama.as_ref().and_then(|o| o.loaded.as_ref()) {
+        Some(p) => file_mb.min(p.size_vram / (1024 * 1024)),
+        None => file_mb,
+    };
     let split_sum: f32 = split.iter().copied().sum::<f32>().max(1.0);
     let mut weight_frac = vec![0.0f32; n_gpus];
     let mut kv_alloc_frac = vec![0.0f32; n_gpus];
@@ -1456,10 +1589,18 @@ fn fade_sample_from_live(
                     ((k_gb * share) / total_gb).clamp(0.0, (used_f - weight_frac[i]).max(0.0));
             }
         } else {
+            // Tensors the `-ot` rules keep in RAM hold no VRAM; the ones they
+            // pin to a card count on that card whatever the split says.
+            let w_mb = match offload.filter(|o| o.n_rules > 0) {
+                Some(o) => {
+                    (o.split_bytes as f32 * share + o.pinned_on(g.index) as f32) / (1024.0 * 1024.0)
+                }
+                None => file_mb as f32 * share,
+            };
             let w = if g.mem_total_mb == 0 {
                 0.0
             } else {
-                (file_mb as f32 * share) / g.mem_total_mb as f32
+                w_mb / g.mem_total_mb as f32
             };
             weight_frac[i] = w.clamp(0.0, used_f);
             kv_alloc_frac[i] = (used_f - weight_frac[i]).max(0.0);
@@ -1468,6 +1609,7 @@ fn fade_sample_from_live(
     FadeSample {
         layer_target,
         layer_gpu,
+        layer_cpu,
         kv_filled,
         processing,
         decoded: live.decoded,
@@ -1547,6 +1689,7 @@ mod tests {
                 cmdline: cmdline.into(),
                 gguf: None,
                 tensors: None,
+                offload: None,
                 vision: None,
             });
             s.live.kv_usage_perc = kv;
@@ -1677,6 +1820,7 @@ mod tests {
             cmdline: String::new(),
             gguf: None,
             tensors: None,
+            offload: None,
             vision: None,
         };
         let mut refused = ModelSlot::new(model("sglang"));
@@ -2068,6 +2212,95 @@ mod tests {
         assert_eq!(m.engine, "ollama");
         assert_eq!(m.name, "llama3:latest");
         assert_eq!(m.pid, 0);
+    }
+
+    /// An Ollama daemon: every model pulled on `/v1/models`, the loaded
+    /// ones (the captured fixture) on `/api/ps`.
+    async fn spawn_ollama_daemon() -> (u16, tokio::sync::oneshot::Sender<()>) {
+        let ps = std::fs::read_to_string("fixtures/ollama-ps.json").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    res = listener.accept() => {
+                        let Ok((mut stream, _)) = res else { break };
+                        let ps = ps.clone();
+                        tokio::spawn(async move {
+                            let mut buf = [0u8; 1024];
+                            if let Ok(n) = stream.read(&mut buf).await {
+                                let req = String::from_utf8_lossy(&buf[..n]);
+                                let (status, body) = if req.starts_with("GET /api/ps ") {
+                                    ("200 OK", ps)
+                                } else if req.starts_with("GET /v1/models ") {
+                                    ("200 OK", CANNED_OLLAMA_MODELS.to_string())
+                                } else {
+                                    ("404 Not Found", "404 page not found".to_string())
+                                };
+                                let resp = format!(
+                                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                    body.len()
+                                );
+                                let _ = stream.write_all(resp.as_bytes()).await;
+                            }
+                        });
+                    }
+                }
+            }
+        });
+        (port, shutdown_tx)
+    }
+
+    #[tokio::test]
+    async fn an_ollama_endpoint_is_named_after_what_it_has_loaded() {
+        // Through the probe alone: `discover` would also scan this host,
+        // where a real runner of the same tag takes the slot over.
+        let (port, _shutdown) = spawn_ollama_daemon().await;
+        let m = model_detect::probe_endpoint("127.0.0.1", port, "", &HttpAuth::default())
+            .await
+            .expect("daemon");
+        assert_eq!(m.engine, "ollama");
+        // Not llama3, the first model pulled: granite is the one loaded.
+        assert_eq!(m.name, "granite3-moe:1b");
+        assert_eq!(m.ctx_max, Some(2048));
+    }
+
+    #[tokio::test]
+    async fn the_daemon_slot_reports_api_ps_and_no_counters() {
+        let (port, _shutdown) = spawn_ollama_daemon().await;
+        let m = model_detect::probe_endpoint("127.0.0.1", port, "", &HttpAuth::default())
+            .await
+            .expect("daemon");
+        let (live_tx, mut live_rx) = mpsc::channel(8);
+        let (spec_tx, _spec_rx) = mpsc::channel(8);
+        let (experts_tx, _experts_rx) = mpsc::channel(8);
+        let context = PollContext {
+            others: Vec::new(),
+            auth: HttpAuth::default(),
+        };
+        let poller = tokio::spawn(poll_server(
+            m,
+            port,
+            live_tx,
+            spec_tx,
+            experts_tx,
+            context,
+            Duration::from_millis(200),
+        ));
+        let (_, stats) = tokio::time::timeout(Duration::from_secs(5), live_rx.recv())
+            .await
+            .expect("a sample")
+            .expect("open channel");
+        poller.abort();
+        let o = stats.ollama.expect("ps status");
+        assert!(!o.counters);
+        assert_eq!(o.others, 1);
+        let loaded = o.loaded.expect("loaded");
+        assert_eq!(loaded.name, "granite3-moe:1b");
+        assert_eq!(loaded.processor(), "100% CPU");
+        assert_eq!(stats.ctx_max, 2048);
     }
 
     #[tokio::test]
