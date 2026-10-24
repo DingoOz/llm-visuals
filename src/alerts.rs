@@ -159,8 +159,9 @@ pub struct ModelInput<'a> {
     pub decode_tps: f32,
     pub ctx_used: usize,
     /// Time since the server last answered its poller. None when silence
-    /// means nothing: a poller that reports once (ollama), or a server
-    /// refusing our key, which the status line already names.
+    /// means nothing: an Ollama runner (it exits when its keep-alive runs
+    /// out), a server refusing our key, which the status line already names,
+    /// or one that has not answered yet.
     pub silent_for: Option<Duration>,
 }
 

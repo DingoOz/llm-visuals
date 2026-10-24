@@ -73,8 +73,9 @@ struct ModelSlot {
     ctx_max: usize,
     /// The tag Ollama last said this slot holds; empty until it has.
     ollama_tag: String,
-    /// When the poller last delivered a sample, for the gone alert.
-    last_answer: Instant,
+    /// When the poller last delivered a sample, for the gone alert; None
+    /// until the first, since a server that never answered has not gone.
+    last_answer: Option<Instant>,
     /// The log's record of this model's decode speed, for the regression flag.
     regression: Option<regress::History>,
 }
@@ -101,7 +102,7 @@ impl ModelSlot {
             routing: None,
             regression: None,
             ollama_tag: String::new(),
-            last_answer: Instant::now(),
+            last_answer: None,
         }
     }
 
@@ -109,7 +110,8 @@ impl ModelSlot {
     fn alert_input(&self, now: Instant) -> alerts::ModelInput<'_> {
         // Ollama ends a runner by design when its keep-alive runs out, and a
         // refused key is already the status line's story: silence means
-        // nothing for either.
+        // nothing for either. Nor does it from a process that never answered
+        // at all (something detected as an engine that serves no API).
         let watch = self.model.engine != "ollama" && self.live.auth_denied.is_none();
         alerts::ModelInput {
             key: self.model.key(),
@@ -117,7 +119,10 @@ impl ModelSlot {
             phase: self.perf.phase,
             decode_tps: self.perf.decode_tps,
             ctx_used: self.live.ctx_used(),
-            silent_for: watch.then(|| now.duration_since(self.last_answer)),
+            silent_for: self
+                .last_answer
+                .filter(|_| watch)
+                .map(|t| now.duration_since(t)),
         }
     }
 
@@ -1427,7 +1432,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(loaded) = s.ollama.as_ref().and_then(|o| o.loaded.as_ref()) {
                     slot.adopt_ollama_tag(&loaded.name);
                 }
-                slot.last_answer = now;
+                slot.last_answer = Some(now);
                 slot.perf.observe(&s, now);
                 slot.live = s;
             }
@@ -2255,6 +2260,47 @@ mod tests {
         assert!((gb - (92.863 + shards + 16.0)).abs() < 1e-3);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_server_is_watched_for_silence_only_once_it_has_answered() {
+        let mut slot = ModelSlot::new(DetectedModel {
+            name: "m".into(),
+            path: None,
+            pid: 1,
+            process_name: "llama-server".into(),
+            engine: "llama.cpp".into(),
+            gpu_indices: vec![],
+            mem_used_mb: 0,
+            host: "127.0.0.1".into(),
+            port: Some(8080),
+            ctx_max: None,
+            spec_type: None,
+            n_gpu_layers: None,
+            tensor_split: vec![],
+            cmdline: String::new(),
+            gguf: None,
+            tensors: None,
+            offload: None,
+            vision: None,
+        });
+        let t0 = Instant::now();
+        // Detected as an engine but never answering: not gone, never there.
+        assert_eq!(
+            slot.alert_input(t0 + Duration::from_secs(60)).silent_for,
+            None
+        );
+        slot.last_answer = Some(t0);
+        assert_eq!(
+            slot.alert_input(t0 + Duration::from_secs(12)).silent_for,
+            Some(Duration::from_secs(12))
+        );
+        // An Ollama runner exits when its keep-alive runs out, by design.
+        slot.model.engine = "ollama".into();
+        assert_eq!(
+            slot.alert_input(t0 + Duration::from_secs(12)).silent_for,
+            None
+        );
     }
 
     #[test]
