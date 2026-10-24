@@ -138,7 +138,7 @@ console, pass `--color truecolor` if colours look flat.
 ### What to test
 
 - [ ] `cargo build --release` completes (MSVC linker and SQLite C build found).
-- [ ] `--demo` renders every view (`a` `p` `h` `m` `e` `b` `v`) and `q` restores
+- [ ] `--demo` renders every view (`a` `p` `h` `m` `e` `u` `b` `v`) and `q` restores
       the terminal.
 - [ ] Colours: truecolor is picked automatically in Windows Terminal.
 - [ ] GPU panels show utilisation, VRAM, power and temperature from `nvidia-smi`.
@@ -401,6 +401,48 @@ or restarts the slow sway. The view takes the context and MTP row's space as
 well. It is drawn two pixels to a cell with half blocks, supersampled, with a
 soft glow in truecolor; a 256-colour terminal gets it without the glow.
 
+![expert balance](docs/balance.svg)
+
+<sub>Expert balance (`u`), `--demo`, 140×44: four layers whose router has all
+but collapsed onto a dozen experts stand out from the rest of the model.</sub>
+
+The balance view (`u`) asks of the same counts whether the router is
+spreading its work or collapsing onto a few experts, and in which layers.
+One row per MoE layer, from that layer's hits over the server's window
+(`recent` from `GET /experts`, 256 tokens with the patch):
+
+- **curve**: the layer's experts ranked by hits, busiest at the left, each
+  level the mean of the ranks it covers against the busiest expert. A
+  collapsed router is one tall bar and then nothing; a balanced one stays
+  high all the way across.
+- **effective experts**: exp(Shannon entropy) of the layer's hit shares —
+  how many equally used experts would spread the picks this evenly. 1 when
+  one expert takes every pick, the expert count when all are used alike.
+  The gauge is that against the total.
+- **used**: experts picked at least once in the window.
+- **topK**: the share of the picks the busiest K experts took, K being the
+  model's experts per token. 100 % means every token went to the same K: the
+  layer behaves as a dense layer of K experts. **×even** is that share over
+  what a perfectly even router would give (K / experts).
+
+A window of a few hundred tokens never looks perfectly even, so neither
+measure reaches its ideal on real hardware: 256 tokens × 8 picks over 256
+experts leaves a perfectly uniform router at about 240 effective experts
+and 1.8× the even top-8 share. A layer is therefore flagged `●` against the model's
+own layers, not against the ideal: its top-K share is at least twice the
+median layer's. The summary line gives the mean effective experts, how many
+layers are flagged, and the most lopsided and most even layer; when there
+are spare rows under the table, a strip shows effective experts layer by
+layer with the flagged ones marked beneath.
+
+Every layer gets a row, in as many columns (up to four) as it takes. When
+even that does not fit, neighbouring layers share a row and the row shows
+the most lopsided of them — the title says `most lopsided of N per row` —
+since averaging would hide exactly the layer the view is for. Without the
+server patch there are no hit counts, and the view says so instead of
+drawing a stand-in; a dense model or the attention bridge gets a line
+saying there is no router.
+
 If the model carries an **engram** module (a hashed n-gram memory; llama.cpp's
 `<arch>.ple.*` keys, as in Qwen3.8-Flash-Next), the bottom row of the expert
 panel describes it: n-gram order, the layer it feeds, hash heads, table rows ×
@@ -496,6 +538,7 @@ watched and `--pid A,B` restricts it to named processes.
 | `h` | layer tiles zoom |
 | `m` | expert map zoom, finer blocks |
 | `e` | expert landscape: the expert map as an isometric height field (`←` `→` turn, `↑` `↓` tilt, `space` hold still) |
+| `u` | expert balance: per-layer router load balance — effective experts, top-k share, ranked hits (needs the server patch) |
 | `b` | memory pipeline: disk → RAM → PCIe → VRAM → prefill → decode VU meters and the bottleneck verdict |
 | `v` | compare every model side by side |
 | `Tab` / `Shift-Tab` | focus the next / previous model |
@@ -534,6 +577,7 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | layer → GPU | `--tensor-split` proportions, except where llama.cpp's buffer-type overrides place a layer's tensors: `-ot` / `--override-tensor` patterns (searched in each tensor name, first match wins, as llama.cpp does), `--cpu-moe`, `--n-cpu-moe N`, `--n-cpu-ffn N` and their `LLAMA_ARG_*` variables in `/proc/<pid>/environ`, applied to the GGUF tensor table. A rule naming a CUDA device is mapped to a card the way the vision encoder's is. A rule the `regex` crate cannot read (look-around, back-references) is named in the status line and its tensors keep the split share. `--fit` (on by default) can also move tensors at load time; only the server's log says where, so that placement is not shown |
 | layer activity | utilisation of the GPU the layer lives on, smoothed |
 | expert blocks | real top-k routing from `GET /experts` (patched server), else a deterministic stand-in keyed by layer and token step |
+| expert balance | `recent` from `GET /experts`, per layer: effective experts = exp(−Σ p ln p) over the hit shares, top-K share = hits of the K busiest ÷ all hits (K = experts per token, 8 when the server omits it), flagged at ≥ 2× the median layer's top-K share. No stand-in without the patch |
 | expert landscape | height: `recent`, the hits per expert over the server's window from `GET /experts`, as a share of the busiest expert's. Light: the expert blocks' heat, averaged over a block and measured against the busiest fiftieth of the field. Without `/experts` there are no heights and the picks are the stand-in's |
 | MTP / speculative depth (tokens drafted per step) | llama.cpp: `--spec-draft-n-max` (or `--draft-max`) on the command line, else the model's MTP layer count. vLLM: number of per-position acceptance counters. SGLang: `speculative_num_draft_tokens` |
 | MTP acceptance, tok/step, steps/s | deltas of `spec_decode_num_draft_tokens_total`, `…accepted_tokens_total`, `…drafts_total` from `GET /metrics`, 1.5 s window |

@@ -19,6 +19,9 @@ is put together.
 - SGLang: `/v1/loads` poller, `/server_info`, worker folding, safetensors
   `config.json` architecture fields (also used by vLLM).
 - Decode speed vs context length (`c`), from the logged samples.
+- Expert balance view (`u`): the /experts 256-token histogram as per-layer
+  effective experts, top-k share and a ranked-hits curve, with lopsided
+  layers flagged.
 - llama.cpp tensor overrides (`-ot`, `--cpu-moe`, `--n-cpu-moe`,
   `--n-cpu-ffn`) applied to the tensor table: exact CPU-side bytes for the
   memory pipeline and verdict, `C` tags on layer tiles.
@@ -27,7 +30,6 @@ is put together.
 
 - Per-position acceptance rates for deeper MTP drafts (server logs them but
   does not export them).
-- Show the /experts 256-token histogram as a load-balance view per layer.
 - Ollama metrics endpoint for throughput (vLLM and SGLang done).
 - Real DRAM bandwidth (perf uncore counters) instead of the bytes × steps
   estimate; per-GPU memory bandwidth ceilings so the VRAM meter can show GB/s
