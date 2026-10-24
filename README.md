@@ -28,11 +28,13 @@ a Tesla P100 under llama.cpp, mid-request.</sub>
 - [Building and cross-compiling](#building-and-cross-compiling)
 - [What you see](#what-you-see)
 - [Several models at once](#several-models-at-once)
+- [Alerts](#alerts)
 - [Benchmark](#benchmark)
 - [Keys](#keys)
 - [Where every number comes from](#where-every-number-comes-from)
 - [Server setup: metrics and real expert routing](#server-setup-metrics-and-real-expert-routing)
 - [Command-line options](#command-line-options)
+- [Replay](#replay)
 - [Troubleshooting](#troubleshooting)
 - [How it works](#how-it-works)
 - [Contributing and license](#contributing-and-license)
@@ -139,7 +141,7 @@ console, pass `--color truecolor` if colours look flat.
 ### What to test
 
 - [ ] `cargo build --release` completes (MSVC linker and SQLite C build found).
-- [ ] `--demo` renders every view (`a` `p` `h` `m` `e` `b` `v`) and `q` restores
+- [ ] `--demo` renders every view (`a` `p` `h` `m` `e` `u` `b` `v`) and `q` restores
       the terminal.
 - [ ] Colours: truecolor is picked automatically in Windows Terminal.
 - [ ] GPU panels show utilisation, VRAM, power and temperature from `nvidia-smi`.
@@ -310,13 +312,57 @@ much faster. A genuine change of level
 rejected in a row (≈3 s at the default poll rate) re-anchor the reference,
 and the new speed is shown as fact.
 
+Under the session totals, an energy row adds up what the GPUs have drawn
+since the dashboard started — `GPU energy 2.23 Wh` — and, for the focused
+model, the energy per thousand generated tokens. With `--energy-price` set it
+also prices both: the session so far and a million tokens
+(`· $0.0007 · 3.12 Wh/1k tok · $0.937/1M tok`); on a narrow panel the
+session cost goes first, then the per-million figure.
+
+It is GPU board power as the driver reports it (NVML, amdgpu hwmon,
+xpu-smi, powermetrics / macmon), summed over every card shown — the same
+reading tok/J divides by — not power at the wall: CPU, RAM, fans and power
+supply losses are not in it. Cards without a power sensor add nothing, and
+when none has one the row says `no power readings`. The session figure is
+for the whole box, idle time included. The per-token figure counts only the
+time the focused model was the only one working, prefill included, since a
+prompt has to be read before anything is generated: two models busy at once
+on shared cards draw one power reading between them and nothing says how to
+divide it, so that time and its tokens are left out of both models' figures.
+A gap of more than 5 s between GPU readings (a stalled driver call, a
+suspended laptop) is skipped rather than billed at the last wattage seen.
+
 ### GPUs
 
 One card per device: utilisation gauge with a VU-style peak-hold notch, power
 gauge, temperature coloured by heat (plus the memory temperature on the
-NVIDIA cards that report it), SM clock, fan, PCIe link, a VRAM bar split
-into weights / KV in use / KV reserved / free, and utilisation and power
-history sparklines.
+NVIDIA cards that report it), SM clock, fan, PCIe link, the card's peak
+memory bandwidth where the line has room for it, a VRAM bar split into
+weights / KV in use / KV reserved / free, and utilisation and power history
+sparklines.
+
+When the driver is holding an NVIDIA card's clocks down, a badge after the
+power reading says why, so a sudden drop in decode speed has its cause on
+screen:
+
+| Badge | Driver reason |
+|---|---|
+| `⚠THERM` red | hardware thermal slowdown (clocks halved or worse) |
+| `⚠BRAKE` red | hardware power brake: an external signal, usually the power supply |
+| `⚠HW` red | hardware slowdown not explained by either of the above |
+| `⚠THERM` amber | software thermal cap: past the card's maximum operating temperature |
+| `⚠PWR` amber | software power cap: drawing the power limit |
+| `SYNC` grey | held to the slowest card of a sync-boost group |
+| `APP` grey | held to the configured application clocks |
+
+Several reasons at once read worst first (`⚠THERM+PWR`). Idle and the display
+clock setting are not shown: neither slows a token down. A reason stays up
+for 1.5 s after the driver last reported it, so one that is on for a single
+200 ms poll can still be read; it is never shown longer than that. It is the
+last of the optional stats to be dropped on a narrow card: the clock, fan and
+PCIe go first, and if the badge still has no room it takes it from the
+utilisation gauge. Cards whose driver does not report reasons (AMD, Intel,
+Apple, some virtual GPUs) show nothing.
 
 Below the cards, a system RAM section shows memory in use / page cache / free
 against the machine's total, the focused model's resident size, and a history
@@ -363,6 +409,15 @@ the mean number of distinct experts each layer touched over its last 256
 tokens). Without the patch the title reads `simulated`: the timing is real
 (each new token re-routes every layer) but the identities are a stand-in.
 
+Layers with tensors in system RAM are tagged `C`. llama.cpp keeps them there
+when told to — `-ot` / `--override-tensor` rules, `--cpu-moe`,
+`--n-cpu-moe N`, `--n-cpu-ffn N`, or their `LLAMA_ARG_*` environment
+variables — and the dashboard applies the same rules to the GGUF tensor
+table: a layer whose experts are in RAM but whose attention is on card 0
+reads `0C`, a layer entirely in RAM reads `C`, and the panel title counts
+them (`C 8 in RAM`). A rule that pins tensors to a card (`=CUDA1`) moves
+the layer's tag to that card. The tags need tiles at least five cells wide.
+
 ![expert landscape](docs/landscape.svg)
 
 <sub>Expert landscape (`e`), `--demo`, 140×44: the routing of the map above,
@@ -393,6 +448,48 @@ or restarts the slow sway. The view takes the context and MTP row's space as
 well. It is drawn two pixels to a cell with half blocks, supersampled, with a
 soft glow in truecolor; a 256-colour terminal gets it without the glow.
 
+![expert balance](docs/balance.svg)
+
+<sub>Expert balance (`u`), `--demo`, 140×44: four layers whose router has all
+but collapsed onto a dozen experts stand out from the rest of the model.</sub>
+
+The balance view (`u`) asks of the same counts whether the router is
+spreading its work or collapsing onto a few experts, and in which layers.
+One row per MoE layer, from that layer's hits over the server's window
+(`recent` from `GET /experts`, 256 tokens with the patch):
+
+- **curve**: the layer's experts ranked by hits, busiest at the left, each
+  level the mean of the ranks it covers against the busiest expert. A
+  collapsed router is one tall bar and then nothing; a balanced one stays
+  high all the way across.
+- **effective experts**: exp(Shannon entropy) of the layer's hit shares —
+  how many equally used experts would spread the picks this evenly. 1 when
+  one expert takes every pick, the expert count when all are used alike.
+  The gauge is that against the total.
+- **used**: experts picked at least once in the window.
+- **topK**: the share of the picks the busiest K experts took, K being the
+  model's experts per token. 100 % means every token went to the same K: the
+  layer behaves as a dense layer of K experts. **×even** is that share over
+  what a perfectly even router would give (K / experts).
+
+A window of a few hundred tokens never looks perfectly even, so neither
+measure reaches its ideal on real hardware: 256 tokens × 8 picks over 256
+experts leaves a perfectly uniform router at about 240 effective experts
+and 1.8× the even top-8 share. A layer is therefore flagged `●` against the model's
+own layers, not against the ideal: its top-K share is at least twice the
+median layer's. The summary line gives the mean effective experts, how many
+layers are flagged, and the most lopsided and most even layer; when there
+are spare rows under the table, a strip shows effective experts layer by
+layer with the flagged ones marked beneath.
+
+Every layer gets a row, in as many columns (up to four) as it takes. When
+even that does not fit, neighbouring layers share a row and the row shows
+the most lopsided of them — the title says `most lopsided of N per row` —
+since averaging would hide exactly the layer the view is for. Without the
+server patch there are no hit counts, and the view says so instead of
+drawing a stand-in; a dense model or the attention bridge gets a line
+saying there is no router.
+
 If the model carries an **engram** module (a hashed n-gram memory; llama.cpp's
 `<arch>.ple.*` keys, as in Qwen3.8-Flash-Next), the bottom row of the expert
 panel describes it: n-gram order, the layer it feeds, hash heads, table rows ×
@@ -416,9 +513,9 @@ verdict names RAM as the bound at 2.5 tok/s.</sub>
 | Stage | Meter | Source |
 |---|---|---|
 | DISK | MB/s read from every whole block device | `/proc/diskstats`, plus the server's own reads and major page faults from `/proc/<pid>/io` and `/proc/<pid>/stat` |
-| RAM | GB/s of weights the CPU streams out of system RAM, *estimate* | CPU-side bytes × active fraction × steps/s; CPU-side bytes = tensor-table size minus what the cards hold. Tensor table = the GGUF tensor table, or the `*.safetensors` shard headers (header bytes only, labelled `est`) for safetensors servers. A safetensors server has no partial offload, so with a GPU present none of its weights count as CPU-side |
+| RAM | GB/s of weights the CPU streams out of system RAM, *estimate* | CPU-side bytes × active fraction × steps/s; CPU-side bytes = tensor-table size minus what the cards hold. Tensors llama.cpp's override rules keep in RAM (`-ot …=CPU`, `--cpu-moe`, `--n-cpu-moe`) are CPU-side exactly, whatever the cards hold, and are read at their own rate — routed experts at used/total — rather than the whole model's; the stage shows them as `by -ot`, and `cpu-side` loses its `~` when the rules account for all of it. Tensor table = the GGUF tensor table, or the `*.safetensors` shard headers (header bytes only, labelled `est`) for safetensors servers. A safetensors server has no partial offload, so with a GPU present none of its weights count as CPU-side |
 | PCIe | host→device MB/s per GPU, scaled to the link (gen × lanes) | `nvidia-smi dmon -s t` (NVIDIA; unavailable for AMD). On a unified part the stage is labelled `C2C` and reads `n/a`: the traffic is NVLink-C2C and the driver exposes no counter for it |
-| VRAM | memory-controller busy % per GPU, plus the estimated GB/s of weights streamed | NVIDIA `utilization.memory` or AMD `mem_busy_percent`; bytes per step from the tensor table. On a unified part the stage is labelled `UNIFIED` and shows pool fill (server-reported occupancy over system RAM) instead — there is no memory controller to watch |
+| VRAM | estimated GB/s of weights streamed against the cards' peak, plus memory-controller busy % per GPU | NVIDIA `utilization.memory` or AMD `mem_busy_percent`; bytes per step from the tensor table; peak from NVML's bus width and maximum memory clock (unknown elsewhere: the stage then leads with busy %). On a unified part the stage is labelled `UNIFIED` and shows pool fill (server-reported occupancy over system RAM) instead — there is no memory controller to watch |
 | PREFILL | prompt tokens/s | `/slots` |
 | DECODE | generated tokens/s | `/slots` |
 
@@ -437,9 +534,27 @@ under one alias are left unresolved rather than guessed. A step is one
 verification pass under MTP / speculative decoding (from `/metrics`), one
 token otherwise, and one micro-batch (`-ub`, default 512) during prefill. The verdict is a rule
 chain: disk activity beats everything (weights are paging), then a PCIe link
-past a third of its cap, then a memory controller past 75 %, then CPU-side
-layers with an idle GPU, then a busy GPU (compute bound); otherwise no hop is
-saturated and the gap is latency between tokens.
+past a third of its cap, then a memory controller past 75 %, then a weight
+stream past 60 % of the cards' peak bandwidth, then CPU-side layers with an
+idle GPU, then a busy GPU (compute bound); otherwise no hop is saturated and
+the gap is latency between tokens.
+
+**Peak bandwidth.** On NVIDIA cards read through NVML, the VRAM stage reads
+`212/732 GB/s est`: the estimated weight stream over the theoretical peak,
+with its first bar (`bw`) scaled to that peak beside the per-card
+memory-controller bars. A card's peak is bus width ÷ 8 × maximum memory clock
+× 2, both reported by the driver (a P100 12 GB: 3072-bit × 715 MHz = 549
+GB/s; a V100: 4096-bit × 877 MHz = 898 GB/s). Several cards combine by how
+they read: under llama.cpp's default layer split each token reads one card's
+layers after another's, so the ceiling is the bytes over the summed time
+(a 256 GB/s and a 549 GB/s card holding half each give ~349 GB/s, not 805);
+under a tensor-parallel or `--split-mode row` split they read at once and the
+slowest share sets the pace. Decode kernels rarely pass 80 % of the datasheet
+figure, so 60 % is where the verdict names VRAM bandwidth. The
+nvidia-smi fallback has no bus-width column, and amdgpu sysfs reports the
+memory clock but not the bus width, so the peak is unknown on those paths;
+the stage then reads busy % as before. A unified part keeps its pool-fill
+stage.
 
 On a 27B Q6 model that does not quite fit two cards (~4.7 GB left on the
 CPU), the view shows the GPUs under 40 % busy, memory controllers at 24 %,
@@ -478,6 +593,66 @@ setup looks exactly as it did before. `--max-models N` caps how many are
 watched and `--pid A,B` restricts it to named processes.
 
 ---
+
+## Alerts
+
+A few conditions are worth hearing about even when nobody is looking at the
+dashboard. Each is judged four times a second from numbers already on screen:
+
+| Alert | Raised when | Clears when |
+|---|---|---|
+| VRAM pressure | for 3 s, a card's memory has grown past where it settled **and** either is at or above `--alert-vram-pct` (95 %) having grown by at least 2 % of the card (512 MB minimum), or has less than 1 % (256 MB minimum) left having grown by more than that | it is back within 1 % (256 MB) of the settled level, or 3 points under the threshold, for 2 s |
+| GPU hot | the die stays at or above its limit for 3 s: `--alert-temp-c` if given, else the first threshold the NVIDIA driver acts on (the lower of NVML's slowdown and max-operating temperatures), else 85 °C | it is 5 °C under for 2 s |
+| memory hot | the HBM sensor stays at or above the driver's memory max-operating temperature (95 °C if it names none) for 3 s | 5 °C under for 2 s |
+| slow decode | while decoding, the rate stays under `--alert-slow-pct` (50 %) of the model's usual rate for 5 s | it is back above that share + 10 points for 2 s, or the request ends |
+| server gone | the server has not answered its poller for 10 s | the next answer |
+
+A full card is usually the intended configuration — vLLM, SGLang and Strata
+preallocate their KV pool, and llama.cpp users fit to ~95 % — so the VRAM
+alert is about *growth*: another process taking memory, a second model
+loading, a leak. A card **settles** at its high-water mark once that has not
+grown by more than 1 % (256 MB) for 20 s; a card still loading keeps raising
+the mark and so settles where the load ends, and one whose use swings with
+load settles at the top of the swing. Nothing is judged before that, so a
+card already at 97 % when the dashboard starts never fires for being full.
+The settled level then stays put — a model swapped out and back in returns
+to it — until a rescan (`r`), after which every card settles afresh at what
+the models now on it hold.
+
+"Usual" is the median of the model's own decode rate, one sample a second
+over its last ten minutes of decoding, taken only from samples within a
+factor of two of the current context length (contexts under 1k tokens count
+together): decode slows as the context fills, and a 100k-token request is
+not judged against 2k-token ones. Until 15 such samples exist there is no
+usual rate and the alert stays quiet; a slow stretch is never learnt as the
+new usual. A zero rate is not judged at all (an engine that reports rates
+only at completion would otherwise always be "slow"). A synthesised unified
+pool (GB10 / DGX Spark, where the bar is a server's own reservation over
+system RAM) does not raise the VRAM alert; a driver-measured APU pool does.
+The NVML temperature limits were read on a P100 (82 °C) and a V100 (83 °C
+die, 85 °C memory).
+Ollama, whose poller reports only once, and a server refusing the API key,
+which the status line already names, are not watched for silence.
+
+An alert is announced once per episode: the header shows a red `⚠ VRAM G1`
+badge (`⚠ 3 alerts` for several) for as long as it lasts, and for its first
+30 s a banner takes the place of the key row with the full line and the time
+it was raised (the keys still work meanwhile). The same alert on the same card or model is not announced again within
+60 s of its last announcement — an episode inside that window shows only in
+the badge — so a value hovering at its threshold cannot ring every few
+seconds.
+
+`--alerts` sets how far an announcement reaches: `banner` (the default) is
+on screen only, `bell` also rings the terminal bell, `notify` also sends a
+desktop notification — `notify-send` on Linux, `osascript` on macOS. Where
+that cannot run (the helper is not installed, or on Windows, which has no
+notifier here) the status line says so once and the bell carries on alone.
+`--alerts off` turns the lot off. All four settings are on the settings
+screen.
+
+In `--demo` the second card settles at about 90 % in its first half
+minute, then fills to 97 % for half a minute every four minutes, starting
+50 s in, so the VRAM alert can be seen.
 
 ## Benchmark
 
@@ -568,6 +743,7 @@ for anything else.
 | `h` | layer tiles zoom |
 | `m` | expert map zoom, finer blocks |
 | `e` | expert landscape: the expert map as an isometric height field (`←` `→` turn, `↑` `↓` tilt, `space` hold still) |
+| `u` | expert balance: per-layer router load balance — effective experts, top-k share, ranked hits (needs the server patch) |
 | `b` | memory pipeline: disk → RAM → PCIe → VRAM → prefill → decode VU meters and the bottleneck verdict |
 | `v` | compare every model side by side |
 | `Tab` / `Shift-Tab` | focus the next / previous model |
@@ -580,9 +756,21 @@ for anything else.
 | `B` | the `--bench` results table (opens by itself when the run ends) |
 | `q` / `Esc` | quit |
 
+Under `--replay` (see [Replay](#replay)) a few more keys drive playback, in
+every view:
+
+| Key | Action |
+|-----|--------|
+| `space` | pause / resume (at the end of the log: play it again) |
+| `[` / `]` | seek back / forward 10 s |
+| `{` / `}` | seek back / forward 60 s |
+| `Home` | back to the start |
+| `<` / `>` (also `,` `.` `-` `+`) | playback speed: 1×, 2×, 4×, 10×, 30× |
+
 Layouts adapt: the model strip is the first thing shed on a short terminal,
 then the request log, then the context and MTP row, and on narrow terminals
-the GPU line sheds PCIe, fan, clock and temperatures before the gauge shrinks,
+the GPU line sheds PCIe, fan, clock and temperatures before the gauge shrinks
+(a clocks-event badge outlasts them all),
 while the key row shortens its own labels. Truecolor is auto-detected with a
 256-colour fallback.
 
@@ -597,16 +785,20 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | time to first token | slot turning busy → first decoded token, quantised to the poll interval. Strata: the finished request's `prompt_ms`, the server's time reading the new prompt tokens (time spent queued is not in it) |
 | impossible tok/s samples | a displayed rate is finite, under 10⁶ (decode) / 10⁷ (prefill) tok/s, and (decode only) not above both 4× the median of the recently accepted samples of that server and that median + 20 tok/s; glitch polls are cut and the display holds the last real reading, six rejections in a row re-anchor to a genuinely faster engine |
 | tok/J | decode tok/s ÷ summed GPU power draw |
+| GPU energy, Wh/1k tok, cost | summed GPU board power (the same reading as tok/J) integrated over time by the trapezoid rule between GPU polls; an interval longer than 5 s between readings is not integrated. Wh/1k tok: energy drawn while the focused model was the only model working (prefill or decode), ÷ the tokens it generated over the same intervals. Cost: Wh × `--energy-price` per kWh |
+| temperature limits (alerts) | NVML `nvmlDeviceGetTemperatureThreshold`: the lower of `SLOWDOWN` and `GPU_MAX` for the die, `MEM_MAX` for the memory. Not available from `nvidia-smi --query-gpu`, AMD, Intel or Apple, where the alert falls back to its default |
 | cache hit | llama.cpp: `n_prompt_tokens_cache / n_prompt_tokens`. vLLM: the window's `prefix_cache_hits_total / prefix_cache_queries_total` delta — exact even when several requests share the poll window, since both counters move in the same scheduler step; a request row whose window held more than one request shows its own cached count as `—` instead of a blend. SGLang without `--enable-metrics` is unknown (shown as "—"). Strata: the finished request's `reused`, unknown ("—") while it runs |
 | request log | one record per `id_task`; averages from accumulated deltas |
-| util, VRAM, power, °C, clocks, fan, PCIe link | NVIDIA in-process NVML (`nvidia-smi --query-gpu=…` fallback), Intel `xpu-smi --query-gpu=…`, or Linux amdgpu sysfs and hwmon, every poll. NVIDIA additionally reports the memory temperature — NVML field value 82 on the in-process path, `temperature.memory` on the CLI one — shown as `mem 71°` beside the die temperature on cards whose driver reports the sensor (HBM parts such as the CMP 170HX it was verified on); it reads blank elsewhere. On Intel, fan speed is the `xe` driver's hwmon tachometer (RPM); utilization that samples ~0 while clocks are boosted is reconstructed from the clock ratio and marked `~`; PCIe link and an unsupported temperature read blank. Unified-memory parts (NVIDIA GB10 / DGX Spark) report no device memory, fan or memory-busy counter at all: NVML stays the backend for the fields that *do* answer, and the memory bar relabels itself (see `VRAM weights vs KV` and Troubleshooting). AMD APUs (BC-250 / Cyan Skillfish, Strix Halo) are unified too but *measured*: the driver reports a 512 MiB VRAM carve-out plus a GTT heap spanning the shared RAM pool, and the backend shows the sum of both heaps as the `UNIFIED` pool — the same figures nvtop prints for an integrated GPU |
+| util, VRAM, power, °C, clocks, fan, PCIe link | NVIDIA in-process NVML (`nvidia-smi --query-gpu=…` fallback), Intel `xpu-smi --query-gpu=…`, or Linux amdgpu sysfs and hwmon, every poll. NVIDIA additionally reports the memory temperature — NVML field value 82 on the in-process path, `temperature.memory` on the CLI one — shown as `mem 71°` beside the die temperature on cards whose driver reports the sensor (HBM parts such as the CMP 170HX it was verified on); it reads blank elsewhere. The clocks-event reasons badge is NVML `nvmlDeviceGetCurrentClocksEventReasons` (`…ClocksThrottleReasons` on drivers that predate the rename) in process, and `clocks_event_reasons.active` (else `clocks_throttle_reasons.active`) on the CLI, a bitmask decoded per `nvml.h`. On Intel, fan speed is the `xe` driver's hwmon tachometer (RPM); utilization that samples ~0 while clocks are boosted is reconstructed from the clock ratio and marked `~`; PCIe link and an unsupported temperature read blank. Unified-memory parts (NVIDIA GB10 / DGX Spark) report no device memory, fan or memory-busy counter at all: NVML stays the backend for the fields that *do* answer, and the memory bar relabels itself (see `VRAM weights vs KV` and Troubleshooting). AMD APUs (BC-250 / Cyan Skillfish, Strix Halo) are unified too but *measured*: the driver reports a 512 MiB VRAM carve-out plus a GTT heap spanning the shared RAM pool, and the backend shows the sum of both heaps as the `UNIFIED` pool — the same figures nvtop prints for an integrated GPU |
 | system RAM | Linux `/proc/meminfo` (`MemTotal − MemAvailable` in use, `Cached` as page cache) and the server's `VmRSS`; elsewhere the OS memory totals, with no page cache split |
-| VRAM weights vs KV | llama.cpp: **estimate** from GGUF file size × `--tensor-split`. SGLang: `memory.weight_gb` and `memory.kv_cache_gb` from `/v1/loads`. vLLM and other safetensors servers: **estimate** from the summed size of the served directory's weight shards. On a part with no device memory (GB10 / DGX Spark) the bar is labelled `UNIFIED`: used = the server's weight + KV + CUDA-graph GiB from `/v1/loads` summed over the models that report it, denominator = system RAM — the pool the accelerator shares. vLLM has no `/v1/loads`; a vLLM server is counted by its own declared numbers instead: the served directory's shard sizes for weights, plus the whole `--kv-cache-memory-bytes` pool it was launched with, which vLLM allocates at start-up (the value is read as vLLM reads it: `16g` is 16 × 10⁹ bytes, `16G` is 16 GiB). `kv_cache_usage_perc` from `/metrics` lights the share of that pool holding tokens. Without that flag but with `--gpu-memory-utilization` on the command line, the fill is that fraction of system RAM — the budget vLLM claims at start-up, weights included — never less than the shards; the segment past the weights is then the rest of that budget, so it holds activations and CUDA graphs as well as the KV pool. With neither flag the pool is not counted (vLLM's 0.9 default is not on the command line), and with no number from any model the row degrades to zeros rather than a stand-in. Shards one directory down (`tensors/`) are found when the served directory has none of its own. An amdgpu APU row is the exception: its pool is measured from the driver's VRAM + GTT heaps, which already count every GPU process, so no server declaration overwrites it |
+| VRAM weights vs KV | llama.cpp: **estimate** from GGUF file size × `--tensor-split`, with the tensors override rules keep in RAM left out and the ones they pin to a card counted on it. SGLang: `memory.weight_gb` and `memory.kv_cache_gb` from `/v1/loads`. vLLM and other safetensors servers: **estimate** from the summed size of the served directory's weight shards. On a part with no device memory (GB10 / DGX Spark) the bar is labelled `UNIFIED`: used = the server's weight + KV + CUDA-graph GiB from `/v1/loads` summed over the models that report it, denominator = system RAM — the pool the accelerator shares. vLLM has no `/v1/loads`; a vLLM server is counted by its own declared numbers instead: the served directory's shard sizes for weights, plus the whole `--kv-cache-memory-bytes` pool it was launched with, which vLLM allocates at start-up (the value is read as vLLM reads it: `16g` is 16 × 10⁹ bytes, `16G` is 16 GiB). `kv_cache_usage_perc` from `/metrics` lights the share of that pool holding tokens. Without that flag but with `--gpu-memory-utilization` on the command line, the fill is that fraction of system RAM — the budget vLLM claims at start-up, weights included — never less than the shards; the segment past the weights is then the rest of that budget, so it holds activations and CUDA graphs as well as the KV pool. With neither flag the pool is not counted (vLLM's 0.9 default is not on the command line), and with no number from any model the row degrades to zeros rather than a stand-in. Shards one directory down (`tensors/`) are found when the served directory has none of its own. An amdgpu APU row is the exception: its pool is measured from the driver's VRAM + GTT heaps, which already count every GPU process, so no server declaration overwrites it |
 | layers, heads, experts, MTP layers, engram, quant | GGUF header, or HuggingFace `config.json` (`num_hidden_layers`, `num_attention_heads`, `num_experts` / `num_local_experts`, `num_experts_per_tok`) for safetensors dirs |
 | vision encoder | llama.cpp: `modalities.vision` from `GET /props`, else `--mmproj` / `-hf` on the command line or `LLAMA_ARG_MMPROJ` in `/proc/<pid>/environ`. Placement: CPU for `--no-mmproj-offload` or a process with no GPU runtime in `/proc/<pid>/maps`; otherwise `--mmproj-device` or the first GPU device, mapped to a card by the CUDA driver's `cuDeviceGetPCIBusId` (run in a child process with the server's CUDA variables) matched against nvidia-smi's `pci.bus_id`, or by the one card the process occupies. vLLM / SGLang: `vision_config` in `config.json`, on the model's GPUs (none with `--language-model-only`) |
-| layer → GPU | `--tensor-split` proportions |
+| Ollama tag, unload time, CPU/GPU split | `name`, `expires_at`, `size` and `size_vram` from the daemon's `GET /api/ps`; a runner's entry is the tag whose manifest names its blob. CPU-side bytes = `size − size_vram`, which Ollama measures from llama-server's buffer report (weights of CPU-side layers, their KV cache and host compute buffers). See [Ollama](#ollama) |
+| layer → GPU | `--tensor-split` proportions, except where llama.cpp's buffer-type overrides place a layer's tensors: `-ot` / `--override-tensor` patterns (searched in each tensor name, first match wins, as llama.cpp does), `--cpu-moe`, `--n-cpu-moe N`, `--n-cpu-ffn N` and their `LLAMA_ARG_*` variables in `/proc/<pid>/environ`, applied to the GGUF tensor table. A rule naming a CUDA device is mapped to a card the way the vision encoder's is. A rule the `regex` crate cannot read (look-around, back-references) is named in the status line and its tensors keep the split share. `--fit` (on by default) can also move tensors at load time; only the server's log says where, so that placement is not shown |
 | layer activity | utilisation of the GPU the layer lives on, smoothed |
 | expert blocks | real top-k routing from `GET /experts` (patched server), else a deterministic stand-in keyed by layer and token step |
+| expert balance | `recent` from `GET /experts`, per layer: effective experts = exp(−Σ p ln p) over the hit shares, top-K share = hits of the K busiest ÷ all hits (K = experts per token, 8 when the server omits it), flagged at ≥ 2× the median layer's top-K share. No stand-in without the patch |
 | expert landscape | height: `recent`, the hits per expert over the server's window from `GET /experts`, as a share of the busiest expert's. Light: the expert blocks' heat, averaged over a block and measured against the busiest fiftieth of the field. Without `/experts` there are no heights and the picks are the stand-in's |
 | MTP / speculative depth (tokens drafted per step) | llama.cpp: `--spec-draft-n-max` (or `--draft-max`) on the command line, else the model's MTP layer count. vLLM: number of per-position acceptance counters. SGLang: `speculative_num_draft_tokens` |
 | MTP acceptance, tok/step, steps/s | deltas of `spec_decode_num_draft_tokens_total`, `…accepted_tokens_total`, `…drafts_total` from `GET /metrics`, 1.5 s window |
@@ -614,7 +806,8 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | resident weights | `RssFile` in `/proc/<pid>/status` |
 | PCIe MB/s | in-process NVML `nvmlDeviceGetPcieThroughput` (`nvidia-smi dmon -s t -c 1` fallback) rx/tx per GPU; samples above the link cap are dropped (dmon emits the odd garbage row) |
 | VRAM busy % | NVIDIA `utilization.memory` or AMD `mem_busy_percent` (memory-controller busy time) |
-| bytes per step, RAM / VRAM GB/s | **estimate**: GGUF tensor table (sizes from offset gaps, summed over every shard of a split file), expert tensors × used/total, embedding and engram tables excluded, split CPU vs GPU by what the cards hold, × steps/s |
+| peak memory bandwidth | NVML `nvmlDeviceGetMemoryBusWidth` × `nvmlDeviceGetMaxClockInfo(NVML_CLOCK_MEM)`: bits ÷ 8 × MHz × 2, once per card; unknown on the nvidia-smi, amdgpu, Intel and Apple paths |
+| bytes per step, RAM / VRAM GB/s | **estimate**: GGUF tensor table (sizes from offset gaps, summed over every shard of a split file), expert tensors × used/total, embedding and engram tables excluded, split CPU vs GPU by what the cards hold (and by llama.cpp's `-ot` / `--cpu-moe` / `--n-cpu-moe` rules where given, exactly), × steps/s |
 
 Per-request `timings` only appear inside completion responses, which the
 dashboard never sees, so everything is reconstructed from polled counters.
@@ -749,6 +942,53 @@ existing `--api-key-file` option. As with the vLLM adapter, request rows
 reconstructed from aggregate counters are activity windows, not individual
 concurrent request traces.
 
+### Ollama
+
+Nothing to configure. Current Ollama runs every loaded GGUF model in a
+bundled `llama-server` (`…/lib/ollama/llama-server --model
+…/blobs/sha256-…`), one process per model, on a port of its own. Each of
+those is found and polled like any llama-server, through `/slots`, so
+throughput, TTFT, context and the request log are real. The header names
+the engine `ollama`, and the model by its tag (`qwen3:8b`), read from the
+manifest in the same store that points at the blob. The blob is a GGUF
+without the extension, so layers, heads, experts and the tensor table come
+from its header as usual.
+
+What only the daemon knows comes from its `GET /api/ps`, asked every 5 s
+(every request is a line in Ollama's log):
+
+- **when the model unloads**: `unloads in 4m` in the header and `idle 4m` in
+  the models strip, counted down locally between polls; `kept loaded` for
+  `keep_alive -1`; nothing while a request runs, since Ollama only restarts
+  the timer when it ends. When the daemon drops the model its runner exits,
+  and within a few seconds the strip reads `evicted` and the header
+  `not loaded`. A model loaded again runs in a new runner: press `r` to pick
+  it up;
+- **where it runs**: `100% GPU`, `100% CPU` or `38%/62% CPU/GPU`, as
+  `ollama ps` prints it. The part in system RAM is the memory pipeline's
+  CPU-side figure, and the part in VRAM caps the weights the VRAM bar puts on
+  the cards: a model Ollama runs on the CPU has none there;
+- the size class and quantization (`1.3B`, `Q4_K_M`).
+
+The daemon is found from `OLLAMA_HOST` in the runner's environment (or its
+parent's), else at `127.0.0.1:11434`. The environment of a process owned by
+another user cannot be read, so a system service on a custom port is not
+found that way; the runner's own numbers still are.
+
+Older releases (before mid-2026) ran `ollama runner` instead, and a daemon in
+a container or reached with `--endpoint http://localhost:11434` hides its
+runner. Neither has token counters, so those slots show what `/api/ps` has
+(tag, resident and VRAM bytes, context, unload countdown) and the throughput
+panel says `throughput n/a` rather than drawing zeros. A daemon slot shows
+the model it has loaded first (Ollama lists the longest-lived first), with a
+`+N loaded` count, and reads the GGUF from the local store when the tag is
+found there: `OLLAMA_MODELS`, `~/.ollama/models`, or the Linux service's
+`/usr/share/ollama/.ollama/models`. With nothing loaded the slot is named
+`ollama`.
+
+Ollama does not start llama-server with `--metrics`, so speculative
+acceptance is not available for its models.
+
 ---
 
 ## Command-line options
@@ -772,6 +1012,20 @@ concurrent request traces.
 --log-db auto|off|FILE  SQLite log of samples and requests (default: auto)
 --log-every 1.0      seconds between --log-db sample rows
 --log-db-max-mb 1024 size cap for --log-db; oldest rows are dropped (0 = none)
+--energy-price 0     electricity price per kWh for GPU energy costs (0 = hide costs)
+--currency '$'       symbol printed before energy costs
+--alerts banner      off | banner | bell | notify (see Alerts)
+--alert-vram-pct 95  VRAM alert threshold, percent of a card's memory, for
+                     growth past where it settled (see Alerts)
+--alert-temp-c auto  GPU temperature alert, °C; auto = the card's own limit
+--alert-slow-pct 50  slow-decode alert, percent of the model's usual rate
+--regress-pct 10     flag a model decoding this many % slower than its own
+                     logged history at the same context lengths (0 = never)
+--regress-days 7     baseline for that flag: this many days back, minus the
+                     last 24 hours (2–365)
+--replay [FILE]      play a session back from a --log-db file (default: the auto one)
+--replay-from TIME   start of the range: Unix time, -2h, 'YYYY-MM-DD HH:MM', 'HH:MM'
+--replay-to TIME     end of the range, in the same forms
 --bench              benchmark the focused server (see Benchmark)
 --bench-ctx LIST     prompt lengths to measure (default 512,2k,8k,16k,32k)
 --bench-repeat 3     requests per length
@@ -792,7 +1046,7 @@ the account running the dashboard.
 ### Settings screen and saved defaults
 
 Press `s` to change the theme, colour depth, poll interval, model limits,
-GPUs and logging while the dashboard runs. `a` applies the values to this
+GPUs, logging, alerts, the regression flag and the energy price and currency while the dashboard runs. `a` applies the values to this
 session; `w` also saves them as the launch default, in
 `~/.config/llm-visuals/settings.json` (`%APPDATA%\llm-visuals` on Windows,
 `~/Library/Application Support/llm-visuals` on macOS). The file maps flag
@@ -836,11 +1090,114 @@ are left out, since their one-second window is partly empty. Ranges with fewer
 than five samples are dimmed. It opens on the focused model; `←` / `→` switch
 to the others in the file.
 
+### Regression flag
+
+When a model decodes noticeably slower than it used to, the header says so
+— `decode ▼18% vs 7d`, amber at the threshold and red at twice it — and
+the models strip carries the same `▼18%` beside its rate. A driver update,
+a card running hot, a changed flag or a new build all show up this way
+without anyone having to remember last week's number.
+
+The comparison is the model against itself, from the log:
+
+- **Now** is the last hour of samples; the **baseline** is the same model
+  from `--regress-days` (7) days ago up to a day ago. The last 24 hours are
+  left out so that a slowdown which started today is not averaged into the
+  thing it is measured against.
+- **Like with like.** Decode speed falls as the context fills, so a plain
+  mean mostly measures how long today's prompts were. Both windows are cut
+  into the context ranges the `c` screen uses, and only ranges with at least
+  five samples on each side are compared. The two means are weighted by
+  where the model is working now, and no verdict is given under 30 current
+  samples (about half a minute of decoding at the default `--log-every`).
+- **Same model, same cards.** A model is its name and engine, as logged.
+  Samples carry no GPU of their own, so the baseline keeps only the
+  ten-minute spans whose logged GPUs (index and name) match the ones the
+  model has now; a swapped card starts a fresh baseline rather than raising
+  a false alarm.
+
+Only slowdowns past `--regress-pct` (10 %) are flagged. Faster than before,
+or too little data, leaves the header alone; the `c` screen shows the
+comparison either way, as `7d` and `1h` columns beside each context range
+and a `last hour vs 1–7d ago` line, or `baseline: n/a` and the reason. The
+log is read on a background thread at start, every minute and when the set
+of models changes; the baseline itself is re-read hourly. The flag needs
+logging on, since this session's samples are half of the comparison.
+
 For anything else, query it directly:
 
 ```sh
 sqlite3 ~/.local/share/llm-visuals/llm.db "SELECT model, AVG(avg_decode_tps) FROM requests GROUP BY model"
 ```
+
+---
+
+## Replay
+
+`--replay` plays a logged session back through the dashboard: the
+throughput numerals and sparklines, the GPU cards, the context bar, the
+models strip and comparison view, and the request table, as they were.
+
+```sh
+llm-visuals --replay                         # newest session in the default log
+llm-visuals --replay ~/old.db                # another file
+llm-visuals --replay --replay-from -2h       # the last two hours
+llm-visuals --replay --replay-from "2026-10-21 14:00" --replay-to "2026-10-21 15:30"
+llm-visuals --replay --replay-to 09:00       # the session running before 9 this morning
+```
+
+A *session* is a run of samples with no hole longer than five minutes — one
+sitting of the dashboard. With no range, the newest one plays; with only an
+end, the newest one that began before it, cut there. A longer range can span
+several; playback steps over the holes between them (the status line says how
+much was skipped) and starts every tracker afresh at each, as a new
+dashboard run would. Times are local; `-90s`, `-30m`, `-2h` and `-1d` count
+back from now, and a bare `HH:MM` is today's (yesterday's if today's has not
+come yet).
+
+The header shows `REPLAY` with the logged time, the speed and ▶ / ⏸, and its
+bottom border fills as the range plays. Keys are listed under [Keys](#keys).
+A seek restarts the trackers and feeds them the minute before the new
+position at once, so the sparklines have their history; the requests that
+minute held are back in the table.
+
+**How the numbers are rebuilt.** The log is not redrawn; it is turned back
+into the samples a live poller would have produced — one per model every
+0.2 s of logged time, the GPU rows at their logged times — and fed to the
+same trackers as live data, on a clock that runs in logged seconds at any
+playback speed. Tokens come from the cumulative `session_decoded` /
+`session_prefilled` columns, spread evenly within each logged second (the
+log's resolution); each request's start, first token, end and token counts
+come from its `requests` row. A request still running when the dashboard
+quit has no row and is rebuilt from the busy samples instead. So the rates
+are the logged ones at one-second grain, and a TTFT or duration lands within
+a poll (0.2 s) of the logged figure.
+
+**What a replay cannot show.** The log keeps rates, context fill, request
+rows and GPU utilisation, VRAM, power and temperatures. It does not keep
+expert routing, speculative acceptance, host counters (disk, RAM, PCIe,
+memory controller), clocks, fans, power limits or the model's shape and
+placement, so the layers, experts, speculative and memory-pipeline panels
+say `not in log` rather than drawing a stand-in. The GPU cards show the
+logged utilisation, power draw, VRAM and temperatures: with no power limit
+logged the power gauge stays empty and the power history scales to itself,
+the VRAM bar is not split into weights and KV, and a model's own VRAM reads
+`—`. The GPU histories advance once per logged second rather than per poll,
+so they cover five times the span they do live. Concurrent requests on one
+model replay as one at a time: the newest request is followed, as a
+single-slot poller would.
+
+GPU energy is integrated from the logged power draw on the logged clock, so
+the energy row reads as it would have live. Alerts are off during a replay —
+a logged slow patch is history, and there are no live cards or servers to
+warn about — and the regression flag, which compares live samples with the
+log, says `not during a replay`.
+
+Nothing is written during a replay — `--log-db` is off, whatever it is set to
+— so the file being played can be the one another dashboard is still
+logging to. `l` and `c` read the replayed file. Opening is quick on a
+full-size log: the tables are appended in time order, so a time is found by
+a binary search over row ids and only the session played is read.
 
 ---
 
@@ -926,8 +1283,8 @@ card, and AMD cards still show their link generation and width but not live
 PCIe traffic. The other stages continue to work. Press `r` to retry.
 
 **RAM strip says "no tensor table".** The model path on the server's command
-line could not be opened as a GGUF (ollama blobs, remote paths, or a
-non-GGUF engine). Disk, PCIe and VRAM meters still work; the byte estimates
+line could not be opened as a GGUF (remote paths, a non-GGUF engine, or an
+Ollama daemon slot whose tag is not in a local store). Disk, PCIe and VRAM meters still work; the byte estimates
 need the file.
 
 **Throughput reads zero while the model is clearly working.** Another client

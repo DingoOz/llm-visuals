@@ -51,7 +51,7 @@ pub struct DbLog {
 /// per run, and a baseline dropped to make room for samples is lost for good.
 const TABLES: [&str; 3] = ["model_samples", "gpu_samples", "requests"];
 
-fn unix_now() -> f64 {
+pub(crate) fn unix_now() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs_f64())
@@ -376,7 +376,7 @@ pub struct LogSummary {
     pub recent: Vec<LoggedRequest>,
 }
 
-fn open_read_only(path: &Path) -> Result<Connection, String> {
+pub(crate) fn open_read_only(path: &Path) -> Result<Connection, String> {
     let err = |e: rusqlite::Error| format!("{}: {e}", path.display());
     // Open fails on a missing file instead of creating it.
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(err)?;
@@ -388,7 +388,38 @@ fn open_read_only(path: &Path) -> Result<Connection, String> {
 /// Rows the context-speed screen (`c`) aims for per model.
 const CTX_ROWS: i64 = 12;
 /// Tokens per bucket of the one grouping query; screen rows merge these.
-const CTX_GRAIN: i64 = 256;
+pub(crate) const CTX_GRAIN: i64 = 256;
+/// The samples that measure decode speed: taken while the model was
+/// decoding and not also prefilling (a sample straddling the two reads a
+/// partly empty window).
+pub(crate) const DECODING: &str =
+    "processing = 1 AND decode_tps > 0 AND prefill_tps = 0 AND ctx_used > 0";
+
+/// Fine grains per screen row when grains `lo..=hi` are to fit in about
+/// `CTX_ROWS` rows.
+pub(crate) fn grains_per_row(lo: i64, hi: i64) -> i64 {
+    (hi - lo) / CTX_ROWS + 1
+}
+
+/// Merges `(grain, sum of tok/s, samples)`, ascending by grain, into rows of
+/// `per` grains counted from grain `lo`: `(first token, mean tok/s, samples)`.
+pub(crate) fn merge_grains(grains: &[(i64, f64, i64)], lo: i64, per: i64) -> Vec<(i64, f64, i64)> {
+    let mut rows: Vec<(i64, f64, i64)> = Vec::new();
+    for &(fine, sum, n) in grains {
+        let start = (lo + (fine - lo).div_euclid(per) * per) * CTX_GRAIN;
+        match rows.last_mut() {
+            Some(b) if b.0 == start => {
+                b.1 += sum;
+                b.2 += n;
+            }
+            _ => rows.push((start, sum, n)),
+        }
+    }
+    for b in &mut rows {
+        b.1 /= b.2 as f64;
+    }
+    rows
+}
 
 /// Mean decode rate against context length for one model.
 pub struct ContextSpeed {
@@ -410,8 +441,7 @@ pub fn context_speed(path: &Path) -> Result<Vec<ContextSpeed>, String> {
     let rows: Vec<(String, i64, f64, i64)> = conn
         .prepare(&format!(
             "SELECT model, ctx_used / {CTX_GRAIN}, SUM(decode_tps), COUNT(*) FROM model_samples \
-             WHERE processing = 1 AND decode_tps > 0 AND prefill_tps = 0 AND ctx_used > 0 \
-             GROUP BY 1, 2 ORDER BY 1, 2"
+             WHERE {DECODING} GROUP BY 1, 2 ORDER BY 1, 2"
         ))
         .and_then(|mut q| {
             q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
@@ -429,21 +459,9 @@ pub fn context_speed(path: &Path) -> Result<Vec<ContextSpeed>, String> {
         let group = &rows[i..end];
         i = end;
         let (lo, hi) = (group[0].1, group[group.len() - 1].1);
-        let per = (hi - lo) / CTX_ROWS + 1; // fine buckets per screen row
-        let mut buckets: Vec<(i64, f64, i64)> = Vec::new();
-        for &(_, fine, sum, n) in group {
-            let start = (lo + (fine - lo) / per * per) * CTX_GRAIN;
-            match buckets.last_mut() {
-                Some(b) if b.0 == start => {
-                    b.1 += sum;
-                    b.2 += n;
-                }
-                _ => buckets.push((start, sum, n)),
-            }
-        }
-        for b in &mut buckets {
-            b.1 /= b.2 as f64;
-        }
+        let per = grains_per_row(lo, hi);
+        let grains: Vec<(i64, f64, i64)> = group.iter().map(|g| (g.1, g.2, g.3)).collect();
+        let buckets = merge_grains(&grains, lo, per);
         out.push(ContextSpeed {
             model: group[0].0.clone(),
             samples: group.iter().map(|g| g.3).sum(),

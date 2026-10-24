@@ -154,6 +154,10 @@ pub struct LiveStats {
     /// number it owns is unreachable, so the panels show zeros. The status
     /// line names this instead of letting zeros pose as "nothing loaded".
     pub auth_denied: Option<u16>,
+    /// What the Ollama daemon's `/api/ps` says about this model: loaded or
+    /// not, how much is in VRAM, when it unloads. `None` for other engines
+    /// and while the daemon has not answered.
+    pub ollama: Option<crate::ollama::Status>,
 }
 
 /// Per-request decode count when `/slots` does not carry `n_decoded`.
@@ -477,6 +481,7 @@ pub fn parse_slots(body: &str) -> Option<LiveStats> {
         kv_tokens: None,
         kv_usage_perc: None,
         auth_denied: None,
+        ollama: None,
     })
 }
 
