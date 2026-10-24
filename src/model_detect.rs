@@ -614,17 +614,32 @@ pub fn detect_models() -> Vec<DetectedModel> {
     // onto the PID that serves HTTP.
     let mut worker_gpu: std::collections::HashMap<u32, (u64, Vec<u32>)> =
         std::collections::HashMap::new();
+    // Maya's vision helper, by the server that runs it: where the encoder is.
+    let mut helper_place: std::collections::HashMap<u32, vision::Place> =
+        std::collections::HashMap::new();
+    let have_gpu_list = !gpu_procs.is_empty();
 
     for app in gpu_procs {
         let cmdline = read_cmdline(app.pid).unwrap_or_else(|| app.process_name.clone());
+        let helper = crate::strata::is_helper(&app.process_name, &cmdline);
         if is_sglang_worker(&app.process_name)
             || crate::strata::is_engine(&app.process_name, &cmdline)
+            || helper
         {
             if let Some(ppid) = parent_pid(app.pid) {
                 let e = worker_gpu.entry(ppid).or_insert((0, Vec::new()));
                 e.0 = e.0.saturating_add(app.mem_used_mb);
                 if !e.1.contains(&app.gpu_index) {
                     e.1.push(app.gpu_index);
+                }
+                if helper {
+                    helper_place.insert(
+                        ppid,
+                        vision::Place::Gpu {
+                            device: None,
+                            gpu: Some(app.gpu_index),
+                        },
+                    );
                 }
             }
             continue;
@@ -685,6 +700,18 @@ pub fn detect_models() -> Vec<DetectedModel> {
         if is_sglang_worker(&name) {
             continue;
         }
+        if crate::strata::is_helper(&name, &cmdline) {
+            // Not on the driver's list of GPU processes: on the CPU, unless
+            // there was no list to be on.
+            if let Some(ppid) = parent_pid(pid) {
+                helper_place.entry(ppid).or_insert(if have_gpu_list {
+                    vision::Place::Cpu
+                } else {
+                    vision::Place::Unknown
+                });
+            }
+            continue;
+        }
         // A vLLM server in a container reports its internal port;
         // re-anchor to the port published on the host.
         if parsed.engine == "vllm" {
@@ -742,7 +769,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
 
     let mut models: Vec<DetectedModel> = by_pid.into_values().collect();
     for m in &mut models {
-        if m.engine == "strata" {
+        if crate::strata::is_family(&m.engine) {
             apply_strata_config(m);
         }
         // `ollama serve` listens where OLLAMA_HOST says, not on its command
@@ -801,6 +828,12 @@ pub fn detect_models() -> Vec<DetectedModel> {
         }
         m.gpu_indices.sort_unstable();
         m.vision = detect_vision(m);
+        if let Some(place) = helper_place.remove(&m.pid) {
+            m.vision = Some(Vision {
+                loaded: Some(true),
+                place,
+            });
+        }
     }
 
     // GPU memory first; when nvidia-smi is unavailable that is zero for all,
@@ -809,7 +842,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
     models.sort_by_key(|m| {
         let has_model = m.path.is_some() || m.gguf.is_some();
         let engine_rank = match m.engine.as_str() {
-            "llama.cpp" | "vllm" | "sglang" | "strata" | "ninfer" | "exllamav2" => 2,
+            "llama.cpp" | "vllm" | "sglang" | "strata" | "maya" | "ninfer" | "exllamav2" => 2,
             "ollama" => 0,
             _ => 1,
         };
@@ -824,7 +857,8 @@ pub fn detect_models() -> Vec<DetectedModel> {
 }
 
 /// Strata's command line names only its `--config` JSON; the model's name,
-/// first GGUF shard and context size are in there.
+/// first GGUF shard and context size are in there, and for Maya the engine,
+/// its expert pack (which names the GGUF) and its cards.
 fn apply_strata_config(m: &mut DetectedModel) {
     let Some(path) = crate::strata::config_path(&m.cmdline, process_cwd(m.pid).as_deref()) else {
         return;
@@ -838,11 +872,21 @@ fn apply_strata_config(m: &mut DetectedModel) {
     if let Some(name) = cfg.model_name {
         m.name = name;
     }
+    if cfg.maya {
+        m.engine = "maya".into();
+    }
     if m.path.is_none() {
-        m.path = cfg.gguf;
+        m.path = cfg
+            .gguf
+            .or_else(|| cfg.pack.as_deref().and_then(crate::strata::pack_gguf));
     }
     if m.ctx_max.is_none() {
         m.ctx_max = cfg.max_context;
+    }
+    // The engine's own GPU memory names its cards; the config is the
+    // fallback when the driver lists no processes.
+    if m.gpu_indices.is_empty() {
+        m.gpu_indices = cfg.gpus;
     }
 }
 
@@ -1962,7 +2006,12 @@ pub async fn probe_endpoint(
             crate::strata::parse_metrics(&body)
         };
         if let Some(m) = strata {
-            engine = "strata".to_string();
+            engine = if m.maya_version.is_some() {
+                "maya"
+            } else {
+                "strata"
+            }
+            .to_string();
             if model_name.is_none() {
                 model_name = m.model;
             }
@@ -1996,7 +2045,7 @@ pub async fn probe_endpoint(
     // key, since they come from /metrics.
     if model_name.is_none() {
         if let Some(h) = crate::strata::poll_health(host, port, auth).await {
-            engine = "strata".to_string();
+            engine = if h.maya { "maya" } else { "strata" }.to_string();
             model_name = h.model;
             if ctx_max.is_none() {
                 ctx_max = (h.max_context > 0).then_some(h.max_context);

@@ -447,7 +447,7 @@ async fn poll_server(
             tokio::time::sleep(sleep).await;
         }
     }
-    if model.engine == "strata" {
+    if strata::is_family(&model.engine) {
         // Strata is read from its JSON /metrics: one document from a
         // Python server, so never poll it faster than 400 ms.
         let delay = poll.max(Duration::from_millis(400));
