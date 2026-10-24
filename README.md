@@ -138,7 +138,7 @@ console, pass `--color truecolor` if colours look flat.
 ### What to test
 
 - [ ] `cargo build --release` completes (MSVC linker and SQLite C build found).
-- [ ] `--demo` renders every view (`a` `p` `h` `m` `e` `b` `v`) and `q` restores
+- [ ] `--demo` renders every view (`a` `p` `h` `m` `e` `u` `b` `v`) and `q` restores
       the terminal.
 - [ ] Colours: truecolor is picked automatically in Windows Terminal.
 - [ ] GPU panels show utilisation, VRAM, power and temperature from `nvidia-smi`.
@@ -313,9 +313,10 @@ and the new speed is shown as fact.
 
 One card per device: utilisation gauge with a VU-style peak-hold notch, power
 gauge, temperature coloured by heat (plus the memory temperature on the
-NVIDIA cards that report it), SM clock, fan, PCIe link, a VRAM bar split
-into weights / KV in use / KV reserved / free, and utilisation and power
-history sparklines.
+NVIDIA cards that report it), SM clock, fan, PCIe link, the card's peak
+memory bandwidth where the line has room for it, a VRAM bar split into
+weights / KV in use / KV reserved / free, and utilisation and power history
+sparklines.
 
 When the driver is holding an NVIDIA card's clocks down, a badge after the
 power reading says why, so a sudden drop in decode speed has its cause on
@@ -385,6 +386,15 @@ the mean number of distinct experts each layer touched over its last 256
 tokens). Without the patch the title reads `simulated`: the timing is real
 (each new token re-routes every layer) but the identities are a stand-in.
 
+Layers with tensors in system RAM are tagged `C`. llama.cpp keeps them there
+when told to — `-ot` / `--override-tensor` rules, `--cpu-moe`,
+`--n-cpu-moe N`, `--n-cpu-ffn N`, or their `LLAMA_ARG_*` environment
+variables — and the dashboard applies the same rules to the GGUF tensor
+table: a layer whose experts are in RAM but whose attention is on card 0
+reads `0C`, a layer entirely in RAM reads `C`, and the panel title counts
+them (`C 8 in RAM`). A rule that pins tensors to a card (`=CUDA1`) moves
+the layer's tag to that card. The tags need tiles at least five cells wide.
+
 ![expert landscape](docs/landscape.svg)
 
 <sub>Expert landscape (`e`), `--demo`, 140×44: the routing of the map above,
@@ -415,6 +425,48 @@ or restarts the slow sway. The view takes the context and MTP row's space as
 well. It is drawn two pixels to a cell with half blocks, supersampled, with a
 soft glow in truecolor; a 256-colour terminal gets it without the glow.
 
+![expert balance](docs/balance.svg)
+
+<sub>Expert balance (`u`), `--demo`, 140×44: four layers whose router has all
+but collapsed onto a dozen experts stand out from the rest of the model.</sub>
+
+The balance view (`u`) asks of the same counts whether the router is
+spreading its work or collapsing onto a few experts, and in which layers.
+One row per MoE layer, from that layer's hits over the server's window
+(`recent` from `GET /experts`, 256 tokens with the patch):
+
+- **curve**: the layer's experts ranked by hits, busiest at the left, each
+  level the mean of the ranks it covers against the busiest expert. A
+  collapsed router is one tall bar and then nothing; a balanced one stays
+  high all the way across.
+- **effective experts**: exp(Shannon entropy) of the layer's hit shares —
+  how many equally used experts would spread the picks this evenly. 1 when
+  one expert takes every pick, the expert count when all are used alike.
+  The gauge is that against the total.
+- **used**: experts picked at least once in the window.
+- **topK**: the share of the picks the busiest K experts took, K being the
+  model's experts per token. 100 % means every token went to the same K: the
+  layer behaves as a dense layer of K experts. **×even** is that share over
+  what a perfectly even router would give (K / experts).
+
+A window of a few hundred tokens never looks perfectly even, so neither
+measure reaches its ideal on real hardware: 256 tokens × 8 picks over 256
+experts leaves a perfectly uniform router at about 240 effective experts
+and 1.8× the even top-8 share. A layer is therefore flagged `●` against the model's
+own layers, not against the ideal: its top-K share is at least twice the
+median layer's. The summary line gives the mean effective experts, how many
+layers are flagged, and the most lopsided and most even layer; when there
+are spare rows under the table, a strip shows effective experts layer by
+layer with the flagged ones marked beneath.
+
+Every layer gets a row, in as many columns (up to four) as it takes. When
+even that does not fit, neighbouring layers share a row and the row shows
+the most lopsided of them — the title says `most lopsided of N per row` —
+since averaging would hide exactly the layer the view is for. Without the
+server patch there are no hit counts, and the view says so instead of
+drawing a stand-in; a dense model or the attention bridge gets a line
+saying there is no router.
+
 If the model carries an **engram** module (a hashed n-gram memory; llama.cpp's
 `<arch>.ple.*` keys, as in Qwen3.8-Flash-Next), the bottom row of the expert
 panel describes it: n-gram order, the layer it feeds, hash heads, table rows ×
@@ -438,9 +490,9 @@ verdict names RAM as the bound at 2.5 tok/s.</sub>
 | Stage | Meter | Source |
 |---|---|---|
 | DISK | MB/s read from every whole block device | `/proc/diskstats`, plus the server's own reads and major page faults from `/proc/<pid>/io` and `/proc/<pid>/stat` |
-| RAM | GB/s of weights the CPU streams out of system RAM, *estimate* | CPU-side bytes × active fraction × steps/s; CPU-side bytes = tensor-table size minus what the cards hold. Tensor table = the GGUF tensor table, or the `*.safetensors` shard headers (header bytes only, labelled `est`) for safetensors servers. A safetensors server has no partial offload, so with a GPU present none of its weights count as CPU-side |
+| RAM | GB/s of weights the CPU streams out of system RAM, *estimate* | CPU-side bytes × active fraction × steps/s; CPU-side bytes = tensor-table size minus what the cards hold. Tensors llama.cpp's override rules keep in RAM (`-ot …=CPU`, `--cpu-moe`, `--n-cpu-moe`) are CPU-side exactly, whatever the cards hold, and are read at their own rate — routed experts at used/total — rather than the whole model's; the stage shows them as `by -ot`, and `cpu-side` loses its `~` when the rules account for all of it. Tensor table = the GGUF tensor table, or the `*.safetensors` shard headers (header bytes only, labelled `est`) for safetensors servers. A safetensors server has no partial offload, so with a GPU present none of its weights count as CPU-side |
 | PCIe | host→device MB/s per GPU, scaled to the link (gen × lanes) | `nvidia-smi dmon -s t` (NVIDIA; unavailable for AMD). On a unified part the stage is labelled `C2C` and reads `n/a`: the traffic is NVLink-C2C and the driver exposes no counter for it |
-| VRAM | memory-controller busy % per GPU, plus the estimated GB/s of weights streamed | NVIDIA `utilization.memory` or AMD `mem_busy_percent`; bytes per step from the tensor table. On a unified part the stage is labelled `UNIFIED` and shows pool fill (server-reported occupancy over system RAM) instead — there is no memory controller to watch |
+| VRAM | estimated GB/s of weights streamed against the cards' peak, plus memory-controller busy % per GPU | NVIDIA `utilization.memory` or AMD `mem_busy_percent`; bytes per step from the tensor table; peak from NVML's bus width and maximum memory clock (unknown elsewhere: the stage then leads with busy %). On a unified part the stage is labelled `UNIFIED` and shows pool fill (server-reported occupancy over system RAM) instead — there is no memory controller to watch |
 | PREFILL | prompt tokens/s | `/slots` |
 | DECODE | generated tokens/s | `/slots` |
 
@@ -459,9 +511,27 @@ under one alias are left unresolved rather than guessed. A step is one
 verification pass under MTP / speculative decoding (from `/metrics`), one
 token otherwise, and one micro-batch (`-ub`, default 512) during prefill. The verdict is a rule
 chain: disk activity beats everything (weights are paging), then a PCIe link
-past a third of its cap, then a memory controller past 75 %, then CPU-side
-layers with an idle GPU, then a busy GPU (compute bound); otherwise no hop is
-saturated and the gap is latency between tokens.
+past a third of its cap, then a memory controller past 75 %, then a weight
+stream past 60 % of the cards' peak bandwidth, then CPU-side layers with an
+idle GPU, then a busy GPU (compute bound); otherwise no hop is saturated and
+the gap is latency between tokens.
+
+**Peak bandwidth.** On NVIDIA cards read through NVML, the VRAM stage reads
+`212/732 GB/s est`: the estimated weight stream over the theoretical peak,
+with its first bar (`bw`) scaled to that peak beside the per-card
+memory-controller bars. A card's peak is bus width ÷ 8 × maximum memory clock
+× 2, both reported by the driver (a P100 12 GB: 3072-bit × 715 MHz = 549
+GB/s; a V100: 4096-bit × 877 MHz = 898 GB/s). Several cards combine by how
+they read: under llama.cpp's default layer split each token reads one card's
+layers after another's, so the ceiling is the bytes over the summed time
+(a 256 GB/s and a 549 GB/s card holding half each give ~349 GB/s, not 805);
+under a tensor-parallel or `--split-mode row` split they read at once and the
+slowest share sets the pace. Decode kernels rarely pass 80 % of the datasheet
+figure, so 60 % is where the verdict names VRAM bandwidth. The
+nvidia-smi fallback has no bus-width column, and amdgpu sysfs reports the
+memory clock but not the bus width, so the peak is unknown on those paths;
+the stage then reads busy % as before. A unified part keeps its pool-fill
+stage.
 
 On a 27B Q6 model that does not quite fit two cards (~4.7 GB left on the
 CPU), the view shows the GPUs under 40 % busy, memory controllers at 24 %,
@@ -510,6 +580,7 @@ watched and `--pid A,B` restricts it to named processes.
 | `h` | layer tiles zoom |
 | `m` | expert map zoom, finer blocks |
 | `e` | expert landscape: the expert map as an isometric height field (`←` `→` turn, `↑` `↓` tilt, `space` hold still) |
+| `u` | expert balance: per-layer router load balance — effective experts, top-k share, ranked hits (needs the server patch) |
 | `b` | memory pipeline: disk → RAM → PCIe → VRAM → prefill → decode VU meters and the bottleneck verdict |
 | `v` | compare every model side by side |
 | `Tab` / `Shift-Tab` | focus the next / previous model |
@@ -543,12 +614,13 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | request log | one record per `id_task`; averages from accumulated deltas |
 | util, VRAM, power, °C, clocks, fan, PCIe link | NVIDIA in-process NVML (`nvidia-smi --query-gpu=…` fallback), Intel `xpu-smi --query-gpu=…`, or Linux amdgpu sysfs and hwmon, every poll. NVIDIA additionally reports the memory temperature — NVML field value 82 on the in-process path, `temperature.memory` on the CLI one — shown as `mem 71°` beside the die temperature on cards whose driver reports the sensor (HBM parts such as the CMP 170HX it was verified on); it reads blank elsewhere. The clocks-event reasons badge is NVML `nvmlDeviceGetCurrentClocksEventReasons` (`…ClocksThrottleReasons` on drivers that predate the rename) in process, and `clocks_event_reasons.active` (else `clocks_throttle_reasons.active`) on the CLI, a bitmask decoded per `nvml.h`. On Intel, fan speed is the `xe` driver's hwmon tachometer (RPM); utilization that samples ~0 while clocks are boosted is reconstructed from the clock ratio and marked `~`; PCIe link and an unsupported temperature read blank. Unified-memory parts (NVIDIA GB10 / DGX Spark) report no device memory, fan or memory-busy counter at all: NVML stays the backend for the fields that *do* answer, and the memory bar relabels itself (see `VRAM weights vs KV` and Troubleshooting). AMD APUs (BC-250 / Cyan Skillfish, Strix Halo) are unified too but *measured*: the driver reports a 512 MiB VRAM carve-out plus a GTT heap spanning the shared RAM pool, and the backend shows the sum of both heaps as the `UNIFIED` pool — the same figures nvtop prints for an integrated GPU |
 | system RAM | Linux `/proc/meminfo` (`MemTotal − MemAvailable` in use, `Cached` as page cache) and the server's `VmRSS`; elsewhere the OS memory totals, with no page cache split |
-| VRAM weights vs KV | llama.cpp: **estimate** from GGUF file size × `--tensor-split`. SGLang: `memory.weight_gb` and `memory.kv_cache_gb` from `/v1/loads`. vLLM and other safetensors servers: **estimate** from the summed size of the served directory's weight shards. On a part with no device memory (GB10 / DGX Spark) the bar is labelled `UNIFIED`: used = the server's weight + KV + CUDA-graph GiB from `/v1/loads` summed over the models that report it, denominator = system RAM — the pool the accelerator shares. vLLM has no `/v1/loads`; a vLLM server is counted by its own declared numbers instead: the served directory's shard sizes for weights, plus the whole `--kv-cache-memory-bytes` pool it was launched with, which vLLM allocates at start-up (the value is read as vLLM reads it: `16g` is 16 × 10⁹ bytes, `16G` is 16 GiB). `kv_cache_usage_perc` from `/metrics` lights the share of that pool holding tokens. Without that flag but with `--gpu-memory-utilization` on the command line, the fill is that fraction of system RAM — the budget vLLM claims at start-up, weights included — never less than the shards; the segment past the weights is then the rest of that budget, so it holds activations and CUDA graphs as well as the KV pool. With neither flag the pool is not counted (vLLM's 0.9 default is not on the command line), and with no number from any model the row degrades to zeros rather than a stand-in. Shards one directory down (`tensors/`) are found when the served directory has none of its own. An amdgpu APU row is the exception: its pool is measured from the driver's VRAM + GTT heaps, which already count every GPU process, so no server declaration overwrites it |
+| VRAM weights vs KV | llama.cpp: **estimate** from GGUF file size × `--tensor-split`, with the tensors override rules keep in RAM left out and the ones they pin to a card counted on it. SGLang: `memory.weight_gb` and `memory.kv_cache_gb` from `/v1/loads`. vLLM and other safetensors servers: **estimate** from the summed size of the served directory's weight shards. On a part with no device memory (GB10 / DGX Spark) the bar is labelled `UNIFIED`: used = the server's weight + KV + CUDA-graph GiB from `/v1/loads` summed over the models that report it, denominator = system RAM — the pool the accelerator shares. vLLM has no `/v1/loads`; a vLLM server is counted by its own declared numbers instead: the served directory's shard sizes for weights, plus the whole `--kv-cache-memory-bytes` pool it was launched with, which vLLM allocates at start-up (the value is read as vLLM reads it: `16g` is 16 × 10⁹ bytes, `16G` is 16 GiB). `kv_cache_usage_perc` from `/metrics` lights the share of that pool holding tokens. Without that flag but with `--gpu-memory-utilization` on the command line, the fill is that fraction of system RAM — the budget vLLM claims at start-up, weights included — never less than the shards; the segment past the weights is then the rest of that budget, so it holds activations and CUDA graphs as well as the KV pool. With neither flag the pool is not counted (vLLM's 0.9 default is not on the command line), and with no number from any model the row degrades to zeros rather than a stand-in. Shards one directory down (`tensors/`) are found when the served directory has none of its own. An amdgpu APU row is the exception: its pool is measured from the driver's VRAM + GTT heaps, which already count every GPU process, so no server declaration overwrites it |
 | layers, heads, experts, MTP layers, engram, quant | GGUF header, or HuggingFace `config.json` (`num_hidden_layers`, `num_attention_heads`, `num_experts` / `num_local_experts`, `num_experts_per_tok`) for safetensors dirs |
 | vision encoder | llama.cpp: `modalities.vision` from `GET /props`, else `--mmproj` / `-hf` on the command line or `LLAMA_ARG_MMPROJ` in `/proc/<pid>/environ`. Placement: CPU for `--no-mmproj-offload` or a process with no GPU runtime in `/proc/<pid>/maps`; otherwise `--mmproj-device` or the first GPU device, mapped to a card by the CUDA driver's `cuDeviceGetPCIBusId` (run in a child process with the server's CUDA variables) matched against nvidia-smi's `pci.bus_id`, or by the one card the process occupies. vLLM / SGLang: `vision_config` in `config.json`, on the model's GPUs (none with `--language-model-only`) |
-| layer → GPU | `--tensor-split` proportions |
+| layer → GPU | `--tensor-split` proportions, except where llama.cpp's buffer-type overrides place a layer's tensors: `-ot` / `--override-tensor` patterns (searched in each tensor name, first match wins, as llama.cpp does), `--cpu-moe`, `--n-cpu-moe N`, `--n-cpu-ffn N` and their `LLAMA_ARG_*` variables in `/proc/<pid>/environ`, applied to the GGUF tensor table. A rule naming a CUDA device is mapped to a card the way the vision encoder's is. A rule the `regex` crate cannot read (look-around, back-references) is named in the status line and its tensors keep the split share. `--fit` (on by default) can also move tensors at load time; only the server's log says where, so that placement is not shown |
 | layer activity | utilisation of the GPU the layer lives on, smoothed |
 | expert blocks | real top-k routing from `GET /experts` (patched server), else a deterministic stand-in keyed by layer and token step |
+| expert balance | `recent` from `GET /experts`, per layer: effective experts = exp(−Σ p ln p) over the hit shares, top-K share = hits of the K busiest ÷ all hits (K = experts per token, 8 when the server omits it), flagged at ≥ 2× the median layer's top-K share. No stand-in without the patch |
 | expert landscape | height: `recent`, the hits per expert over the server's window from `GET /experts`, as a share of the busiest expert's. Light: the expert blocks' heat, averaged over a block and measured against the busiest fiftieth of the field. Without `/experts` there are no heights and the picks are the stand-in's |
 | MTP / speculative depth (tokens drafted per step) | llama.cpp: `--spec-draft-n-max` (or `--draft-max`) on the command line, else the model's MTP layer count. vLLM: number of per-position acceptance counters. SGLang: `speculative_num_draft_tokens` |
 | MTP acceptance, tok/step, steps/s | deltas of `spec_decode_num_draft_tokens_total`, `…accepted_tokens_total`, `…drafts_total` from `GET /metrics`, 1.5 s window |
@@ -556,7 +628,8 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | resident weights | `RssFile` in `/proc/<pid>/status` |
 | PCIe MB/s | in-process NVML `nvmlDeviceGetPcieThroughput` (`nvidia-smi dmon -s t -c 1` fallback) rx/tx per GPU; samples above the link cap are dropped (dmon emits the odd garbage row) |
 | VRAM busy % | NVIDIA `utilization.memory` or AMD `mem_busy_percent` (memory-controller busy time) |
-| bytes per step, RAM / VRAM GB/s | **estimate**: GGUF tensor table (sizes from offset gaps, summed over every shard of a split file), expert tensors × used/total, embedding and engram tables excluded, split CPU vs GPU by what the cards hold, × steps/s |
+| peak memory bandwidth | NVML `nvmlDeviceGetMemoryBusWidth` × `nvmlDeviceGetMaxClockInfo(NVML_CLOCK_MEM)`: bits ÷ 8 × MHz × 2, once per card; unknown on the nvidia-smi, amdgpu, Intel and Apple paths |
+| bytes per step, RAM / VRAM GB/s | **estimate**: GGUF tensor table (sizes from offset gaps, summed over every shard of a split file), expert tensors × used/total, embedding and engram tables excluded, split CPU vs GPU by what the cards hold (and by llama.cpp's `-ot` / `--cpu-moe` / `--n-cpu-moe` rules where given, exactly), × steps/s |
 
 Per-request `timings` only appear inside completion responses, which the
 dashboard never sees, so everything is reconstructed from polled counters.

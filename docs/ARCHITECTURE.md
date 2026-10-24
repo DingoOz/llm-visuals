@@ -60,7 +60,8 @@ GPUs and the disk are shared.
 | `dblog.rs` | `--log-db` SQLite writer (on by default at the per-user data path) with a size cap |
 | `model_detect.rs` | finds inference processes via `nvidia-smi --query-compute-apps` and `/proc`, parses their command lines (model path, port, ctx size, tensor split, spec mode); returns every server found, best first, minus this process and idle daemons |
 | `vision.rs` | vision encoder detection and placement: llama.cpp projector flags and environment, the GPU runtime from `/proc/<pid>/maps`, and CUDA ordinal → host card via a `--cuda-bus-ids` child process that queries `libcuda` under the server's `CUDA_VISIBLE_DEVICES` / `CUDA_DEVICE_ORDER` |
-| `gguf.rs` | reads the GGUF header without loading tensors; maps layers to GPUs from `--tensor-split`; `read_tensor_summary` walks the tensor table and sizes each tensor from the gap to the next offset (no quant type table needed) |
+| `gguf.rs` | reads the GGUF header without loading tensors; maps layers to GPUs from `--tensor-split`; `read_tensor_table` walks the tensor table and sizes each tensor from the gap to the next offset (no quant type table needed), `read_tensor_summary` totals it |
+| `offload.rs` | llama.cpp's buffer-type overrides (`-ot`, `--cpu-moe`, `--n-cpu-moe`, `--n-cpu-ffn`, their `LLAMA_ARG_*` variables) parsed into regex rules and applied to the tensor table at detection: bytes in RAM (and read per step), bytes pinned to each card, and per layer the share in RAM and the card it is pinned to |
 | `observe.rs` | HTTP GET with timeouts; parsers for `/slots`, `/metrics` (Prometheus text) and `/experts` |
 | `vllm.rs` | vLLM `/metrics` adapter: reconstructs per-request `LiveStats` from engine-wide Prometheus counters |
 | `sglang.rs` | SGLang adapter: `GET /v1/loads?include=all` plus one-shot `/server_info`; optional `sglang:realtime_tokens_total` |
@@ -71,6 +72,7 @@ GPUs and the disk are shared.
 | `bandwidth.rs` | `weight_layout` (bytes total / active / CPU-side from the GGUF tensor table and VRAM use) and `assess`, the rule chain that names the bottleneck stage |
 | `fade.rs` | time-based smoothing so the UI breathes: fast attack, slow release; per-expert heat that cools exponentially; per-expert usage (the server's hit counts as a share of the busiest expert's) eased for the landscape |
 | `landscape.rs` | the expert landscape (`e`), free of terminal types: a `Camera` that rests at the four isometric corners, the projection, `Grid` (experts and layers grouped to what the canvas resolves) and a small rasteriser — boxes in painter's order, supersampled, with a blurred glow — that returns an RGB image `render.rs` paints with half blocks |
+| `balance.rs` | router load balance for the balance view (`u`), free of terminal types: per layer, from the `/experts` hit counts, effective experts (exp entropy), top-k share, a ranked-hits curve, and which layers stand out against the median layer |
 | `demo.rs` | synthetic servers (`--demo-models N`, each a prefill → decode → idle loop with its own profile) emitting `LiveStats`, `SpecMetrics` and `ExpertStats` through the same tagged channels; one extra task walks the shared GPUs and host counters from their combined load |
 | `colors.rs` | truecolor / 256-colour gating, gradients, palette constants, themes |
 | `render.rs` | the `Dashboard` view-model (every `ModelView` plus the focused index) and every panel; the models strip and comparison view walk all of them, the rest use the focused one; gauges, sparklines, big digits, layout rules |
@@ -125,9 +127,24 @@ above the PCIe link cap (`pcie_link_mb_s(gen, width)`) is dropped.
 **Weight streams** are estimates, labelled as such on screen:
 `bytes_per_step = total − embedding − experts × (1 − used/total)`;
 `cpu_bytes = file − Σ min(file × split share, VRAM used)`; RAM GB/s =
-`cpu_bytes × active fraction × steps/s`, VRAM GB/s = the rest. Steps/s is
+`cpu_bytes × active fraction × steps/s`, VRAM GB/s = the rest. When
+llama.cpp's override rules place tensors (`offload.rs`), the split share
+covers only the tensors no rule placed: `cpu_bytes = file − Σ min(unplaced
+× split share + pinned to that card, VRAM used)`, so the rules' RAM tensors
+are always CPU-side. Per step the RAM reads those tensors at their own
+active bytes (routed experts × used/total) plus any spill at the rest of the
+model's active fraction. Steps/s is
 `spec.steps_per_sec` when `/metrics` is served, else decode tok/s; during
 prefill it is `prefill tok/s ÷ ubatch`.
+
+**Peak memory bandwidth** is driver arithmetic, not an estimate:
+`bus width / 8 × max memory clock × 2` from NVML
+(`nvmlDeviceGetMemoryBusWidth`, `nvmlDeviceGetMaxClockInfo(MEM)`), read once
+per card. The VRAM stream's ceiling combines the cards that hold weights:
+`Σ bytes_i / Σ (bytes_i / peak_i)` under llama.cpp's layer split, where the
+cards read their shares one after another, and `Σ bytes_i / max (bytes_i /
+peak_i)` under a parallel one (tensor-parallel safetensors servers,
+`--split-mode row`). It is unknown unless every such card has a peak.
 
 ## Timing model
 

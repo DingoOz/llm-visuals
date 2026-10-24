@@ -1,3 +1,4 @@
+mod balance;
 mod bandwidth;
 mod colors;
 mod config;
@@ -13,6 +14,7 @@ mod model_detect;
 mod ninfer;
 pub mod nvml;
 mod observe;
+mod offload;
 mod perf;
 mod pipeline;
 mod render;
@@ -171,6 +173,7 @@ async fn discover(args: &Args, auth: &HttpAuth) -> (Vec<DetectedModel>, Option<S
                 if fm.gguf.is_none() {
                     fm.gguf = m.gguf;
                     fm.tensors = m.tensors;
+                    fm.offload = m.offload;
                 }
                 // The process scan can place the encoder; a port probe can't.
                 if m.vision.is_some()
@@ -545,7 +548,11 @@ fn status_for(slots: &[ModelSlot], rescanned: bool) -> String {
                 .auth_denied
                 .map(|code| format!(" — HTTP {code}: {REMEDY}"))
                 .unwrap_or_default();
-            format!("{prefix}attached to {}{note}", slots[0].model)
+            format!(
+                "{prefix}attached to {}{note}{}",
+                slots[0].model,
+                offload_note(slots)
+            )
         }
         n => {
             let refused: Vec<String> = slots
@@ -561,14 +568,31 @@ fn status_for(slots: &[ModelSlot], rescanned: bool) -> String {
                 format!(" — {}: {REMEDY}", refused.join(", "))
             };
             format!(
-                "{prefix}watching {n} models: {}{note}",
+                "{prefix}watching {n} models: {}{note}{}",
                 slots
                     .iter()
                     .map(|s| s.model.short_name())
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                offload_note(slots)
             )
         }
+    }
+}
+
+/// Override rules the server accepted but this dashboard cannot read: the
+/// tensors they place are shown by `--tensor-split` share instead, so the
+/// CPU-side figures may be off and the status line says which rule.
+fn offload_note(slots: &[ModelSlot]) -> String {
+    let bad: Vec<&str> = slots
+        .iter()
+        .filter_map(|s| s.model.offload.as_ref())
+        .flat_map(|o| o.invalid.iter().map(String::as_str))
+        .collect();
+    if bad.is_empty() {
+        String::new()
+    } else {
+        format!(" — -ot rule not understood: {}", bad.join(", "))
     }
 }
 
@@ -901,6 +925,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char(' ') if view_mode == ViewMode::Landscape => {
                             camera.toggle_orbit()
                         }
+                        KeyCode::Char('u') => view_mode = ViewMode::Balance,
                         KeyCode::Char('b') => view_mode = ViewMode::Bandwidth,
                         KeyCode::Char('v') => view_mode = ViewMode::Models,
                         KeyCode::Tab => focus = (focus + 1) % n,
@@ -1364,14 +1389,31 @@ fn fade_sample_from_live(
     }
     let n_layers = n_layers.max(1);
     let model_gpus: Vec<u32> = detected.map(|d| d.gpu_indices.clone()).unwrap_or_default();
+    let offload = detected.and_then(|d| d.offload.as_ref());
     let layer_gpu: Vec<usize> = (0..n_layers)
-        .map(|l| layer_device(l, n_layers, &split, &model_gpus))
+        .map(|l| {
+            offload
+                .and_then(|o| o.block_gpu.get(l).copied().flatten())
+                .map(|g| g as usize)
+                .unwrap_or_else(|| layer_device(l, n_layers, &split, &model_gpus))
+        })
         .collect();
+    let layer_cpu: Vec<f32> = offload
+        .filter(|o| o.cpu_bytes > 0)
+        .map(|o| (0..n_layers).map(|l| o.block_cpu_frac(l)).collect())
+        .unwrap_or_default();
     let processing = live.processing;
     let layer_target: Vec<f32> = (0..n_layers)
         .map(|l| {
             let dev = layer_gpu[l];
-            let u = util.get(dev).copied().unwrap_or(0.0) / 100.0;
+            // A layer wholly in RAM is not lit by any card's load, and the
+            // CPU's share of the work is not measured: it shows as merely busy.
+            let in_ram = layer_cpu.get(l).is_some_and(|&c| c > 0.999);
+            let u = if in_ram {
+                0.0
+            } else {
+                util.get(dev).copied().unwrap_or(0.0) / 100.0
+            };
             if processing {
                 u.clamp(0.08, 1.0)
             } else {
@@ -1445,10 +1487,18 @@ fn fade_sample_from_live(
                     ((k_gb * share) / total_gb).clamp(0.0, (used_f - weight_frac[i]).max(0.0));
             }
         } else {
+            // Tensors the `-ot` rules keep in RAM hold no VRAM; the ones they
+            // pin to a card count on that card whatever the split says.
+            let w_mb = match offload.filter(|o| o.n_rules > 0) {
+                Some(o) => {
+                    (o.split_bytes as f32 * share + o.pinned_on(g.index) as f32) / (1024.0 * 1024.0)
+                }
+                None => file_mb as f32 * share,
+            };
             let w = if g.mem_total_mb == 0 {
                 0.0
             } else {
-                (file_mb as f32 * share) / g.mem_total_mb as f32
+                w_mb / g.mem_total_mb as f32
             };
             weight_frac[i] = w.clamp(0.0, used_f);
             kv_alloc_frac[i] = (used_f - weight_frac[i]).max(0.0);
@@ -1457,6 +1507,7 @@ fn fade_sample_from_live(
     FadeSample {
         layer_target,
         layer_gpu,
+        layer_cpu,
         kv_filled,
         processing,
         decoded: live.decoded,
@@ -1536,6 +1587,7 @@ mod tests {
                 cmdline: cmdline.into(),
                 gguf: None,
                 tensors: None,
+                offload: None,
                 vision: None,
             });
             s.live.kv_usage_perc = kv;
@@ -1666,6 +1718,7 @@ mod tests {
             cmdline: String::new(),
             gguf: None,
             tensors: None,
+            offload: None,
             vision: None,
         };
         let mut refused = ModelSlot::new(model("sglang"));
