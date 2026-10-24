@@ -19,15 +19,35 @@ is put together.
 - SGLang: `/v1/loads` poller, `/server_info`, worker folding, safetensors
   `config.json` architecture fields (also used by vLLM).
 - Decode speed vs context length (`c`), from the logged samples.
+- Expert balance view (`u`): the /experts 256-token histogram as per-layer
+  effective experts, top-k share and a ranked-hits curve, with lopsided
+  layers flagged.
+- llama.cpp tensor overrides (`-ot`, `--cpu-moe`, `--n-cpu-moe`,
+  `--n-cpu-ffn`) applied to the tensor table: exact CPU-side bytes for the
+  memory pipeline and verdict, `C` tags on layer tiles.
+- Per-GPU peak memory bandwidth from NVML (bus width × memory clock): the
+  VRAM stage shows the weight stream in GB/s against it, and the verdict
+  names VRAM bandwidth past 60 % of the peak.
+- Ollama: its llama-server runners polled through `/slots` and named by tag
+  from the store's manifests; `/api/ps` for the unload countdown, the
+  CPU/GPU split and the CPU-side bytes; daemon-only slots labelled
+  `throughput n/a`.
+- GPU energy per session and per generated token, priced with `--energy-price`.
+- Alerts (`--alerts`): VRAM growth past its settled level, GPU / memory hot, slow decode against the
+  model's own baseline, server gone; banner, bell or desktop notification.
+- Regression flag: decode speed now vs the same model's logged week, per
+  context range and on the same GPU set.
 
 ## Ideas not yet done
 
 - Per-position acceptance rates for deeper MTP drafts (server logs them but
   does not export them).
-- Show the /experts 256-token histogram as a load-balance view per layer.
-- Ollama metrics endpoint for throughput (vLLM and SGLang done).
+- Throughput for Ollama releases that predate the llama-server runner, and
+  for a daemon whose runner is hidden (container): neither exports token
+  counters, so it would take a proxy in front of the API.
 - Real DRAM bandwidth (perf uncore counters) instead of the bytes × steps
-  estimate; per-GPU memory bandwidth ceilings so the VRAM meter can show GB/s
-  against the card's peak.
-- Honour `-ot` / `--override-tensor` and `--fit` output to place tensors on
-  CPU vs GPU exactly instead of by `--tensor-split` share.
+  estimate.
+- Peak memory bandwidth off NVML: AMD needs the `AMDGPU_INFO` ioctl's
+  `vram_bit_width` (sysfs has only the clock).
+- `--fit` output, to place the tensors it moves at load time (only the
+  server's log says where).

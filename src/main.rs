@@ -1,8 +1,11 @@
+mod alerts;
+mod balance;
 mod bandwidth;
 mod colors;
 mod config;
 mod dblog;
 mod demo;
+mod energy;
 mod fade;
 mod gguf;
 mod gpu;
@@ -13,8 +16,11 @@ mod model_detect;
 mod ninfer;
 pub mod nvml;
 mod observe;
+mod offload;
+mod ollama;
 mod perf;
 mod pipeline;
+mod regress;
 mod render;
 mod replay;
 mod safetensors;
@@ -64,6 +70,12 @@ struct ModelSlot {
     num_layers: usize,
     num_heads: usize,
     ctx_max: usize,
+    /// The tag Ollama last said this slot holds; empty until it has.
+    ollama_tag: String,
+    /// When the poller last delivered a sample, for the gone alert.
+    last_answer: Instant,
+    /// The log's record of this model's decode speed, for the regression flag.
+    regression: Option<regress::History>,
 }
 
 impl ModelSlot {
@@ -86,7 +98,57 @@ impl ModelSlot {
             experts: None,
             experts_seen: 0,
             routing: None,
+            regression: None,
+            ollama_tag: String::new(),
+            last_answer: Instant::now(),
         }
+    }
+
+    /// What the alerts are told about this model.
+    fn alert_input(&self, now: Instant) -> alerts::ModelInput<'_> {
+        // Ollama ends a runner by design when its keep-alive runs out, and a
+        // refused key is already the status line's story: silence means
+        // nothing for either.
+        let watch = self.model.engine != "ollama" && self.live.auth_denied.is_none();
+        alerts::ModelInput {
+            key: self.model.key(),
+            name: &self.model.name,
+            phase: self.perf.phase,
+            decode_tps: self.perf.decode_tps,
+            ctx_used: self.live.ctx_used(),
+            silent_for: watch.then(|| now.duration_since(self.last_answer)),
+        }
+    }
+
+    /// The tag Ollama says is loaded. A runner's blob can belong to several
+    /// tags, and the daemon's own slot does not know its model until asked.
+    /// That slot has no command line to have read the GGUF from, and holds
+    /// whichever model was loaded last, so its header is read from the
+    /// local store each time the tag changes.
+    fn adopt_ollama_tag(&mut self, name: &str) {
+        if name.is_empty() || self.ollama_tag == name {
+            return;
+        }
+        self.ollama_tag = name.to_string();
+        self.model.name = name.to_string();
+        // A runner's GGUF is its own blob's; only the daemon's slot changes model.
+        let daemon =
+            self.model.engine == "ollama" && !ollama::is_legacy_runner(&self.model.cmdline);
+        if self.model.gguf.is_some() && !daemon {
+            return;
+        }
+        self.model.gguf = None;
+        self.model.tensors = None;
+        if let Some(blob) = ollama::blob_for_name(name) {
+            model_detect::load_gguf_metadata(&mut self.model, blob);
+        }
+        self.num_layers = self.model.n_layers();
+        self.num_heads = self.model.n_heads();
+    }
+
+    /// How the log names this model.
+    fn log_key(&self) -> regress::ModelKey {
+        (self.model.name.clone(), self.model.engine.clone())
     }
 
     fn view(&self) -> ModelView<'_> {
@@ -98,6 +160,7 @@ impl ModelSlot {
             experts: self.experts.as_ref(),
             num_layers: self.num_layers,
             num_heads: self.num_heads,
+            regression: self.regression.as_ref(),
         }
     }
 }
@@ -155,6 +218,13 @@ async fn discover(args: &Args, auth: &HttpAuth) -> (Vec<DetectedModel>, Option<S
             (fm.port.is_some() && fm.port == m.port) || (!fm.name.is_empty() && fm.name == m.name)
         });
         if let Some(fm) = duplicate {
+            // An Ollama daemon named at the command line, and the runner
+            // serving its loaded model: the runner has the token counters,
+            // and finds its daemon by itself.
+            if fm.engine == "ollama" && m.engine == "llama.cpp" && ollama::is_runner(&m) {
+                *fm = m;
+                continue;
+            }
             let is_loopback = matches!(
                 fm.host.as_str(),
                 "127.0.0.1" | "localhost" | "0.0.0.0" | "::1" | "[::1]"
@@ -172,6 +242,7 @@ async fn discover(args: &Args, auth: &HttpAuth) -> (Vec<DetectedModel>, Option<S
                 if fm.gguf.is_none() {
                     fm.gguf = m.gguf;
                     fm.tensors = m.tensors;
+                    fm.offload = m.offload;
                 }
                 // The process scan can place the encoder; a port probe can't.
                 if m.vision.is_some()
@@ -456,15 +527,24 @@ async fn poll_server(
             tokio::time::sleep(delay).await;
         }
     }
-    if model.engine == "ollama" {
-        // Ollama exposes /v1/models and /api/tags, but no /slots or Prometheus /metrics.
-        // Populate initial slot metadata and keep alive without spamming 404s.
-        let stats = LiveStats {
-            ctx_max: model.ctx_max.unwrap_or(0),
-            ..Default::default()
-        };
-        let _ = live_tx.try_send((pid, stats));
+    let ollama = ollama::Link::for_model(&model);
+    if let Some(link) = ollama.as_ref().filter(|l| !l.counters) {
+        // The daemon, or an `ollama runner` from before the llama-server
+        // one: no token counters anywhere, so `/api/ps` is all there is.
         loop {
+            let status = link.poll(&auth).await;
+            let stats = LiveStats {
+                ctx_max: status
+                    .as_ref()
+                    .and_then(|s| s.loaded.as_ref())
+                    .map(|p| p.context_length)
+                    .filter(|&c| c > 0)
+                    .or(model.ctx_max)
+                    .unwrap_or(0),
+                ollama: status,
+                ..Default::default()
+            };
+            let _ = live_tx.try_send((pid, stats));
             tokio::time::sleep(poll.max(Duration::from_secs(2))).await;
         }
     }
@@ -474,8 +554,36 @@ async fn poll_server(
     let mut experts_misses = 0u32;
     let mut decode_fallback = observe::DecodeFallback::default();
     let host = model.host.clone();
+    // A llama-server that Ollama started: `/slots` has the live numbers, the
+    // daemon the tag, the VRAM share and the unload time. Those change at
+    // load and per request, and every `/api/ps` is a line in Ollama's log.
+    let mut ollama_status: Option<ollama::Status> = None;
+    let mut ollama_due = Instant::now();
     loop {
         let mut stats_opt = observe::poll_llama(&host, port, &auth).await;
+        if let Some(link) = &ollama {
+            if Instant::now() >= ollama_due {
+                // A runner that stopped answering has usually been unloaded
+                // (keep-alive ran out), so ask sooner while it is silent.
+                let next = if stats_opt.is_some() { 5 } else { 2 };
+                ollama_due = Instant::now() + Duration::from_secs(next);
+                // A daemon that does not answer keeps the last word it gave.
+                if let Some(s) = link.poll(&auth).await {
+                    ollama_status = Some(s);
+                }
+            }
+            match stats_opt.as_mut() {
+                Some(stats) => stats.ollama = ollama_status.clone(),
+                None if ollama_status.as_ref().is_some_and(|s| s.loaded.is_none()) => {
+                    // Its process is gone with the model: idle, and saying why.
+                    stats_opt = Some(LiveStats {
+                        ollama: ollama_status.clone(),
+                        ..Default::default()
+                    });
+                }
+                None => {}
+            }
+        }
         // Draft/MTP counters live on /metrics; skip once we know this server
         // was started without --metrics. The same scrape fills decode when
         // /slots left `n_decoded` out.
@@ -509,6 +617,35 @@ async fn poll_server(
             }
         }
         tokio::time::sleep(poll).await;
+    }
+}
+
+/// How often the regression flag re-reads the log.
+const REGRESS_EVERY: Duration = Duration::from_secs(60);
+/// A read of the log, and the reader handed back with its baseline kept.
+type RegressResult = (
+    regress::Reader,
+    Result<HashMap<regress::ModelKey, regress::History>, String>,
+);
+
+/// How often the alert conditions are judged: often enough that the
+/// hold times mean what they say, rarely enough to cost nothing.
+const ALERT_EVERY: Duration = Duration::from_millis(250);
+
+/// Rings and notifies for a newly raised alert as `--alerts` asks; the
+/// banner and badge come from the renderer. A notifier that cannot run is
+/// named once in the status line and the bell carries on alone.
+fn announce(mode: alerts::Mode, alert: &alerts::Alert, notify_ok: &mut bool, status: &mut String) {
+    use std::io::Write;
+    if matches!(mode, alerts::Mode::Bell | alerts::Mode::Notify) {
+        let mut out = io::stdout();
+        let _ = out.write_all(b"\x07").and_then(|_| out.flush());
+    }
+    if mode == alerts::Mode::Notify && *notify_ok {
+        if let Err(e) = alerts::notify(&alert.text) {
+            *notify_ok = false;
+            *status = format!("{e}: alerts ring the bell instead");
+        }
     }
 }
 
@@ -546,7 +683,11 @@ fn status_for(slots: &[ModelSlot], rescanned: bool) -> String {
                 .auth_denied
                 .map(|code| format!(" — HTTP {code}: {REMEDY}"))
                 .unwrap_or_default();
-            format!("{prefix}attached to {}{note}", slots[0].model)
+            format!(
+                "{prefix}attached to {}{note}{}",
+                slots[0].model,
+                offload_note(slots)
+            )
         }
         n => {
             let refused: Vec<String> = slots
@@ -562,14 +703,31 @@ fn status_for(slots: &[ModelSlot], rescanned: bool) -> String {
                 format!(" — {}: {REMEDY}", refused.join(", "))
             };
             format!(
-                "{prefix}watching {n} models: {}{note}",
+                "{prefix}watching {n} models: {}{note}{}",
                 slots
                     .iter()
                     .map(|s| s.model.short_name())
                     .collect::<Vec<_>>()
-                    .join(", ")
+                    .join(", "),
+                offload_note(slots)
             )
         }
+    }
+}
+
+/// Override rules the server accepted but this dashboard cannot read: the
+/// tensors they place are shown by `--tensor-split` share instead, so the
+/// CPU-side figures may be off and the status line says which rule.
+fn offload_note(slots: &[ModelSlot]) -> String {
+    let bad: Vec<&str> = slots
+        .iter()
+        .filter_map(|s| s.model.offload.as_ref())
+        .flat_map(|o| o.invalid.iter().map(String::as_str))
+        .collect();
+    if bad.is_empty() {
+        String::new()
+    } else {
+        format!(" — -ot rule not understood: {}", bad.join(", "))
     }
 }
 
@@ -625,6 +783,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|n| *n > 0)
         .unwrap_or(args.moe_experts);
     let mut renderer = Renderer::new(theme, args.max_layers, args.max_heads, moe_experts);
+    renderer.regress_pct = args.regress_pct;
 
     // Opened before raw mode so a bad explicit path fails with a readable
     // error. The default location only turns logging off: it was not asked for.
@@ -791,6 +950,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let empty_live = LiveStats::default();
     let empty_fade = FadeState::new();
 
+    // GPU energy is a box total, like the cards it is read from.
+    let mut gpu_energy = energy::GpuEnergy::default();
+
     let mut view_mode = ViewMode::All;
     let mut camera = landscape::Camera::new();
     let mut idle_frame = 0u8;
@@ -824,8 +986,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let read_log = |args: &Args| log_path(args).and_then(|p| dblog::summarize(&p));
     let read_ctx = |args: &Args| log_path(args).and_then(|p| dblog::context_speed(&p));
+    // The regression flag reads the log off the frame loop: at start, every
+    // minute, and whenever the set of models changes.
+    let (regress_tx, mut regress_rx) = mpsc::channel::<RegressResult>(1);
+    let mut regress_due = Instant::now();
+    // Away on its blocking thread while a read is in flight.
+    let mut regress_reader = Some(regress::Reader::default());
+    let mut regress_keys: Vec<regress::ModelKey> = Vec::new();
+    let mut regress_err: Option<String> = None;
     let mut last_visual_activity = Instant::now();
     let mut last_replay_step = Instant::now();
+    // A replay has no live cards or servers to raise an alert about, and a
+    // logged slow patch is history, not news.
+    let alert_mode_for = |args: &Args, replaying: bool| {
+        if replaying {
+            alerts::Mode::Off
+        } else {
+            alerts::Mode::parse(&args.alerts)
+        }
+    };
+    let mut alert_mode = alert_mode_for(&args, replay.is_some());
+    let mut alert_state = alerts::Alerts::new(args.alert_limits());
+    let mut last_alert_check = Instant::now();
+    // Cleared the first time the desktop notifier fails, which says so once.
+    let mut notify_ok = true;
 
     loop {
         tokio::task::yield_now().await;
@@ -859,6 +1043,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     colors::init_color_mode(&new.color);
                                     renderer.max_layers = new.max_layers;
                                     renderer.max_heads = new.max_heads;
+                                    renderer.regress_pct = new.regress_pct;
+                                    regress_due = Instant::now();
                                     let relog = new.log_db_path() != args.log_db_path()
                                         || new.log_every != args.log_every
                                         || new.log_db_max_mb != args.log_db_max_mb;
@@ -869,6 +1055,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             || new.pid != args.pid);
                                     let gpu_changed = new.gpu != args.gpu;
                                     args = new;
+                                    alert_mode = alert_mode_for(&args, replay.is_some());
+                                    alert_state.set_limits(args.alert_limits());
+                                    if alert_mode == alerts::Mode::Off {
+                                        alert_state.clear();
+                                    }
                                     poll = Duration::from_millis(args.poll_ms.max(50));
                                     status = match saved {
                                         Some(Ok(path)) => {
@@ -880,6 +1071,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         status.push_str("; GPU selection applies at next launch");
                                     }
                                     if relog {
+                                        // A different file is a different history.
+                                        for slot in &mut slots {
+                                            slot.regression = None;
+                                        }
                                         db = None; // close the old file before reopening
                                         match open_db(&args) {
                                             Ok(d) => db = d,
@@ -905,7 +1100,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let n = speeds.as_ref().map_or(0, |v| v.len()).max(1);
                     match key.code {
                         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('c') => ctx_view = None,
-                        KeyCode::Char('r') => *speeds = read_ctx(&args),
+                        KeyCode::Char('r') => {
+                            *speeds = read_ctx(&args);
+                            regress_due = Instant::now();
+                        }
                         KeyCode::Right | KeyCode::Tab => *sel = (*sel + 1) % n,
                         KeyCode::Left | KeyCode::BackTab => *sel = (*sel + n - 1) % n,
                         _ => {}
@@ -933,6 +1131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char(' ') if view_mode == ViewMode::Landscape => {
                             camera.toggle_orbit()
                         }
+                        KeyCode::Char('u') => view_mode = ViewMode::Balance,
                         KeyCode::Char('b') => view_mode = ViewMode::Bandwidth,
                         KeyCode::Char('v') => view_mode = ViewMode::Models,
                         KeyCode::Tab => focus = (focus + 1) % n,
@@ -994,6 +1193,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             slots = kept;
+            // What the models now on the cards preallocated is the new normal.
+            alert_state.rebaseline_vram();
             focus = focus.min(slots.len().saturating_sub(1));
             slot_of = slots
                 .iter()
@@ -1046,12 +1247,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             };
                         }
                         latest_gpu.clear();
+                        let tariff = std::mem::take(&mut gpu_energy).tariff;
+                        gpu_energy.tariff = tariff;
                     }
                     replay::Event::Gpu { ts, gpus } => {
                         latest_gpu = gpus;
                         for slot in &mut slots {
                             slot.perf.observe_gpu(&latest_gpu, r.instant(ts));
                         }
+                        // The logged power, integrated on the logged clock.
+                        gpu_energy.observe(
+                            r.instant(ts),
+                            &latest_gpu,
+                            slots.iter_mut().map(|s| &mut s.perf),
+                        );
                     }
                     replay::Event::Live { ts, pid, stats } => {
                         if let Some(slot) = slot_of.get(&pid).and_then(|i| slots.get_mut(*i)) {
@@ -1101,6 +1310,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             for slot in &mut slots {
                 slot.perf.observe_gpu(&latest_gpu, now);
             }
+            gpu_energy.observe(now, &latest_gpu, slots.iter_mut().map(|s| &mut s.perf));
         }
         for slot in &mut slots {
             slot.routing = None;
@@ -1154,6 +1364,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Compared slot by slot, so a second server refusing, or one
                 // that comes back after `r` and refuses again, is news too.
                 refusal_changed |= slot.live.auth_denied != s.auth_denied;
+                if let Some(loaded) = s.ollama.as_ref().and_then(|o| o.loaded.as_ref()) {
+                    slot.adopt_ollama_tag(&loaded.name);
+                }
+                slot.last_answer = now;
                 slot.perf.observe(&s, now);
                 slot.live = s;
             }
@@ -1162,6 +1376,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // A server starting or stopping to refuse our key changes the
             // story the status line tells; say it while it is news.
             status = status_for(&slots, false);
+        }
+
+        // Judged before the idle check below, so an alert is raised (and
+        // rings) on a dashboard nobody is looking at.
+        if alert_mode != alerts::Mode::Off && now.duration_since(last_alert_check) >= ALERT_EVERY {
+            last_alert_check = now;
+            let inputs: Vec<alerts::ModelInput> =
+                slots.iter().map(|s| s.alert_input(now)).collect();
+            let out = alert_state.observe(&latest_gpu, &inputs, now);
+            ui_changed |= out.changed;
+            for alert in &out.announced {
+                announce(alert_mode, alert, &mut notify_ok, &mut status);
+            }
         }
 
         while let Ok(event) = events_rx.try_recv() {
@@ -1208,6 +1435,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        while let Ok((reader, found)) = regress_rx.try_recv() {
+            regress_reader = Some(reader);
+            ui_changed = true;
+            match found {
+                Ok(mut map) => {
+                    regress_err = None;
+                    for slot in &mut slots {
+                        if let Some(h) = map.remove(&slot.log_key()) {
+                            slot.regression = Some(h);
+                        }
+                    }
+                }
+                Err(e) => regress_err = Some(e),
+            }
+        }
+        let models_changed = slots.len() != regress_keys.len()
+            || slots
+                .iter()
+                .zip(&regress_keys)
+                .any(|(s, k)| s.model.name != k.0 || s.model.engine != k.1);
+        let regress_now =
+            regress_reader.is_some() && !slots.is_empty() && (now >= regress_due || models_changed);
+        // Only the file this dashboard writes holds this session's samples.
+        if let Some(path) = regress_now
+            .then(|| db.as_ref().and(args.log_db_path()))
+            .flatten()
+        {
+            regress_due = now + REGRESS_EVERY;
+            regress_keys = slots.iter().map(ModelSlot::log_key).collect();
+            let (tx, days, keys) = (regress_tx.clone(), args.regress_days, regress_keys.clone());
+            let mut reader = regress_reader.take().expect("checked above");
+            tokio::task::spawn_blocking(move || {
+                let found = reader.read(&path, dblog::unix_now(), days, &keys);
+                let _ = tx.blocking_send((reader, found));
+            });
+        }
+
         // Preserve the 30 FPS animation cadence while a request is active and
         // while its heat/fade effects settle. Once fully idle, fresh telemetry
         // or input drives rendering at the 200 ms sample cadence. The loop
@@ -1240,7 +1504,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if slot.live.ctx_max == 0 {
                 slot.live.ctx_max = slot.ctx_max;
             }
-            let layout = bandwidth::weight_layout(Some(&slot.model), &latest_gpu);
+            let mut layout = bandwidth::weight_layout(Some(&slot.model), &latest_gpu);
+            // Ollama measures what it left in system RAM from llama-server's
+            // own buffer report; that beats a guess from the tensor split,
+            // which Ollama's servers are not started with.
+            if let Some(p) = slot.live.ollama.as_ref().and_then(|o| o.loaded.as_ref()) {
+                if layout.known {
+                    layout.cpu_bytes = p.cpu_bytes().min(layout.total_bytes);
+                }
+            }
             let clock = replay.as_ref().map_or(now, |r| r.hud().now);
             slot.perf.tick_bandwidth(&layout, clock, frame_dt);
             let mut sample =
@@ -1266,6 +1538,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(v) = cur {
             renderer.moe_experts = v.detected.n_experts_used().max(1);
         }
+        // The settings screen can change the price mid-session.
+        gpu_energy.tariff.price_per_kwh = args.energy_price;
+        if gpu_energy.tariff.currency != args.currency {
+            gpu_energy.tariff.currency = args.currency.clone();
+        }
         let dash = Dashboard {
             models: &views,
             focus,
@@ -1289,6 +1566,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             settings: settings_form.as_ref(),
             log: log_view.as_ref(),
             ctx_speed: ctx_view.as_ref().map(|(s, i)| (s, *i)),
+            energy: &gpu_energy,
+            alerts: alert_state.active(),
+            alert_banner: alert_state.banner(now),
+            regress_off: if replay.is_some() {
+                Some("not during a replay")
+            } else if db.is_none() {
+                Some("--log-db is off")
+            } else {
+                regress_err.as_deref()
+            },
             replay: replay.as_ref().map(replay::Replay::hud),
         };
         renderer.render_frame(&mut terminal, &dash);
@@ -1439,14 +1726,31 @@ fn fade_sample_from_live(
     }
     let n_layers = n_layers.max(1);
     let model_gpus: Vec<u32> = detected.map(|d| d.gpu_indices.clone()).unwrap_or_default();
+    let offload = detected.and_then(|d| d.offload.as_ref());
     let layer_gpu: Vec<usize> = (0..n_layers)
-        .map(|l| layer_device(l, n_layers, &split, &model_gpus))
+        .map(|l| {
+            offload
+                .and_then(|o| o.block_gpu.get(l).copied().flatten())
+                .map(|g| g as usize)
+                .unwrap_or_else(|| layer_device(l, n_layers, &split, &model_gpus))
+        })
         .collect();
+    let layer_cpu: Vec<f32> = offload
+        .filter(|o| o.cpu_bytes > 0)
+        .map(|o| (0..n_layers).map(|l| o.block_cpu_frac(l)).collect())
+        .unwrap_or_default();
     let processing = live.processing;
     let layer_target: Vec<f32> = (0..n_layers)
         .map(|l| {
             let dev = layer_gpu[l];
-            let u = util.get(dev).copied().unwrap_or(0.0) / 100.0;
+            // A layer wholly in RAM is not lit by any card's load, and the
+            // CPU's share of the work is not measured: it shows as merely busy.
+            let in_ram = layer_cpu.get(l).is_some_and(|&c| c > 0.999);
+            let u = if in_ram {
+                0.0
+            } else {
+                util.get(dev).copied().unwrap_or(0.0) / 100.0
+            };
             if processing {
                 u.clamp(0.08, 1.0)
             } else {
@@ -1477,6 +1781,12 @@ fn fade_sample_from_live(
         })
         .or_else(|| detected.map(|d| d.mem_used_mb))
         .unwrap_or(0);
+    // Ollama says how much of the model is on the GPUs at all: a model it
+    // runs on the CPU has no weights on the cards, whatever the file size.
+    let file_mb = match live.ollama.as_ref().and_then(|o| o.loaded.as_ref()) {
+        Some(p) => file_mb.min(p.size_vram / (1024 * 1024)),
+        None => file_mb,
+    };
     let split_sum: f32 = split.iter().copied().sum::<f32>().max(1.0);
     let mut weight_frac = vec![0.0f32; n_gpus];
     let mut kv_alloc_frac = vec![0.0f32; n_gpus];
@@ -1520,10 +1830,18 @@ fn fade_sample_from_live(
                     ((k_gb * share) / total_gb).clamp(0.0, (used_f - weight_frac[i]).max(0.0));
             }
         } else {
+            // Tensors the `-ot` rules keep in RAM hold no VRAM; the ones they
+            // pin to a card count on that card whatever the split says.
+            let w_mb = match offload.filter(|o| o.n_rules > 0) {
+                Some(o) => {
+                    (o.split_bytes as f32 * share + o.pinned_on(g.index) as f32) / (1024.0 * 1024.0)
+                }
+                None => file_mb as f32 * share,
+            };
             let w = if g.mem_total_mb == 0 {
                 0.0
             } else {
-                (file_mb as f32 * share) / g.mem_total_mb as f32
+                w_mb / g.mem_total_mb as f32
             };
             weight_frac[i] = w.clamp(0.0, used_f);
             kv_alloc_frac[i] = (used_f - weight_frac[i]).max(0.0);
@@ -1532,6 +1850,7 @@ fn fade_sample_from_live(
     FadeSample {
         layer_target,
         layer_gpu,
+        layer_cpu,
         kv_filled,
         processing,
         decoded: live.decoded,
@@ -1611,6 +1930,7 @@ mod tests {
                 cmdline: cmdline.into(),
                 gguf: None,
                 tensors: None,
+                offload: None,
                 vision: None,
             });
             s.live.kv_usage_perc = kv;
@@ -1741,6 +2061,7 @@ mod tests {
             cmdline: String::new(),
             gguf: None,
             tensors: None,
+            offload: None,
             vision: None,
         };
         let mut refused = ModelSlot::new(model("sglang"));
@@ -2132,6 +2453,95 @@ mod tests {
         assert_eq!(m.engine, "ollama");
         assert_eq!(m.name, "llama3:latest");
         assert_eq!(m.pid, 0);
+    }
+
+    /// An Ollama daemon: every model pulled on `/v1/models`, the loaded
+    /// ones (the captured fixture) on `/api/ps`.
+    async fn spawn_ollama_daemon() -> (u16, tokio::sync::oneshot::Sender<()>) {
+        let ps = std::fs::read_to_string("fixtures/ollama-ps.json").unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    res = listener.accept() => {
+                        let Ok((mut stream, _)) = res else { break };
+                        let ps = ps.clone();
+                        tokio::spawn(async move {
+                            let mut buf = [0u8; 1024];
+                            if let Ok(n) = stream.read(&mut buf).await {
+                                let req = String::from_utf8_lossy(&buf[..n]);
+                                let (status, body) = if req.starts_with("GET /api/ps ") {
+                                    ("200 OK", ps)
+                                } else if req.starts_with("GET /v1/models ") {
+                                    ("200 OK", CANNED_OLLAMA_MODELS.to_string())
+                                } else {
+                                    ("404 Not Found", "404 page not found".to_string())
+                                };
+                                let resp = format!(
+                                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                    body.len()
+                                );
+                                let _ = stream.write_all(resp.as_bytes()).await;
+                            }
+                        });
+                    }
+                }
+            }
+        });
+        (port, shutdown_tx)
+    }
+
+    #[tokio::test]
+    async fn an_ollama_endpoint_is_named_after_what_it_has_loaded() {
+        // Through the probe alone: `discover` would also scan this host,
+        // where a real runner of the same tag takes the slot over.
+        let (port, _shutdown) = spawn_ollama_daemon().await;
+        let m = model_detect::probe_endpoint("127.0.0.1", port, "", &HttpAuth::default())
+            .await
+            .expect("daemon");
+        assert_eq!(m.engine, "ollama");
+        // Not llama3, the first model pulled: granite is the one loaded.
+        assert_eq!(m.name, "granite3-moe:1b");
+        assert_eq!(m.ctx_max, Some(2048));
+    }
+
+    #[tokio::test]
+    async fn the_daemon_slot_reports_api_ps_and_no_counters() {
+        let (port, _shutdown) = spawn_ollama_daemon().await;
+        let m = model_detect::probe_endpoint("127.0.0.1", port, "", &HttpAuth::default())
+            .await
+            .expect("daemon");
+        let (live_tx, mut live_rx) = mpsc::channel(8);
+        let (spec_tx, _spec_rx) = mpsc::channel(8);
+        let (experts_tx, _experts_rx) = mpsc::channel(8);
+        let context = PollContext {
+            others: Vec::new(),
+            auth: HttpAuth::default(),
+        };
+        let poller = tokio::spawn(poll_server(
+            m,
+            port,
+            live_tx,
+            spec_tx,
+            experts_tx,
+            context,
+            Duration::from_millis(200),
+        ));
+        let (_, stats) = tokio::time::timeout(Duration::from_secs(5), live_rx.recv())
+            .await
+            .expect("a sample")
+            .expect("open channel");
+        poller.abort();
+        let o = stats.ollama.expect("ps status");
+        assert!(!o.counters);
+        assert_eq!(o.others, 1);
+        let loaded = o.loaded.expect("loaded");
+        assert_eq!(loaded.name, "granite3-moe:1b");
+        assert_eq!(loaded.processor(), "100% CPU");
+        assert_eq!(stats.ctx_max, 2048);
     }
 
     #[tokio::test]

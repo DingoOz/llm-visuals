@@ -144,6 +144,8 @@ pub const AMBER: (u8, u8, u8) = (255, 190, 50);
 pub const GREEN: (u8, u8, u8) = (70, 230, 120);
 pub const BLUE: (u8, u8, u8) = (70, 120, 255);
 pub const WHITE: (u8, u8, u8) = (250, 250, 255);
+/// Alerts: the one colour that means something is wrong.
+pub const RED: (u8, u8, u8) = (255, 60, 80);
 
 /// Cool → hot heat ramp used for activity tiles.
 pub const HEAT: &[(f32, (u8, u8, u8))] = &[

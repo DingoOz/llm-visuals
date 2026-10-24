@@ -14,6 +14,8 @@ pub enum ViewMode {
     MoE,
     /// The expert map as an isometric landscape.
     Landscape,
+    /// Router load balance per MoE layer, from the server's hit counts.
+    Balance,
     /// Memory pipeline: disk → RAM → PCIe → VRAM → prefill → decode meters.
     Bandwidth,
     /// Side-by-side comparison of every detected model.
@@ -28,6 +30,7 @@ impl std::fmt::Display for ViewMode {
             ViewMode::Heatmap => write!(f, "layers"),
             ViewMode::MoE => write!(f, "moe"),
             ViewMode::Landscape => write!(f, "landscape"),
+            ViewMode::Balance => write!(f, "balance"),
             ViewMode::Bandwidth => write!(f, "bandwidth"),
             ViewMode::Models => write!(f, "models"),
         }
@@ -148,6 +151,45 @@ pub struct Args {
     #[arg(long, default_value_t = 1024)]
     pub log_db_max_mb: u64,
 
+    /// Electricity price per kWh, for the cost of the GPU energy drawn
+    /// (0 = no price; costs are hidden)
+    #[arg(long, default_value_t = 0.0, value_parser = parse_price)]
+    pub energy_price: f64,
+
+    /// Currency symbol printed before energy costs
+    #[arg(long, default_value = "$")]
+    pub currency: String,
+
+    /// Alerts: off, banner (on screen), bell (banner + terminal bell),
+    /// notify (bell + desktop notification)
+    #[arg(long, default_value = "banner", value_parser = ["off", "banner", "bell", "notify"])]
+    pub alerts: String,
+
+    /// VRAM alert: percent of a card's memory in use, once it has grown
+    /// past the level it settled at
+    #[arg(long, default_value_t = 95.0, value_parser = parse_percent)]
+    pub alert_vram_pct: f32,
+
+    /// GPU temperature alert in °C: `auto` uses the card's own slowdown
+    /// limit when the driver reports one (85 °C otherwise)
+    #[arg(long, default_value = "auto", value_parser = parse_celsius)]
+    pub alert_temp_c: String,
+
+    /// Slow-decode alert: percent of the model's usual decode rate at a
+    /// similar context length
+    #[arg(long, default_value_t = 50.0, value_parser = parse_percent)]
+    pub alert_slow_pct: f32,
+
+    /// Flag a model decoding at least this many percent slower than its own
+    /// logged history at the same context lengths (0 = never)
+    #[arg(long, default_value_t = 10.0)]
+    pub regress_pct: f64,
+
+    /// Days of --log-db history the regression flag compares against; the
+    /// last 24 hours are left out of it
+    #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u32).range(2..=365))]
+    pub regress_days: u32,
+
     /// Play a session back from a --log-db file instead of watching live
     /// servers; with no FILE, the file `--log-db auto` writes
     #[arg(
@@ -183,7 +225,34 @@ pub struct Args {
     version: Option<bool>,
 }
 
+fn parse_percent(s: &str) -> Result<f32, String> {
+    match s.trim().parse::<f32>() {
+        Ok(v) if (1.0..=100.0).contains(&v) => Ok(v),
+        _ => Err(format!("`{s}` is not a percentage from 1 to 100")),
+    }
+}
+
+fn parse_celsius(s: &str) -> Result<String, String> {
+    let s = s.trim();
+    match s.parse::<f32>() {
+        _ if s == "auto" => Ok(s.into()),
+        Ok(v) if (20.0..=150.0).contains(&v) => Ok(s.into()),
+        _ => Err(format!(
+            "`{s}` is not `auto` or a temperature from 20 to 150 °C"
+        )),
+    }
+}
+
 impl Args {
+    /// The alert thresholds the command line asks for.
+    pub fn alert_limits(&self) -> crate::alerts::Limits {
+        crate::alerts::Limits {
+            vram_pct: self.alert_vram_pct,
+            temp_c: self.alert_temp_c.parse().ok(),
+            slow_frac: self.alert_slow_pct / 100.0,
+        }
+    }
+
     pub fn bridge_script(&self) -> PathBuf {
         if let Some(path) = &self.bridge {
             return path.clone();
@@ -307,6 +376,25 @@ mod tests {
     }
 
     #[test]
+    fn alert_flags_default_and_parse() {
+        let a = Args::try_parse_from(["llm-visuals"]).unwrap();
+        assert_eq!(a.alerts, "banner");
+        assert_eq!(a.alert_limits(), crate::alerts::Limits::default());
+        let a = Args::try_parse_from([
+            "llm-visuals",
+            "--alerts=notify",
+            "--alert-vram-pct=90",
+            "--alert-temp-c=78",
+            "--alert-slow-pct=40",
+        ])
+        .unwrap();
+        let l = a.alert_limits();
+        assert_eq!((l.vram_pct, l.temp_c, l.slow_frac), (90.0, Some(78.0), 0.4));
+        assert!(Args::try_parse_from(["llm-visuals", "--alerts=loud"]).is_err());
+        assert!(Args::try_parse_from(["llm-visuals", "--alert-slow-pct=0"]).is_err());
+    }
+
+    #[test]
     fn replay_takes_an_optional_file_and_never_logs() {
         let args = Args::try_parse_from(["llm-visuals", "--replay", "--theme", "neon"]).unwrap();
         assert_eq!(args.replay.as_deref(), Some("auto"));
@@ -355,5 +443,16 @@ mod tests {
         // 5. Empty strings are ignored
         let res = Args::resolve_endpoint(Some("   "), "auto", Some("   "));
         assert_eq!(res, None);
+    }
+}
+
+/// A price is a finite, non-negative number; clap's plain f64 parser would
+/// take `nan`, `inf` and `-1`.
+fn parse_price(s: &str) -> Result<f64, String> {
+    match s.trim().parse::<f64>() {
+        Ok(v) if v.is_finite() && v >= 0.0 => Ok(v),
+        _ => Err(format!(
+            "`{s}` is not a price per kWh (a number, 0 or more)"
+        )),
     }
 }
