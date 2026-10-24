@@ -1487,9 +1487,17 @@ impl Renderer {
             })
             .unwrap_or_else(|| d.gpus.len().max(1));
         let n_gpus = model_gpu_count;
+        // Layers with tensors in system RAM (llama.cpp `-ot` / `--cpu-moe`)
+        // are tagged `C`; the title says how many.
+        let in_ram = f.layer_cpu.iter().take(n).filter(|&&c| c > 0.0).count();
         let title = format!(
-            " ◆ LAYERS  {n} across {n_gpus} GPU{} ",
-            if n_gpus > 1 { "s" } else { "" }
+            " ◆ LAYERS  {n} across {n_gpus} GPU{}{} ",
+            if n_gpus > 1 { "s" } else { "" },
+            if in_ram > 0 {
+                format!(" · C {in_ram} in RAM")
+            } else {
+                String::new()
+            }
         );
         let right = Line::from(Span::styled(
             format!(" theme {} ", self.theme.name),
@@ -1532,6 +1540,19 @@ impl Renderer {
             };
             let tag_col = pal::c(gpu_tags[gpu % gpu_tags.len()]);
             let inner_w = tw.saturating_sub(1); // 1-col gutter between tiles
+                                                // The card, then `C` when some of the layer is in RAM; `C` alone
+                                                // when all of it is, or when the tile has room for one tag only.
+            let cpu = f.layer_cpu.get(layer).copied().unwrap_or(0.0);
+            let ram_tag = (String::from("C"), pal::c(pal::VIOLET));
+            let tags: Vec<(String, ratatui::style::Color)> =
+                if cpu > 0.999 || (cpu > 0.0 && inner_w < 6) {
+                    vec![ram_tag]
+                } else if cpu > 0.0 {
+                    vec![(gpu.to_string(), tag_col), ram_tag]
+                } else {
+                    vec![(gpu.to_string(), tag_col)]
+                };
+            let tag_x = inner_w.saturating_sub(tags.len());
             for dy in 0..th {
                 let y = y0 + dy;
                 if y >= h {
@@ -1561,8 +1582,9 @@ impl Renderer {
                                 .bg(bg)
                                 .add_modifier(Modifier::BOLD),
                         )
-                    } else if dy == 0 && dx == inner_w - 1 && inner_w >= 5 {
-                        Span::styled(format!("{gpu}"), Style::default().fg(tag_col).bg(bg))
+                    } else if dy == 0 && dx >= tag_x && inner_w >= 5 {
+                        let (t, col) = &tags[dx - tag_x];
+                        Span::styled(t.clone(), Style::default().fg(*col).bg(bg))
                     } else if bottom && !hist.is_empty() {
                         let n_h = hist.len();
                         let start = n_h.saturating_sub(inner_w);
@@ -3628,7 +3650,10 @@ impl Renderer {
             } else {
                 pal::TEXT_DIM
             };
-            facts.push(fact("cpu-side", format!("~{}", gb(layout.cpu_bytes)), c));
+            facts.push(fact("cpu-side", fmt_cpu_side(layout), c));
+            if layout.cpu_by_rule > 0 {
+                facts.push(fact("by -ot", gb(layout.cpu_by_rule), pal::TEXT));
+            }
         }
         if let Some(a) = host.mem_available_bytes {
             facts.push(fact("avail", gb(a), pal::TEXT));
@@ -3878,7 +3903,7 @@ impl Renderer {
                 layout.total_bytes as f32 / 1e9,
                 layout.active_bytes as f32 / 1e9,
                 if layout.cpu_bytes > layout.total_bytes / 50 {
-                    format!("~{:.1} GB on CPU ", layout.cpu_bytes as f32 / 1e9)
+                    format!("{} on CPU ", fmt_cpu_side(layout).replace('G', " GB"))
                 } else if unified {
                     "all in the unified pool ".into()
                 } else {
@@ -4601,6 +4626,17 @@ fn big_digits(s: String) -> [String; 3] {
 }
 
 /// Largest chunky tiles that fit `n` layers in a WxH grid.
+/// Bytes on the CPU side: exact when llama.cpp's override rules put all of
+/// them there, an estimate (`~`) when some are what the cards could not hold.
+fn fmt_cpu_side(layout: &crate::perf::WeightLayout) -> String {
+    let approx = if layout.cpu_by_rule > 0 && layout.cpu_by_rule == layout.cpu_bytes {
+        ""
+    } else {
+        "~"
+    };
+    format!("{approx}{:.1}G", layout.cpu_bytes as f32 / 1e9)
+}
+
 fn layer_tile_size(w: usize, h: usize, n: usize) -> (usize, usize, usize) {
     if w == 0 || h == 0 || n == 0 {
         return (1, 1, 1);
@@ -4997,6 +5033,7 @@ mod tests {
         let sample = FadeSample {
             layer_target: vec![0.5; n_l],
             layer_gpu: vec![0; n_l],
+            layer_cpu: Vec::new(),
             kv_filled: vec![false; crate::fade::KV_BUCKETS],
             processing: true,
             decoded: 1,
