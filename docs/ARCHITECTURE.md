@@ -64,6 +64,7 @@ GPUs and the disk are shared.
 | `offload.rs` | llama.cpp's buffer-type overrides (`-ot`, `--cpu-moe`, `--n-cpu-moe`, `--n-cpu-ffn`, their `LLAMA_ARG_*` variables) parsed into regex rules and applied to the tensor table at detection: bytes in RAM (and read per step), bytes pinned to each card, and per layer the share in RAM and the card it is pinned to |
 | `observe.rs` | HTTP GET with timeouts; parsers for `/slots`, `/metrics` (Prometheus text) and `/experts` |
 | `vllm.rs` | vLLM `/metrics` adapter: reconstructs per-request `LiveStats` from engine-wide Prometheus counters |
+| `ollama.rs` | Ollama: `GET /api/ps` (tag, size / size_vram, context, expiry), the manifest walk that names a runner's blob, `OLLAMA_HOST` parsing, the store lookup that finds a daemon slot's GGUF |
 | `sglang.rs` | SGLang adapter: `GET /v1/loads?include=all` plus one-shot `/server_info`; optional `sglang:realtime_tokens_total` |
 | `gpu.rs` | in-process NVML telemetry collector (falling back to `nvidia-smi` CSV) or Linux amdgpu sysfs on a `spawn_blocking` thread; smooth random-walk demo GPUs |
 | `nvml.rs` | dynamically loads `nvml.dll` or `libnvidia-ml.so`; maintains a persistent in-process session for GPU metrics and PCIe throughput without subprocess overhead |
@@ -109,6 +110,18 @@ fetched once for `context_length` and `speculative_algorithm`. Speculative
 acceptance is `generated − steps`, drafted tokens are
 `steps × (num_draft_tokens − 1)`. The SGLang poller never runs faster than
 400 ms (each GET is a uvicorn access-log line).
+
+**Ollama `/api/ps`** lists the loaded models with `size` (bytes resident),
+`size_vram`, `context_length`, `expires_at` and `details`. Current Ollama
+serves each model from a bundled llama-server, which is polled through
+`/slots` like any other; its poller also asks the daemon every 5 s and puts
+the matching entry on every `LiveStats` (`ollama`). A runner's entry is the
+tag whose manifest names its blob, the slot is renamed to the tag the daemon
+reports, and `size − size_vram` replaces the tensor-split estimate of
+CPU-side bytes. While `/slots` is silent the daemon is asked every 2 s instead:
+the runner exits with its model, and a sample saying so marks the slot
+evicted. A daemon slot or a pre-llama-server `ollama runner` has no counters,
+so its poller sends `/api/ps` alone every 2 s.
 
 **HuggingFace `config.json`** (safetensors dirs, including nested
 `text_config`) fills the same architecture fields as a GGUF header, so the

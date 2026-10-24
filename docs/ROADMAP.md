@@ -28,12 +28,18 @@ is put together.
 - Per-GPU peak memory bandwidth from NVML (bus width × memory clock): the
   VRAM stage shows the weight stream in GB/s against it, and the verdict
   names VRAM bandwidth past 60 % of the peak.
+- Ollama: its llama-server runners polled through `/slots` and named by tag
+  from the store's manifests; `/api/ps` for the unload countdown, the
+  CPU/GPU split and the CPU-side bytes; daemon-only slots labelled
+  `throughput n/a`.
 
 ## Ideas not yet done
 
 - Per-position acceptance rates for deeper MTP drafts (server logs them but
   does not export them).
-- Ollama metrics endpoint for throughput (vLLM and SGLang done).
+- Throughput for Ollama releases that predate the llama-server runner, and
+  for a daemon whose runner is hidden (container): neither exports token
+  counters, so it would take a proxy in front of the API.
 - Real DRAM bandwidth (perf uncore counters) instead of the bytes × steps
   estimate.
 - Peak memory bandwidth off NVML: AMD needs the `AMDGPU_INFO` ioctl's
