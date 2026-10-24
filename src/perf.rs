@@ -523,8 +523,16 @@ pub struct BandwidthStats {
     /// RAM), per GPU index. The stage the busy meter cannot cover on a part
     /// without device memory: it always reads 0 there.
     pub vram_pool: Vec<Meter>,
-    /// Estimated weight stream out of VRAM across all GPUs, GB/s.
+    /// Estimated weight stream out of VRAM across all GPUs, GB/s; full
+    /// scale is `vram_peak_gb_s` when that is known.
     pub vram: Meter,
+    /// The same estimate before the meter clamps it to its scale: a stream
+    /// estimated past the peak says the estimate is off, not the card.
+    pub vram_gb_s: f32,
+    /// Each card's peak memory bandwidth, GB/s, by GPU index.
+    pub vram_peak: Vec<Option<f32>>,
+    /// Ceiling of the VRAM weight stream for this model's split, GB/s.
+    pub vram_peak_gb_s: Option<f32>,
     pub prefill: Meter,
     pub decode: Meter,
     /// Latest weight layout the estimates were made from.
@@ -554,6 +562,12 @@ pub struct WeightLayout {
     pub cpu_active_bytes: Option<u64>,
     /// llama.cpp `--ubatch-size` (weights are read once per micro-batch in prefill).
     pub ubatch: usize,
+    /// Weight bytes held by each card, `(GPU index, bytes)`: the same split
+    /// the CPU-side estimate is made from.
+    pub gpu_bytes: Vec<(u32, u64)>,
+    /// The cards read their shares at once (tensor parallel, llama.cpp
+    /// `--split-mode row`) rather than one after another (a layer split).
+    pub parallel: bool,
 }
 
 impl WeightLayout {
@@ -563,6 +577,28 @@ impl WeightLayout {
         } else {
             (self.active_bytes as f32 / self.total_bytes as f32).clamp(0.0, 1.0)
         }
+    }
+
+    /// The fastest the VRAM weight stream can run, GB/s, from each card's
+    /// peak (`peaks` by GPU index). A step reads every card's share: one
+    /// card after another under a layer split, all at once under a parallel
+    /// one, so the ceiling is the bytes over the time that takes. Unknown
+    /// unless every card holding weights has a known peak.
+    pub fn vram_peak_gb_s(&self, peaks: &[Option<f32>]) -> Option<f32> {
+        let (mut bytes, mut serial, mut slowest) = (0.0f64, 0.0f64, 0.0f64);
+        for &(i, b) in self.gpu_bytes.iter().filter(|(_, b)| *b > 0) {
+            let peak = peaks
+                .get(i as usize)
+                .copied()
+                .flatten()
+                .filter(|p| *p > 0.0)?;
+            let t = b as f64 / peak as f64;
+            bytes += b as f64;
+            serial += t;
+            slowest = slowest.max(t);
+        }
+        let t = if self.parallel { slowest } else { serial };
+        (bytes > 0.0).then(|| (bytes / t) as f32)
     }
 
     /// Bytes streamed per step from RAM and from VRAM respectively.
@@ -592,6 +628,9 @@ impl BandwidthStats {
             vram_busy: Vec::new(),
             vram_pool: Vec::new(),
             vram: Meter::auto(100.0),
+            vram_gb_s: 0.0,
+            vram_peak: Vec::new(),
+            vram_peak_gb_s: None,
             prefill: Meter::auto(100.0),
             decode: Meter::auto(10.0),
             layout: WeightLayout::default(),
@@ -605,11 +644,14 @@ impl BandwidthStats {
             self.pcie_tx.push(0.0);
             self.vram_busy.push(Meter::fixed(100.0));
             self.vram_pool.push(Meter::fixed(100.0));
+            self.vram_peak.push(None);
         }
         for g in gpus {
             let i = g.index as usize;
             if i < self.pcie_rx.len() {
                 self.pcie_rx[i].full_scale = pcie_link_mb_s(g.pcie_gen, g.pcie_width);
+                // A unified pool is not VRAM; its stage shows pool fill.
+                self.vram_peak[i] = g.mem_peak_gb_s.filter(|_| !g.unified);
             }
         }
     }
@@ -748,6 +790,14 @@ impl PerfTracker {
         } else {
             (0.0, 0.0)
         };
+        let peak = if layout.known {
+            layout.vram_peak_gb_s(&self.bw.vram_peak)
+        } else {
+            None
+        };
+        self.bw.vram_peak_gb_s = peak;
+        self.bw.vram.full_scale = peak;
+        self.bw.vram_gb_s = vram;
         self.bw.ram.update(ram, now, dt);
         self.bw.vram.update(vram, now, dt);
     }
@@ -1088,6 +1138,32 @@ mod tests {
             id_task: id,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn vram_ceiling_follows_the_split() {
+        let layout = |parallel| WeightLayout {
+            known: true,
+            gpu_bytes: vec![(0, 6_000_000_000), (1, 2_000_000_000)],
+            parallel,
+            ..Default::default()
+        };
+        let peaks = [Some(256.0), Some(732.0)];
+        // Layer split: 6 GB at 256 then 2 GB at 732, one after the other.
+        let serial = 8.0 / (6.0 / 256.0 + 2.0 / 732.0);
+        let got = layout(false).vram_peak_gb_s(&peaks).unwrap();
+        assert!((got - serial).abs() < 0.01, "{got}");
+        // Row split: both at once, so the slower card's 6 GB sets the pace.
+        let parallel = 8.0 / (6.0 / 256.0);
+        let got = layout(true).vram_peak_gb_s(&peaks).unwrap();
+        assert!((got - parallel).abs() < 0.01, "{got}");
+        // One card without a peak leaves the ceiling unknown; a card that
+        // holds no weights does not need one.
+        assert_eq!(layout(false).vram_peak_gb_s(&[Some(256.0), None]), None);
+        let mut one = layout(false);
+        one.gpu_bytes[1].1 = 0;
+        assert_eq!(one.vram_peak_gb_s(&[Some(256.0), None]), Some(256.0));
+        assert_eq!(WeightLayout::default().vram_peak_gb_s(&peaks), None);
     }
 
     #[test]

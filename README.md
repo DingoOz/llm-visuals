@@ -313,9 +313,10 @@ and the new speed is shown as fact.
 
 One card per device: utilisation gauge with a VU-style peak-hold notch, power
 gauge, temperature coloured by heat (plus the memory temperature on the
-NVIDIA cards that report it), SM clock, fan, PCIe link, a VRAM bar split
-into weights / KV in use / KV reserved / free, and utilisation and power
-history sparklines.
+NVIDIA cards that report it), SM clock, fan, PCIe link, the card's peak
+memory bandwidth where the line has room for it, a VRAM bar split into
+weights / KV in use / KV reserved / free, and utilisation and power history
+sparklines.
 
 Below the cards, a system RAM section shows memory in use / page cache / free
 against the machine's total, the focused model's resident size, and a history
@@ -468,7 +469,7 @@ verdict names RAM as the bound at 2.5 tok/s.</sub>
 | DISK | MB/s read from every whole block device | `/proc/diskstats`, plus the server's own reads and major page faults from `/proc/<pid>/io` and `/proc/<pid>/stat` |
 | RAM | GB/s of weights the CPU streams out of system RAM, *estimate* | CPU-side bytes × active fraction × steps/s; CPU-side bytes = tensor-table size minus what the cards hold. Tensors llama.cpp's override rules keep in RAM (`-ot …=CPU`, `--cpu-moe`, `--n-cpu-moe`) are CPU-side exactly, whatever the cards hold, and are read at their own rate — routed experts at used/total — rather than the whole model's; the stage shows them as `by -ot`, and `cpu-side` loses its `~` when the rules account for all of it. Tensor table = the GGUF tensor table, or the `*.safetensors` shard headers (header bytes only, labelled `est`) for safetensors servers. A safetensors server has no partial offload, so with a GPU present none of its weights count as CPU-side |
 | PCIe | host→device MB/s per GPU, scaled to the link (gen × lanes) | `nvidia-smi dmon -s t` (NVIDIA; unavailable for AMD). On a unified part the stage is labelled `C2C` and reads `n/a`: the traffic is NVLink-C2C and the driver exposes no counter for it |
-| VRAM | memory-controller busy % per GPU, plus the estimated GB/s of weights streamed | NVIDIA `utilization.memory` or AMD `mem_busy_percent`; bytes per step from the tensor table. On a unified part the stage is labelled `UNIFIED` and shows pool fill (server-reported occupancy over system RAM) instead — there is no memory controller to watch |
+| VRAM | estimated GB/s of weights streamed against the cards' peak, plus memory-controller busy % per GPU | NVIDIA `utilization.memory` or AMD `mem_busy_percent`; bytes per step from the tensor table; peak from NVML's bus width and maximum memory clock (unknown elsewhere: the stage then leads with busy %). On a unified part the stage is labelled `UNIFIED` and shows pool fill (server-reported occupancy over system RAM) instead — there is no memory controller to watch |
 | PREFILL | prompt tokens/s | `/slots` |
 | DECODE | generated tokens/s | `/slots` |
 
@@ -487,9 +488,27 @@ under one alias are left unresolved rather than guessed. A step is one
 verification pass under MTP / speculative decoding (from `/metrics`), one
 token otherwise, and one micro-batch (`-ub`, default 512) during prefill. The verdict is a rule
 chain: disk activity beats everything (weights are paging), then a PCIe link
-past a third of its cap, then a memory controller past 75 %, then CPU-side
-layers with an idle GPU, then a busy GPU (compute bound); otherwise no hop is
-saturated and the gap is latency between tokens.
+past a third of its cap, then a memory controller past 75 %, then a weight
+stream past 60 % of the cards' peak bandwidth, then CPU-side layers with an
+idle GPU, then a busy GPU (compute bound); otherwise no hop is saturated and
+the gap is latency between tokens.
+
+**Peak bandwidth.** On NVIDIA cards read through NVML, the VRAM stage reads
+`212/732 GB/s est`: the estimated weight stream over the theoretical peak,
+with its first bar (`bw`) scaled to that peak beside the per-card
+memory-controller bars. A card's peak is bus width ÷ 8 × maximum memory clock
+× 2, both reported by the driver (a P100 12 GB: 3072-bit × 715 MHz = 549
+GB/s; a V100: 4096-bit × 877 MHz = 898 GB/s). Several cards combine by how
+they read: under llama.cpp's default layer split each token reads one card's
+layers after another's, so the ceiling is the bytes over the summed time
+(a 256 GB/s and a 549 GB/s card holding half each give ~349 GB/s, not 805);
+under a tensor-parallel or `--split-mode row` split they read at once and the
+slowest share sets the pace. Decode kernels rarely pass 80 % of the datasheet
+figure, so 60 % is where the verdict names VRAM bandwidth. The
+nvidia-smi fallback has no bus-width column, and amdgpu sysfs reports the
+memory clock but not the bus width, so the peak is unknown on those paths;
+the stage then reads busy % as before. A unified part keeps its pool-fill
+stage.
 
 On a 27B Q6 model that does not quite fit two cards (~4.7 GB left on the
 CPU), the view shows the GPUs under 40 % busy, memory controllers at 24 %,
@@ -585,6 +604,7 @@ while the key row shortens its own labels. Truecolor is auto-detected with a
 | resident weights | `RssFile` in `/proc/<pid>/status` |
 | PCIe MB/s | in-process NVML `nvmlDeviceGetPcieThroughput` (`nvidia-smi dmon -s t -c 1` fallback) rx/tx per GPU; samples above the link cap are dropped (dmon emits the odd garbage row) |
 | VRAM busy % | NVIDIA `utilization.memory` or AMD `mem_busy_percent` (memory-controller busy time) |
+| peak memory bandwidth | NVML `nvmlDeviceGetMemoryBusWidth` × `nvmlDeviceGetMaxClockInfo(NVML_CLOCK_MEM)`: bits ÷ 8 × MHz × 2, once per card; unknown on the nvidia-smi, amdgpu, Intel and Apple paths |
 | bytes per step, RAM / VRAM GB/s | **estimate**: GGUF tensor table (sizes from offset gaps, summed over every shard of a split file), expert tensors × used/total, embedding and engram tables excluded, split CPU vs GPU by what the cards hold (and by llama.cpp's `-ot` / `--cpu-moe` / `--n-cpu-moe` rules where given, exactly), × steps/s |
 
 Per-request `timings` only appear inside completion responses, which the

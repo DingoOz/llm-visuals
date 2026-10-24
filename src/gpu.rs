@@ -48,6 +48,11 @@ pub struct GpuStats {
     /// driver's own count of every GPU process outranks one server's
     /// self-declared occupancy.
     pub unified_measured: bool,
+    /// Theoretical peak memory bandwidth, GB/s, from the driver's own bus
+    /// width and maximum memory clock (`peak_mem_bandwidth_gb_s`). Only NVML reports
+    /// both; every other backend leaves it unknown rather than guessing
+    /// from a table of card names.
+    pub mem_peak_gb_s: Option<f32>,
 }
 
 impl GpuStats {
@@ -97,6 +102,18 @@ impl GpuStats {
         let n = n.split("-SXM").next().unwrap_or(n);
         n.trim().to_string()
     }
+}
+
+/// Theoretical peak memory bandwidth in GB/s from the bus width (bits) and
+/// the maximum memory clock (MHz) as NVML reports them. NVML's memory clock
+/// is half the data rate on every generation, GDDR5 through HBM3 (a GTX 1070
+/// reads 4004 MHz for 8 Gbps GDDR5, a P100 715 MHz for 1.43 Gbps HBM2), so
+/// one formula holds: bytes per transfer × transfers per second.
+pub fn peak_mem_bandwidth_gb_s(bus_width_bits: u32, mem_clock_max_mhz: u32) -> Option<f32> {
+    if bus_width_bits == 0 || mem_clock_max_mhz == 0 {
+        return None;
+    }
+    Some(bus_width_bits as f32 / 8.0 * mem_clock_max_mhz as f32 * 2.0 / 1000.0)
 }
 
 /// One poll: the stats, or the reason no supported GPU backend produced data.
@@ -1183,6 +1200,8 @@ fn apple_stats(name: &str, cores: u32, m: MacmonSample) -> GpuStats {
         unified_measured: false,
         pcie_gen: 0,
         pcie_width: 0,
+        // Unified: the pipeline's VRAM stage is the pool fill here.
+        mem_peak_gb_s: None,
     }
 }
 
@@ -1337,7 +1356,7 @@ pub fn print_gpu_once(as_json: bool) -> bool {
         for g in &stats {
             println!(
                 "gpu idx={} name='{}' util_gpu={:.1}% power={:.3}W/ceil{:.0}W temp={:?} \
-                 mem_temp={:?} clk={}MHz fan={:?}/{:?} mem={}/{}MB unified={}",
+                 mem_temp={:?} clk={}MHz fan={:?}/{:?} mem={}/{}MB mem_bw_peak={:?}GB/s unified={}",
                 g.index,
                 g.name,
                 g.utilization_gpu,
@@ -1350,6 +1369,7 @@ pub fn print_gpu_once(as_json: bool) -> bool {
                 g.fan_rpm,
                 g.mem_used_mb,
                 g.mem_total_mb,
+                g.mem_peak_gb_s,
                 g.unified,
             );
         }
@@ -1483,6 +1503,10 @@ fn amd_stats(index: u32, device: &AmdDevice) -> GpuStats {
         unified_measured: apu,
         pcie_gen,
         pcie_width,
+        // sysfs carries the memory clock (`pp_dpm_mclk`) but not the bus
+        // width, which only the AMDGPU_INFO ioctl reports; and the clock's
+        // data-rate multiplier differs between GDDR and HBM generations.
+        mem_peak_gb_s: None,
     }
 }
 
@@ -1630,6 +1654,9 @@ pub fn parse_csv(stdout: &str) -> Vec<GpuStats> {
             unified_measured: false,
             pcie_gen: int(14) as u32,
             pcie_width: int(15) as u32,
+            // nvidia-smi has a `clocks.max.memory` column but no bus width
+            // (nor does `nvidia-smi -q`), so the peak needs NVML.
+            mem_peak_gb_s: None,
             // Column 17: only the NVIDIA query asks for it. N/A on cards
             // without the sensor, absent for xpu-smi (16 columns).
             temperature_memory: opt(16),
@@ -1799,6 +1826,13 @@ impl DemoGpu {
             unified_measured: false,
             pcie_gen: 3,
             pcie_width: if self.index == 0 { 8 } else { 16 },
+            // What NVML reports for the cards named above: bus width and
+            // maximum memory clock.
+            mem_peak_gb_s: match self.index {
+                0 => peak_mem_bandwidth_gb_s(256, 4004),
+                1 => peak_mem_bandwidth_gb_s(3072, 715),
+                _ => peak_mem_bandwidth_gb_s(5120, 1593),
+            },
         }
     }
 }
@@ -2030,6 +2064,21 @@ mod tests {
             assert!(s.power_watts <= s.power_max_watts);
         }
         assert!(g.step(0.9).utilization_gpu > 50.0);
+    }
+
+    #[test]
+    fn peak_bandwidth_from_bus_width_and_memory_clock() {
+        // NVML's bus width and maximum memory clock for each card, against
+        // the datasheet figure: GDDR5, GDDR6X and three HBM generations.
+        let gb_s = |bits, mhz| peak_mem_bandwidth_gb_s(bits, mhz).unwrap().round();
+        assert_eq!(gb_s(256, 4004), 256.0); // GTX 1070
+        assert_eq!(gb_s(4096, 715), 732.0); // Tesla P100 16 GB
+        assert_eq!(gb_s(3072, 715), 549.0); // Tesla P100 12 GB
+        assert_eq!(gb_s(4096, 877), 898.0); // Tesla V100 PCIe (900)
+        assert_eq!(gb_s(384, 9751), 936.0); // RTX 3090
+        assert_eq!(gb_s(5120, 1215), 1555.0); // A100-SXM4-40GB
+        assert_eq!(peak_mem_bandwidth_gb_s(0, 4004), None);
+        assert_eq!(peak_mem_bandwidth_gb_s(256, 0), None);
     }
 
     #[test]

@@ -25,6 +25,9 @@ is put together.
 - llama.cpp tensor overrides (`-ot`, `--cpu-moe`, `--n-cpu-moe`,
   `--n-cpu-ffn`) applied to the tensor table: exact CPU-side bytes for the
   memory pipeline and verdict, `C` tags on layer tiles.
+- Per-GPU peak memory bandwidth from NVML (bus width × memory clock): the
+  VRAM stage shows the weight stream in GB/s against it, and the verdict
+  names VRAM bandwidth past 60 % of the peak.
 
 ## Ideas not yet done
 
@@ -32,7 +35,8 @@ is put together.
   does not export them).
 - Ollama metrics endpoint for throughput (vLLM and SGLang done).
 - Real DRAM bandwidth (perf uncore counters) instead of the bytes × steps
-  estimate; per-GPU memory bandwidth ceilings so the VRAM meter can show GB/s
-  against the card's peak.
+  estimate.
+- Peak memory bandwidth off NVML: AMD needs the `AMDGPU_INFO` ioctl's
+  `vram_bit_width` (sysfs has only the clock).
 - `--fit` output, to place the tensors it moves at load time (only the
   server's log says where).
