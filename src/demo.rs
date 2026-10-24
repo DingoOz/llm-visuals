@@ -35,6 +35,8 @@ struct DemoProfile {
     tensor_split: &'static [f32],
     /// Vision projector: ggml device name ("CPU" for none) and host GPU.
     vision: Option<(&'static str, Option<u32>)>,
+    /// Extra llama-server flags, e.g. tensor overrides that keep experts in RAM.
+    flags: &'static str,
     /// Decode tokens/s and prefill tokens/s the profile settles around.
     decode_tps: f32,
     prefill_tps: f32,
@@ -60,6 +62,7 @@ const PROFILES: &[DemoProfile] = &[
         gpus: &[0, 1],
         tensor_split: &[63.0, 37.0],
         vision: Some(("CUDA1", Some(0))),
+        flags: "",
         decode_tps: 48.0,
         prefill_tps: 1150.0,
         ctx_frac: 1.0,
@@ -82,6 +85,7 @@ const PROFILES: &[DemoProfile] = &[
         gpus: &[0],
         tensor_split: &[],
         vision: None,
+        flags: "",
         decode_tps: 92.0,
         prefill_tps: 2600.0,
         ctx_frac: 0.25,
@@ -104,6 +108,7 @@ const PROFILES: &[DemoProfile] = &[
         gpus: &[1],
         tensor_split: &[],
         vision: Some(("CPU", None)),
+        flags: "",
         decode_tps: 165.0,
         prefill_tps: 5200.0,
         ctx_frac: 0.12,
@@ -122,11 +127,13 @@ const PROFILES: &[DemoProfile] = &[
         file_bytes: 22_500_000_000,
         expert_bytes: 19_400_000_000,
         embd_bytes: 300_000_000,
-        mem_used_mb: 21_800,
+        // The experts of the first 8 layers (~4.9 GB) are kept in RAM.
+        mem_used_mb: 17_200,
         gpus: &[0, 1],
         tensor_split: &[50.0, 50.0],
         vision: None,
-        decode_tps: 31.0,
+        flags: " --n-cpu-moe 8",
+        decode_tps: 22.0,
         prefill_tps: 780.0,
         ctx_frac: 0.5,
     },
@@ -147,6 +154,17 @@ fn demo_model_n(ctx_max: usize, idx: usize) -> DetectedModel {
     } else {
         p.name.to_string()
     };
+    let cmdline = format!("llama-server --demo --port {}{}", 8080 + idx, p.flags);
+    let offload = (!p.flags.is_empty()).then(|| {
+        let rules = crate::offload::parse_rules(&cmdline, &Default::default());
+        crate::offload::place(
+            &demo_tensor_table(p),
+            &rules,
+            p.n_experts,
+            p.n_experts_used,
+            |_, _| None,
+        )
+    });
     DetectedModel {
         name,
         path: Some(PathBuf::from(p.file)),
@@ -165,7 +183,7 @@ fn demo_model_n(ctx_max: usize, idx: usize) -> DetectedModel {
         },
         n_gpu_layers: Some(99),
         tensor_split: p.tensor_split.to_vec(),
-        cmdline: format!("llama-server --demo --port {}", 8080 + idx),
+        cmdline: cmdline.clone(),
         gguf: Some(GgufInfo {
             name: p.name.replace('-', " "),
             architecture: p.arch.into(),
@@ -189,6 +207,7 @@ fn demo_model_n(ctx_max: usize, idx: usize) -> DetectedModel {
             n_tensors: 753,
             estimated: false,
         }),
+        offload,
         vision: p.vision.map(|(device, gpu)| Vision {
             loaded: Some(true),
             place: match device {
@@ -200,6 +219,21 @@ fn demo_model_n(ctx_max: usize, idx: usize) -> DetectedModel {
             },
         }),
     }
+}
+
+/// A tensor table with the profile's proportions: the embedding, then per
+/// block an equal share of the dense and of the expert bytes.
+fn demo_tensor_table(p: &DemoProfile) -> Vec<(String, u64)> {
+    let n = p.n_layers.max(1) as u64;
+    let dense = p.file_bytes - p.expert_bytes - p.embd_bytes;
+    let mut t = vec![("token_embd.weight".to_string(), p.embd_bytes)];
+    for b in 0..p.n_layers {
+        t.push((format!("blk.{b}.attn_qkv.weight"), dense / n));
+        if p.expert_bytes > 0 {
+            t.push((format!("blk.{b}.ffn_up_exps.weight"), p.expert_bytes / n));
+        }
+    }
+    t
 }
 
 fn next_f(seed: &mut u64) -> f32 {
@@ -494,11 +528,19 @@ impl DemoExperts {
             self.stats.n_tokens += 1;
             for (il, layer) in self.stats.layers.iter_mut().enumerate() {
                 let mut ids: Vec<i32> = Vec::with_capacity(self.k);
+                // Real routers are not equally lopsided in every layer: most
+                // send about a third of their picks to a per-layer favourite
+                // band, the first layer spreads them nearly evenly, and every
+                // eleventh has all but collapsed onto a dozen experts.
+                let (bias, band) = match il {
+                    0 => (0.08, 24.0),
+                    _ if il % 11 == 7 => (0.85, 12.0),
+                    _ => (0.35, 24.0),
+                };
                 while ids.len() < self.k {
-                    // Skewed draw: a third of picks land in a per-layer "favourite" band.
                     let r = next_f(seed);
-                    let e = if next_f(seed) < 0.35 {
-                        ((il * 37) % self.n_expert + (r * 24.0) as usize) % self.n_expert
+                    let e = if next_f(seed) < bias {
+                        ((il * 37) % self.n_expert + (r * band) as usize) % self.n_expert
                     } else {
                         (r * self.n_expert as f32) as usize % self.n_expert
                     } as i32;
