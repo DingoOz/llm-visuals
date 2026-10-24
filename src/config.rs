@@ -14,6 +14,8 @@ pub enum ViewMode {
     MoE,
     /// The expert map as an isometric landscape.
     Landscape,
+    /// Router load balance per MoE layer, from the server's hit counts.
+    Balance,
     /// Memory pipeline: disk → RAM → PCIe → VRAM → prefill → decode meters.
     Bandwidth,
     /// Side-by-side comparison of every detected model.
@@ -28,6 +30,7 @@ impl std::fmt::Display for ViewMode {
             ViewMode::Heatmap => write!(f, "layers"),
             ViewMode::MoE => write!(f, "moe"),
             ViewMode::Landscape => write!(f, "landscape"),
+            ViewMode::Balance => write!(f, "balance"),
             ViewMode::Bandwidth => write!(f, "bandwidth"),
             ViewMode::Models => write!(f, "models"),
         }

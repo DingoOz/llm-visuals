@@ -19,6 +19,12 @@ is put together.
 - SGLang: `/v1/loads` poller, `/server_info`, worker folding, safetensors
   `config.json` architecture fields (also used by vLLM).
 - Decode speed vs context length (`c`), from the logged samples.
+- Expert balance view (`u`): the /experts 256-token histogram as per-layer
+  effective experts, top-k share and a ranked-hits curve, with lopsided
+  layers flagged.
+- llama.cpp tensor overrides (`-ot`, `--cpu-moe`, `--n-cpu-moe`,
+  `--n-cpu-ffn`) applied to the tensor table: exact CPU-side bytes for the
+  memory pipeline and verdict, `C` tags on layer tiles.
 - Per-GPU peak memory bandwidth from NVML (bus width × memory clock): the
   VRAM stage shows the weight stream in GB/s against it, and the verdict
   names VRAM bandwidth past 60 % of the peak.
@@ -27,11 +33,10 @@ is put together.
 
 - Per-position acceptance rates for deeper MTP drafts (server logs them but
   does not export them).
-- Show the /experts 256-token histogram as a load-balance view per layer.
 - Ollama metrics endpoint for throughput (vLLM and SGLang done).
 - Real DRAM bandwidth (perf uncore counters) instead of the bytes × steps
   estimate.
 - Peak memory bandwidth off NVML: AMD needs the `AMDGPU_INFO` ioctl's
   `vram_bit_width` (sysfs has only the clock).
-- Honour `-ot` / `--override-tensor` and `--fit` output to place tensors on
-  CPU vs GPU exactly instead of by `--tensor-split` share.
+- `--fit` output, to place the tensors it moves at load time (only the
+  server's log says where).

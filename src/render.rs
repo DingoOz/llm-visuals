@@ -10,6 +10,7 @@ use ratatui::{
     Frame, Terminal,
 };
 
+use crate::balance::Balance;
 use crate::bandwidth::{self, StageId};
 use crate::colors::{self as pal, ColorTheme};
 use crate::config::ViewMode;
@@ -206,7 +207,9 @@ impl Renderer {
         // The landscape is a picture and wants every row it can get. Where
         // it cannot be drawn the flat map stands in, laid out as `m` is.
         let landscape = d.view == ViewMode::Landscape && landscape_fits(d, area);
-        let ctx_h = if !show_ctx || landscape {
+        // The balance view is a table, one row per layer: it gets the
+        // context row too, so a 40-odd-layer model fits on one screen.
+        let ctx_h = if !show_ctx || landscape || d.view == ViewMode::Balance {
             0
         } else if d.view == ViewMode::Perf {
             6
@@ -230,6 +233,7 @@ impl Renderer {
             ViewMode::Heatmap
             | ViewMode::MoE
             | ViewMode::Landscape
+            | ViewMode::Balance
             | ViewMode::Bandwidth
             | ViewMode::Models => vec![
                 Constraint::Length(0),
@@ -263,6 +267,7 @@ impl Renderer {
             match d.view {
                 ViewMode::Heatmap => self.render_layers(frame, rows[2], d),
                 ViewMode::Landscape if landscape => self.render_landscape(frame, rows[2], d),
+                ViewMode::Balance => self.render_balance(frame, rows[2], d),
                 ViewMode::MoE | ViewMode::Landscape => self.render_experts(frame, rows[2], d),
                 _ => {
                     let split = Layout::default()
@@ -1493,9 +1498,17 @@ impl Renderer {
             })
             .unwrap_or_else(|| d.gpus.len().max(1));
         let n_gpus = model_gpu_count;
+        // Layers with tensors in system RAM (llama.cpp `-ot` / `--cpu-moe`)
+        // are tagged `C`; the title says how many.
+        let in_ram = f.layer_cpu.iter().take(n).filter(|&&c| c > 0.0).count();
         let title = format!(
-            " ◆ LAYERS  {n} across {n_gpus} GPU{} ",
-            if n_gpus > 1 { "s" } else { "" }
+            " ◆ LAYERS  {n} across {n_gpus} GPU{}{} ",
+            if n_gpus > 1 { "s" } else { "" },
+            if in_ram > 0 {
+                format!(" · C {in_ram} in RAM")
+            } else {
+                String::new()
+            }
         );
         let right = Line::from(Span::styled(
             format!(" theme {} ", self.theme.name),
@@ -1538,6 +1551,19 @@ impl Renderer {
             };
             let tag_col = pal::c(gpu_tags[gpu % gpu_tags.len()]);
             let inner_w = tw.saturating_sub(1); // 1-col gutter between tiles
+                                                // The card, then `C` when some of the layer is in RAM; `C` alone
+                                                // when all of it is, or when the tile has room for one tag only.
+            let cpu = f.layer_cpu.get(layer).copied().unwrap_or(0.0);
+            let ram_tag = (String::from("C"), pal::c(pal::VIOLET));
+            let tags: Vec<(String, ratatui::style::Color)> =
+                if cpu > 0.999 || (cpu > 0.0 && inner_w < 6) {
+                    vec![ram_tag]
+                } else if cpu > 0.0 {
+                    vec![(gpu.to_string(), tag_col), ram_tag]
+                } else {
+                    vec![(gpu.to_string(), tag_col)]
+                };
+            let tag_x = inner_w.saturating_sub(tags.len());
             for dy in 0..th {
                 let y = y0 + dy;
                 if y >= h {
@@ -1567,8 +1593,9 @@ impl Renderer {
                                 .bg(bg)
                                 .add_modifier(Modifier::BOLD),
                         )
-                    } else if dy == 0 && dx == inner_w - 1 && inner_w >= 5 {
-                        Span::styled(format!("{gpu}"), Style::default().fg(tag_col).bg(bg))
+                    } else if dy == 0 && dx >= tag_x && inner_w >= 5 {
+                        let (t, col) = &tags[dx - tag_x];
+                        Span::styled(t.clone(), Style::default().fg(*col).bg(bg))
                     } else if bottom && !hist.is_empty() {
                         let n_h = hist.len();
                         let start = n_h.saturating_sub(inner_w);
@@ -2070,6 +2097,305 @@ impl Renderer {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Expert balance
+    // -----------------------------------------------------------------------
+
+    /// Router load balance, one row per MoE layer: how many experts the
+    /// layer's picks are effectively spread over, how much of them its
+    /// busiest k take, and its hit counts ranked into a small curve. Only
+    /// the server's counts can say this, so without them the panel says
+    /// what is missing instead of drawing a stand-in.
+    fn render_balance(&self, frame: &mut Frame, area: Rect, d: &Dashboard) {
+        let f = d.fade;
+        let n_e = f.n_experts.max(1);
+        let muted = Style::default().fg(pal::c(pal::TEXT_MUTED));
+        let dim = Style::default().fg(pal::c(pal::TEXT_DIM));
+        let live = d.experts.filter(|_| f.real_routing && n_e > 1);
+        let bal = live.map(Balance::of);
+        let mut title = " ◆ EXPERT BALANCE".to_string();
+        if n_e > 1 {
+            title.push_str(&format!("  {} of {} per token", f.n_experts_used, n_e));
+        }
+        let why: Option<Vec<&str>> = if !d.attention.is_empty() {
+            Some(vec![
+                "the attention bridge streams a dense model: no router to balance",
+            ])
+        } else if n_e <= 1 {
+            Some(vec![if f.n_layers == 0 {
+                "waiting on model metadata"
+            } else {
+                "no expert routing — this model is dense (every token uses every FFN)"
+            }])
+        } else if bal.is_none() {
+            Some(vec![
+                "needs the router's hit counts, which only the patched llama-server reports:",
+                "start it with --expert-stats (see patches/README.md).",
+                "",
+                "Without them there is nothing real to measure, so nothing is drawn here.",
+            ])
+        } else if !bal.as_ref().is_some_and(Balance::any_routed) {
+            Some(vec![
+                "no tokens routed yet — the counts fill as the model generates",
+            ])
+        } else {
+            None
+        };
+        if let Some(lines) = why {
+            title.push_str(if live.is_some() { " · live " } else { " " });
+            let block = panel(&title, pal::VIOLET);
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            let text: Vec<Line> = lines
+                .into_iter()
+                .map(|l| Line::from(Span::styled(l, dim)))
+                .collect();
+            frame.render_widget(Paragraph::new(text), inner);
+            return;
+        }
+        let b = bal.expect("checked above");
+        let w = area.width.saturating_sub(2) as usize;
+        let h = area.height.saturating_sub(2) as usize;
+        if h == 0 || w < 20 {
+            return;
+        }
+
+        // Rows: a summary, a column header, then the layers. As many
+        // columns as it takes to show every layer, while each stays wide
+        // enough for its curve; past that, neighbouring layers share a row.
+        const FIXED: usize = 28;
+        const MIN_COL: usize = FIXED + 14;
+        const GAP: usize = 3;
+        let body = h.saturating_sub(2).max(1);
+        let n_l = b.layers.len().max(1);
+        let max_cols = ((w + GAP) / (MIN_COL + GAP)).clamp(1, 4);
+        let mut cols = 1;
+        while cols < max_cols && cols * body < n_l {
+            cols += 1;
+        }
+        let per_row = n_l.div_ceil(body * cols);
+        let n_groups = n_l.div_ceil(per_row);
+        let n_rows = n_groups.div_ceil(cols);
+        let col_w = (w - (cols - 1) * GAP) / cols;
+        let spare = col_w.saturating_sub(FIXED);
+        // The curve needs no more cells than there are experts.
+        let curve_w = (spare * 3 / 5).clamp(4, n_e.max(4));
+        let gauge_w = spare.saturating_sub(curve_w).clamp(3, 20);
+
+        title.push_str(" · live");
+        if per_row > 1 {
+            title.push_str(&format!(" · most lopsided of {per_row} per row"));
+        }
+        title.push(' ');
+        let legend = Line::from(Span::styled(
+            format!(" {} tokens · curve = experts ranked by hits ", b.window),
+            muted,
+        ))
+        .right_aligned();
+        let (block, _) = with_right(panel(&title, pal::VIOLET), &title, legend, area);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let text = Style::default().fg(pal::c(pal::TEXT));
+        let bold = text.add_modifier(Modifier::BOLD);
+        let warn = Style::default()
+            .fg(pal::c(pal::AMBER))
+            .add_modifier(Modifier::BOLD);
+        // Most telling first, so a narrow panel cuts the least of it.
+        let mut summary = vec![
+            Span::styled(" mean ", dim),
+            Span::styled(format!("{:.1}", b.mean_effective()), bold),
+            Span::styled(format!(" effective of {}", b.n_expert), dim),
+        ];
+        match b.n_flagged() {
+            0 => summary.push(Span::styled(" · no layer stands out", dim)),
+            n => {
+                summary.push(Span::styled(" · ", dim));
+                summary.push(Span::styled(
+                    format!("{n} layer{} ●", if n == 1 { "" } else { "s" }),
+                    warn,
+                ));
+                summary.push(Span::styled(
+                    format!(" top-{} ≥ 2× median {:.0}%", b.k, b.median_top * 100.0),
+                    dim,
+                ));
+            }
+        }
+        if let Some((most, least)) = b.extremes() {
+            summary.push(Span::styled(" · most lopsided ", dim));
+            summary.push(Span::styled(
+                format!("L{} {:.0}", least.il, least.effective),
+                text,
+            ));
+            summary.push(Span::styled(" · most even ", dim));
+            summary.push(Span::styled(
+                format!("L{} {:.0}", most.il, most.effective),
+                text,
+            ));
+        }
+        let mut lines: Vec<Line> = vec![Line::from(fit_spans(&summary, w))];
+
+        // One cell per column header, padded to the widths the rows use.
+        let head = |label: &str, width: usize, right: bool| {
+            let label = truncate(label, width);
+            if right {
+                format!("{label:>width$}")
+            } else {
+                format!("{label:<width$}")
+            }
+        };
+        let header = format!(
+            "{}{} {}{}{}{}",
+            head("layer", 6, false),
+            head(
+                if curve_w >= 16 {
+                    "hits, busiest first"
+                } else {
+                    "ranked"
+                },
+                curve_w,
+                false,
+            ),
+            head(
+                if gauge_w >= 12 {
+                    "effective experts"
+                } else {
+                    "effective"
+                },
+                gauge_w + 6,
+                false,
+            ),
+            head("used", 4, true),
+            head(&format!("top{}", b.k), 5, true),
+            head("×even", 6, true),
+        );
+
+        // A row covers `per_row` layers. Sharing a row, they show the one
+        // with the fewest effective experts: averaging would hide the very
+        // layer this view is for, and their expert ids are unrelated, so
+        // their counts cannot be pooled either.
+        let uniform = b.uniform_top().max(1e-6);
+        let row_spans = |g: usize| -> Vec<Span<'static>> {
+            let n = b.layers.len();
+            let group = &b.layers[(g * per_row).min(n)..((g + 1) * per_row).min(n)];
+            let shown = group.iter().filter(|l| l.picks > 0).reduce(|a, l| {
+                if l.effective < a.effective {
+                    l
+                } else {
+                    a
+                }
+            });
+            let il = shown.or(group.first()).map_or(0, |l| l.il);
+            let flagged = group.iter().any(|l| b.flagged(l));
+            let mut spans = vec![
+                Span::styled(format!("{il:>4}"), muted),
+                if flagged {
+                    Span::styled("●", warn)
+                } else {
+                    Span::raw(" ")
+                },
+                Span::raw(" "),
+            ];
+            let Some(l) = shown else {
+                spans.push(Span::styled("no hits in the window", muted));
+                return spans;
+            };
+            let (eff, top) = (l.effective, l.top_share);
+            for v in l.rank_curve(curve_w) {
+                let e = (v.clamp(0.0, 1.0) * 8.0).round() as usize;
+                spans.push(if e == 0 {
+                    Span::styled("▁", Style::default().fg(pal::c(pal::chrome().track)))
+                } else {
+                    let ch = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"][e - 1];
+                    Span::styled(
+                        ch,
+                        Style::default().fg(self.theme.map_intensity(0.3 + 0.7 * v)),
+                    )
+                });
+            }
+            spans.push(Span::raw(" "));
+            spans.extend(gauge(
+                eff / b.n_expert.max(1) as f32,
+                None,
+                gauge_w,
+                GaugeStyle::Flow,
+            ));
+            spans.push(Span::styled(format!(" {eff:>5.1}"), text));
+            spans.push(Span::styled(format!(" {:>3}", l.touched), dim));
+            spans.push(Span::styled(
+                format!(" {:>3.0}%", top * 100.0),
+                if flagged { warn } else { text },
+            ));
+            spans.push(Span::styled(format!(" {:>4.1}×", top / uniform), dim));
+            spans
+        };
+
+        if h >= 2 {
+            let mut hdr = String::new();
+            for c in 0..cols.min(n_groups) {
+                if c > 0 {
+                    hdr.push_str(&" ".repeat(GAP));
+                }
+                hdr.push_str(&format!("{header:<col_w$}"));
+            }
+            lines.push(Line::from(Span::styled(hdr, muted)));
+        }
+        for r in 0..n_rows.min(body) {
+            let mut spans: Vec<Span> = Vec::new();
+            for c in 0..cols {
+                // Column-major, so layers read down and then across.
+                let g = c * n_rows + r;
+                if g >= n_groups {
+                    break;
+                }
+                let cell = fit_spans(&row_spans(g), col_w);
+                let used: usize = cell.iter().map(|s| s.content.chars().count()).sum();
+                if c > 0 {
+                    spans.push(Span::raw(" ".repeat(GAP)));
+                }
+                spans.extend(cell);
+                if c + 1 < cols {
+                    spans.push(Span::raw(" ".repeat(col_w.saturating_sub(used))));
+                }
+            }
+            lines.push(Line::from(spans));
+        }
+
+        // Rows left over under the table carry the whole model at a glance:
+        // effective experts layer by layer, the flagged ones marked beneath.
+        let spare_rows = body.saturating_sub(n_rows);
+        let cell = (w.saturating_sub(4) / n_l).clamp(1, 4);
+        if spare_rows >= 6 && n_l * cell <= w.saturating_sub(4) {
+            let strip_h = (spare_rows - 3).min(6);
+            let values: Vec<f32> = b
+                .layers
+                .iter()
+                .flat_map(|l| std::iter::repeat(l.effective).take(cell))
+                .collect();
+            lines.push(Line::raw(""));
+            lines.push(Line::from(vec![
+                Span::styled(" effective experts by layer", dim),
+                Span::styled(
+                    format!("  L0 → L{} · full height = {}", n_l - 1, b.n_expert),
+                    muted,
+                ),
+            ]));
+            let n_cells = values.len();
+            for row in sparkline(&values, n_cells, strip_h, b.n_expert as f32, pal::FLOW) {
+                let mut spans = vec![Span::raw("    ")];
+                spans.extend(row);
+                lines.push(Line::from(spans));
+            }
+            let mut marks = vec![Span::raw("    ")];
+            for l in &b.layers {
+                let mark = if b.flagged(l) { "●" } else { " " };
+                marks.push(Span::styled(format!("{mark:<cell$}"), warn));
+            }
+            lines.push(Line::from(marks));
+        }
+        frame.render_widget(Paragraph::new(Text::from(lines)), inner);
+    }
+
     /// One line describing an engram module: what it hashes, where it is
     /// injected, and how big the table is. Drops detail from the right on
     /// narrow panels.
@@ -2272,6 +2598,7 @@ impl Renderer {
             ("h", "layers".into(), d.view == ViewMode::Heatmap),
             ("m", "experts".into(), d.view == ViewMode::MoE),
             ("e", "3d".into(), d.view == ViewMode::Landscape),
+            ("u", "balance".into(), d.view == ViewMode::Balance),
             ("b", "bandwidth".into(), d.view == ViewMode::Bandwidth),
         ];
         if multi {
@@ -2298,6 +2625,7 @@ impl Renderer {
                 match *k {
                     "t" => *l = "theme".into(),
                     "b" => *l = "bw".into(),
+                    "u" => *l = "bal".into(),
                     "s" => *l = "set".into(),
                     "c" => *l = "ctx".into(),
                     "↹" => *l = format!("{}/{}", d.focus + 1, d.models.len()),
@@ -3333,7 +3661,10 @@ impl Renderer {
             } else {
                 pal::TEXT_DIM
             };
-            facts.push(fact("cpu-side", format!("~{}", gb(layout.cpu_bytes)), c));
+            facts.push(fact("cpu-side", fmt_cpu_side(layout), c));
+            if layout.cpu_by_rule > 0 {
+                facts.push(fact("by -ot", gb(layout.cpu_by_rule), pal::TEXT));
+            }
         }
         if let Some(a) = host.mem_available_bytes {
             facts.push(fact("avail", gb(a), pal::TEXT));
@@ -3607,7 +3938,7 @@ impl Renderer {
                 layout.total_bytes as f32 / 1e9,
                 layout.active_bytes as f32 / 1e9,
                 if layout.cpu_bytes > layout.total_bytes / 50 {
-                    format!("~{:.1} GB on CPU ", layout.cpu_bytes as f32 / 1e9)
+                    format!("{} on CPU ", fmt_cpu_side(layout).replace('G', " GB"))
                 } else if unified {
                     "all in the unified pool ".into()
                 } else {
@@ -4330,6 +4661,17 @@ fn big_digits(s: String) -> [String; 3] {
 }
 
 /// Largest chunky tiles that fit `n` layers in a WxH grid.
+/// Bytes on the CPU side: exact when llama.cpp's override rules put all of
+/// them there, an estimate (`~`) when some are what the cards could not hold.
+fn fmt_cpu_side(layout: &crate::perf::WeightLayout) -> String {
+    let approx = if layout.cpu_by_rule > 0 && layout.cpu_by_rule == layout.cpu_bytes {
+        ""
+    } else {
+        "~"
+    };
+    format!("{approx}{:.1}G", layout.cpu_bytes as f32 / 1e9)
+}
+
 fn layer_tile_size(w: usize, h: usize, n: usize) -> (usize, usize, usize) {
     if w == 0 || h == 0 || n == 0 {
         return (1, 1, 1);
@@ -4680,6 +5022,20 @@ mod tests {
         turns: i32,
         rival: Option<(usize, usize)>,
     ) -> String {
+        view_text(ViewMode::Landscape, profile, w, h, routed, turns, rival)
+    }
+
+    /// A frame of `view` for a demo profile, routed as `landscape_text_with`
+    /// describes.
+    fn view_text(
+        view: ViewMode,
+        profile: usize,
+        w: u16,
+        h: u16,
+        routed: bool,
+        turns: i32,
+        rival: Option<(usize, usize)>,
+    ) -> String {
         use crate::fade::FadeSample;
         use crate::observe::ExpertLayer;
         use ratatui::backend::TestBackend;
@@ -4712,6 +5068,7 @@ mod tests {
         let sample = FadeSample {
             layer_target: vec![0.5; n_l],
             layer_gpu: vec![0; n_l],
+            layer_cpu: Vec::new(),
             kv_filled: vec![false; crate::fade::KV_BUCKETS],
             processing: true,
             decoded: 1,
@@ -4769,7 +5126,7 @@ mod tests {
             generated: &generated,
             num_layers: n_l,
             num_heads: 8,
-            view: ViewMode::Landscape,
+            view,
             camera: &camera,
             status: "",
             theme_name: "defrag",
@@ -4862,6 +5219,41 @@ mod tests {
             narrow.contains("◆ EXPERTS  8 of 256") && narrow.contains("◆ CONTEXT"),
             "{narrow}"
         );
+    }
+
+    #[test]
+    fn balance_flags_the_layer_whose_busiest_experts_stand_out() {
+        let text = view_text(ViewMode::Balance, 0, 150, 46, true, 0, None);
+        assert!(text.contains("EXPERT BALANCE  8 of 256 per token · live"));
+        assert!(text.contains("256 tokens · curve = experts ranked by hits"));
+        // Layer 2 has one expert routed twice as often as any other: its
+        // top-8 share is twice the median layer's, and it alone is marked.
+        assert!(text.contains("1 layer ● top-8 ≥ 2× median 6%"));
+        assert!(text.contains("   2● "));
+        assert!(!text.contains("   3● "));
+        assert!(text.contains("most lopsided L2"));
+        // Every layer of the 41 is on screen, in two columns.
+        assert!(text.contains("  40  "));
+        assert!(text.contains("effective experts by layer"));
+    }
+
+    #[test]
+    fn balance_on_a_small_terminal_keeps_the_flagged_layer_in_a_shared_row() {
+        let text = view_text(ViewMode::Balance, 0, 100, 24, true, 0, None);
+        assert!(text.contains("most lopsided of 2 per row"));
+        assert!(text.contains("   2● "));
+    }
+
+    #[test]
+    fn balance_without_hit_counts_or_experts_says_why_instead_of_drawing() {
+        let unpatched = view_text(ViewMode::Balance, 0, 150, 46, false, 0, None);
+        assert!(unpatched.contains("start it with --expert-stats (see patches/README.md)"));
+        assert!(!unpatched.contains("effective experts by layer"));
+        let dense = view_text(ViewMode::Balance, 1, 150, 46, true, 0, None);
+        assert!(dense.contains("this model is dense"));
+        for h in 1..=5 {
+            view_text(ViewMode::Balance, 0, 40, h, true, 0, None);
+        }
     }
 
     #[test]
