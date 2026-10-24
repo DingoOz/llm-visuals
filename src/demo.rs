@@ -494,11 +494,19 @@ impl DemoExperts {
             self.stats.n_tokens += 1;
             for (il, layer) in self.stats.layers.iter_mut().enumerate() {
                 let mut ids: Vec<i32> = Vec::with_capacity(self.k);
+                // Real routers are not equally lopsided in every layer: most
+                // send about a third of their picks to a per-layer favourite
+                // band, the first layer spreads them nearly evenly, and every
+                // eleventh has all but collapsed onto a dozen experts.
+                let (bias, band) = match il {
+                    0 => (0.08, 24.0),
+                    _ if il % 11 == 7 => (0.85, 12.0),
+                    _ => (0.35, 24.0),
+                };
                 while ids.len() < self.k {
-                    // Skewed draw: a third of picks land in a per-layer "favourite" band.
                     let r = next_f(seed);
-                    let e = if next_f(seed) < 0.35 {
-                        ((il * 37) % self.n_expert + (r * 24.0) as usize) % self.n_expert
+                    let e = if next_f(seed) < bias {
+                        ((il * 37) % self.n_expert + (r * band) as usize) % self.n_expert
                     } else {
                         (r * self.n_expert as f32) as usize % self.n_expert
                     } as i32;
