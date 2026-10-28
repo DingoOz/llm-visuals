@@ -467,10 +467,12 @@ pub fn is_server(cmdline: &str) -> bool {
 /// the GPU memory but speaks only to its parent over a pipe, so it is folded
 /// into the server.
 pub fn is_engine(process_name: &str, cmdline: &str) -> bool {
-    matches!(
-        argv0_base(process_name, cmdline).as_str(),
-        "strata" | "maya" | "maya-ds4"
-    ) && cmdline.split_whitespace().any(|t| t == "--serve")
+    // Per-model builds carry a suffix (`strata-dsv41`, `maya-ds4`).
+    let base = argv0_base(process_name, cmdline);
+    let named = ["strata", "maya"]
+        .iter()
+        .any(|n| base == *n || base.strip_prefix(n).is_some_and(|r| r.starts_with('-')));
+    named && base != "maya-vision" && cmdline.split_whitespace().any(|t| t == "--serve")
 }
 
 /// Maya's vision encoder, which its server runs beside the engine
@@ -541,22 +543,28 @@ pub fn parse_config(body: &str) -> Option<StrataConfig> {
         pack: flag("--glm-pack")
             .or_else(|| flag("--pack"))
             .map(PathBuf::from),
-        gpus: v
-            .get("gpu")
-            .and_then(|g| g.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|x| x.as_u64())
-                    .map(|x| x as u32)
-                    .collect()
-            })
-            .unwrap_or_default(),
+        // A list of cards, or Strata's single index (`"gpu": 1`).
+        gpus: match v.get("gpu") {
+            Some(Value::Array(a)) => a
+                .iter()
+                .filter_map(|x| x.as_u64())
+                .map(|x| x as u32)
+                .collect(),
+            Some(Value::Number(n)) => n.as_u64().map(|x| x as u32).into_iter().collect(),
+            _ => Vec::new(),
+        },
     })
 }
 
 /// The first GGUF shard an expert pack was built from: `sources.json` lists
-/// the files, which sit in the pack's parent folder.
+/// the files, which sit in the pack's parent folder. A DeepSeek pack
+/// (`ds4.txt`) says instead in `tensors.txt`, beside the `model_dir` they
+/// sit in.
 pub fn pack_gguf(pack: &Path) -> Option<PathBuf> {
+    sources_gguf(pack).or_else(|| ds4_gguf(pack))
+}
+
+fn sources_gguf(pack: &Path) -> Option<PathBuf> {
     let body = std::fs::read_to_string(pack.join("sources.json")).ok()?;
     let v: Value = serde_json::from_str(&body).ok()?;
     let mut names: Vec<&str> = v
@@ -569,6 +577,34 @@ pub fn pack_gguf(pack: &Path) -> Option<PathBuf> {
     // `-00001-of-` sorts first; the header is in that shard.
     names.sort_unstable();
     Some(pack.parent()?.join(names.first()?))
+}
+
+/// `tensors.txt` opens with `file <n> <name>` lines (the model's shards, then
+/// extras such as an Engram table or a drafter) before thousands of tensor
+/// lines, so only its head is read.
+fn ds4_gguf(pack: &Path) -> Option<PathBuf> {
+    use std::io::BufRead;
+    let conf = std::fs::read_to_string(pack.join("ds4.txt")).ok()?;
+    let dir = conf
+        .lines()
+        .find_map(|l| l.strip_prefix("model_dir "))
+        .map(|d| PathBuf::from(d.trim()))
+        .or_else(|| pack.parent().map(Path::to_path_buf))?;
+    let f = std::fs::File::open(pack.join("tensors.txt")).ok()?;
+    let name = std::io::BufReader::new(f)
+        .lines()
+        .take(64)
+        .map_while(Result::ok)
+        .filter_map(|l| {
+            let mut t = l.split_whitespace();
+            (t.next() == Some("file")).then_some(())?;
+            let n: u32 = t.next()?.parse().ok()?;
+            let name = t.next()?.to_string();
+            name.ends_with(".gguf").then_some((n, name))
+        })
+        .min()?
+        .1;
+    Some(dir.join(name))
 }
 
 /// The `--config` path on a server command line, resolved against `cwd`.
@@ -995,6 +1031,11 @@ mod tests {
         assert!(!is_server("python serve/server.py --engine mock"));
         assert!(!is_server("vim strata"));
         assert!(is_engine("strata", ENGINE));
+        assert!(is_engine(
+            "strata-dsv41",
+            "/s/build-dsv41-sm6070/strata-dsv41 --serve --pack /p --max-context 98304"
+        ));
+        assert!(!is_engine("stratagem", "/bin/stratagem --serve"));
         assert!(!is_engine("strata", "/opt/strata/engine/strata --bench"));
         assert!(!is_engine("python", SERVER));
     }
@@ -1094,6 +1135,56 @@ mod tests {
         .unwrap();
         assert_eq!(pack_gguf(&pack), Some(dir.join("M-00001-of-00002.gguf")));
         assert_eq!(pack_gguf(&dir), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn deepseek_pack_names_its_gguf_in_tensors_txt() {
+        // Strata's DeepSeek-V4.1 config: a bare card index, no `--native`.
+        let c = parse_config(
+            r#"{"exe": "/s/build-dsv41-sm6070/strata-dsv41",
+                "args": ["--pack", "/p/ist-das-2.00bpw", "--max-context", "98304"],
+                "model_name": "deepseek-v4.1-flash", "arch": "deepseek41", "gpu": 1}"#,
+        )
+        .unwrap();
+        assert!(!c.maya);
+        assert_eq!(c.gpus, vec![1]);
+        assert_eq!(c.gguf, None);
+        assert_eq!(
+            parse_config(r#"{"gpu": true}"#).unwrap().gpus,
+            Vec::<u32>::new()
+        );
+
+        let dir = std::env::temp_dir().join(format!("lv-ds4-pack-{}", std::process::id()));
+        let pack = dir.join("packs").join("ist-das");
+        std::fs::create_dir_all(&pack).unwrap();
+        let models = dir.join("models");
+        std::fs::write(
+            pack.join("ds4.txt"),
+            format!(
+                "n_routed_experts 384\nformat gguf\nmodel_dir {}\n",
+                models.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            pack.join("tensors.txt"),
+            "file 1 DS-IQ2_XXS-00002-of-00002.gguf\n\
+             file 0 DS-IQ2_XXS-00001-of-00002.gguf\n\
+             file 2 dspark-DS-Q8_0.gguf\n\
+             t layers.0.ffn.experts.0.w1.weight IQ1_M 0 5772864 2580480 2304 5120\n",
+        )
+        .unwrap();
+        assert_eq!(
+            pack_gguf(&pack),
+            Some(models.join("DS-IQ2_XXS-00001-of-00002.gguf"))
+        );
+        // Without `model_dir` the shards sit beside the pack.
+        std::fs::write(pack.join("ds4.txt"), "format gguf\n").unwrap();
+        assert_eq!(
+            pack_gguf(&pack),
+            Some(dir.join("packs").join("DS-IQ2_XXS-00001-of-00002.gguf"))
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
