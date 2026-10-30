@@ -3,7 +3,7 @@
 **A live terminal dashboard for the LLM running on your machine.**
 
 It finds the inference servers you already have up (llama.cpp `llama-server`,
-ollama, vLLM, SGLang, Strata, Maya, NInfer, …), reads their counters and NVIDIA, AMD or Intel
+ollama, vLLM, SGLang, Strata, Maya, NInfer, TensorFold, …), reads their counters and NVIDIA, AMD or Intel
 GPU telemetry, and turns them into a truecolor picture of what the model is doing
 right now: tokens per second, time to first token, GPU load and memory, context fill, speculative-decoding
 acceptance, which layers are busy on which GPU, and, with a small server patch,
@@ -977,6 +977,26 @@ server's own port when it runs behind a gateway; API keys work through the
 existing `--api-key-file` option. As with the vLLM adapter, request rows
 reconstructed from aggregate counters are activity windows, not individual
 concurrent request traces.
+
+### TensorFold
+
+[TensorFold](https://github.com/ashhart/TensorFold)'s native server is
+detected from `tensorfold serve` or `tensorfold-native serve` (port 8080 when
+`--port` is absent), or selected with `--endpoint http://127.0.0.1:8080`, which
+recognises it from `/v1/models`. The checkpoint named after `serve` (a folder or
+a Hugging Face repo, found in the Hugging Face cache) supplies the layers,
+experts and quantization, so Qwen3.8 Flash Next shows as `qwen4_exp_text` with
+its `4-bit` MLX weights. `--name` and `--context` are read too.
+
+TensorFold's `/metrics` counters move only when a request finishes, so live
+progress comes from its gauges: `requests_running`,
+`generation_tokens_running` and each stream's `kv_cache_usage_ratio` against
+the context window from `/v1/models`. Prefill is the engine's own rate from
+`/health`, and when a request finishes its prompt, reused prefix, TTFT and
+decode time are that window's counter deltas. Drafting (Flash Next's MTP head,
+or `--drafter`) fills the speculative panel from `mtp_drafted_total` and
+`mtp_accepted_total`. With API keys on, `/metrics` needs the key
+(`--api-key-file`) unless the server runs with `--metrics-open`.
 
 ### Ollama
 

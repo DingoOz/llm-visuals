@@ -196,6 +196,7 @@ fn demo_model_n(ctx_max: usize, idx: usize) -> DetectedModel {
             n_embd: p.n_embd,
             n_mtp: p.n_mtp,
             engram: None,
+            quant: None,
         }),
         // Shaped like a real file of that class: for an MoE most bytes are experts.
         tensors: Some(crate::gguf::TensorSummary {

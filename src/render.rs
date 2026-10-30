@@ -591,7 +591,11 @@ impl Renderer {
                         .map(|p| p.quantization.clone())
                         .filter(|q| !q.is_empty())
                 };
-                if let Some(q) = quant_from_path(m).or_else(ollama_quant) {
+                let config_quant = || m.gguf.as_ref().and_then(|g| g.quant.clone());
+                if let Some(q) = quant_from_path(m)
+                    .or_else(ollama_quant)
+                    .or_else(config_quant)
+                {
                     segs.push((2, vec![Span::styled(q, st(pal::TEAL))]));
                 }
                 if !m.tensor_split.is_empty() {
