@@ -28,6 +28,7 @@ mod safetensors;
 mod settings;
 mod sglang;
 mod strata;
+mod tensorfold;
 mod vision;
 mod vllm;
 
@@ -455,6 +456,55 @@ async fn poll_server(
                 delay
             };
             tokio::time::sleep(sleep).await;
+        }
+    }
+    if model.engine == "tensorfold" {
+        // TensorFold's counters move when a request ends; the Strata
+        // adapter reads that shape, live progress coming from the gauges.
+        let mut tracker = tensorfold::Tracker::default();
+        let mut adapter = strata::StrataAdapter::default();
+        let mut ctx = model.ctx_max.unwrap_or(0);
+        let mut misses = 0u32;
+        loop {
+            if ctx == 0 {
+                ctx = tensorfold::poll_context(&model.host, port, &auth)
+                    .await
+                    .unwrap_or(0);
+            }
+            if let Some(scrape) = tensorfold::poll_metrics(&model.host, port, &auth).await {
+                misses = 0;
+                let health = tensorfold::poll_health(&model.host, port, &auth).await;
+                let m = tracker.observe(&scrape, health.as_ref(), ctx);
+                let mut stats = adapter.observe(&m);
+                if let Some(sp) = m.spec {
+                    // Flash Next drafts with its MTP head; `--drafter` names
+                    // a separate draft model.
+                    stats.spec_types = if model.cmdline.contains("--drafter") {
+                        "drafter".into()
+                    } else {
+                        "mtp".into()
+                    };
+                    let _ = spec_tx.try_send((pid, sp));
+                }
+                let _ = live_tx.try_send((pid, stats));
+            } else {
+                misses = misses.saturating_add(1);
+                if misses == 3 {
+                    let denied = observe::auth_refusal(&model.host, port, &auth, "/metrics").await;
+                    let stats = LiveStats {
+                        ctx_max: ctx,
+                        auth_denied: denied,
+                        ..Default::default()
+                    };
+                    let _ = live_tx.try_send((pid, stats));
+                }
+            }
+            let delay = if misses >= 3 {
+                poll.max(Duration::from_secs(2))
+            } else {
+                poll
+            };
+            tokio::time::sleep(delay).await;
         }
     }
     if strata::is_family(&model.engine) {

@@ -19,6 +19,9 @@ pub struct GgufInfo {
     pub n_mtp: usize,
     /// Hashed n-gram memory (llama.cpp "PLE / engrams"), if the model has one.
     pub engram: Option<Engram>,
+    /// A checkpoint folder's quantization as its `config.json` states it
+    /// (`4-bit`, `FP8`); a GGUF's is in its file name.
+    pub quant: Option<String>,
 }
 
 /// An engram module: a conditional-memory table indexed by hashing the last
@@ -129,6 +132,7 @@ pub fn read_info(path: &Path) -> Result<GgufInfo, String> {
         n_embd,
         n_mtp,
         engram,
+        quant: None,
     })
 }
 

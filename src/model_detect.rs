@@ -372,7 +372,25 @@ fn hf_config_info(dir: &Path) -> Option<GgufInfo> {
         n_embd,
         n_mtp: 0,
         engram: None,
+        quant: config_quant(&v),
     })
+}
+
+/// MLX writes `quantization: {bits, mode}` (mode `affine`, or a format such
+/// as `mxfp4`); Transformers writes `quantization_config.quant_method`.
+fn config_quant(v: &serde_json::Value) -> Option<String> {
+    if let Some(q) = v.get("quantization").filter(|q| q.is_object()) {
+        let mode = q.get("mode").and_then(|m| m.as_str()).unwrap_or("affine");
+        return match q.get("bits").and_then(|b| b.as_u64()) {
+            Some(bits) if mode == "affine" => Some(format!("{bits}-bit")),
+            _ => Some(mode.to_uppercase()),
+        };
+    }
+    v.get("quantization_config")
+        .and_then(|q| q.get("quant_method"))
+        .and_then(|m| m.as_str())
+        .filter(|m| !m.is_empty())
+        .map(str::to_uppercase)
 }
 
 /// Whether a process that `looks_like_llm` flagged as vLLM is actually a
@@ -848,7 +866,8 @@ pub fn detect_models() -> Vec<DetectedModel> {
     models.sort_by_key(|m| {
         let has_model = m.path.is_some() || m.gguf.is_some();
         let engine_rank = match m.engine.as_str() {
-            "llama.cpp" | "vllm" | "sglang" | "strata" | "maya" | "ninfer" | "exllamav2" => 2,
+            "llama.cpp" | "vllm" | "sglang" | "strata" | "maya" | "ninfer" | "tensorfold"
+            | "exllamav2" => 2,
             "ollama" => 0,
             _ => 1,
         };
@@ -962,6 +981,7 @@ fn looks_like_llm(process_name: &str, cmdline: &str) -> bool {
     keys.iter().any(|k| p.contains(k))
         || c.split_whitespace().any(token_matches)
         || crate::strata::is_server(cmdline)
+        || crate::tensorfold::is_server(cmdline)
         || names_a_model(cmdline)
 }
 
@@ -1039,6 +1059,8 @@ fn engine_from(process_name: &str, cmdline: &str) -> String {
     let blob = format!("{process_name} {cmdline}").to_lowercase();
     if crate::strata::is_server(cmdline) {
         "strata".into()
+    } else if crate::tensorfold::is_server(cmdline) {
+        "tensorfold".into()
     } else if blob.contains("ninfer-serve") {
         "ninfer".into()
     } else if blob.contains("llama-server") || blob.contains("llama.cpp") {
@@ -1170,6 +1192,33 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
                     }
                 }
             }
+            // TensorFold serves the checkpoint named after `serve`: a folder
+            // or a Hugging Face repo, `--name` the served name.
+            "serve" if parsed.engine == "tensorfold" => {
+                if let Some(v) = next().filter(|v| !v.starts_with('-') && parsed.path.is_none()) {
+                    let p = PathBuf::from(&v);
+                    if parsed.name.is_empty() {
+                        parsed.name = p
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or(v.clone());
+                    }
+                    parsed.path = Some(p);
+                    i += 1;
+                }
+            }
+            "--name" | "--context" if parsed.engine == "tensorfold" => {
+                if let Some(v) = next() {
+                    if key == "--name" {
+                        parsed.name = v;
+                    } else {
+                        parsed.ctx_max = v.parse().ok();
+                    }
+                    if inline.is_none() {
+                        i += 1;
+                    }
+                }
+            }
             // vLLM takes the weights path positionally after `serve` /
             // `api-server`; there is no --model key to capture it.
             "serve" | "api-server" if parsed.engine == "vllm" => {
@@ -1264,6 +1313,9 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
     }
     if parsed.port.is_none() && parsed.engine == "sglang" {
         parsed.port = Some(30000);
+    }
+    if parsed.port.is_none() && parsed.engine == "tensorfold" {
+        parsed.port = Some(crate::tensorfold::DEFAULT_PORT);
     }
     if parsed.port.is_none() && parsed.engine == "strata" {
         parsed.port = Some(crate::strata::DEFAULT_PORT);
@@ -2029,6 +2081,13 @@ pub async fn probe_endpoint(
             if m.max_context > 0 {
                 ctx_max = Some(m.max_context);
             }
+        } else if body.contains("tensorfold:generation_tokens_total") {
+            engine = "tensorfold".to_string();
+            if model_name.is_none() {
+                if let Some(h) = crate::tensorfold::poll_health(host, port, auth).await {
+                    model_name = h.model;
+                }
+            }
         } else if body.contains("ninfer_generation_tokens_total") {
             engine = "ninfer".to_string();
             if let Some(c) = crate::ninfer::parse_metrics(&body) {
@@ -2234,6 +2293,53 @@ mod tests {
         assert_eq!(model.name, "qwen-test");
         assert_eq!(model.ctx_max, Some(8192));
         assert_eq!(model.port, Some(8080));
+    }
+
+    #[test]
+    fn tensorfold_launch_is_detected() {
+        let cmd = "/opt/tensorfold-1.1.9-linux-aarch64/bin/tensorfold-native serve \
+                   TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP --context 65536 --parallel 2";
+        assert!(super::looks_like_llm("tensorfold-nati", cmd));
+        let model = super::parse_cmdline("tensorfold-nati", cmd);
+        assert_eq!(model.engine, "tensorfold");
+        assert_eq!(model.name, "Qwen3.8-Flash-Next-MLX-4bit-MTP");
+        assert_eq!(
+            model.path,
+            Some(PathBuf::from("TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP"))
+        );
+        assert_eq!(model.ctx_max, Some(65536));
+        assert_eq!(model.port, Some(8080));
+
+        let named = super::parse_cmdline(
+            "tensorfold-nati",
+            "tensorfold-native serve /m/flash-next --name=qfn --port 9000 --host 0.0.0.0",
+        );
+        assert_eq!(named.name, "qfn");
+        assert_eq!(named.path, Some(PathBuf::from("/m/flash-next")));
+        assert_eq!(named.port, Some(9000));
+        // `pull` downloads; it serves nothing.
+        assert!(!super::looks_like_llm(
+            "tensorfold-nati",
+            "tensorfold-native pull TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP"
+        ));
+    }
+
+    #[test]
+    fn checkpoint_config_names_its_quantization() {
+        let q = |body: &str| config_quant(&serde_json::from_str(body).unwrap());
+        assert_eq!(
+            q(r#"{"quantization": {"group_size": 32, "bits": 4, "mode": "affine"}}"#).as_deref(),
+            Some("4-bit")
+        );
+        assert_eq!(
+            q(r#"{"quantization": {"group_size": 32, "bits": 4, "mode": "mxfp4"}}"#).as_deref(),
+            Some("MXFP4")
+        );
+        assert_eq!(
+            q(r#"{"quantization_config": {"quant_method": "fp8"}}"#).as_deref(),
+            Some("FP8")
+        );
+        assert_eq!(q(r#"{"torch_dtype": "bfloat16"}"#), None);
     }
 
     use super::*;
