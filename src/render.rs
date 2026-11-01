@@ -582,20 +582,7 @@ impl Renderer {
                         )],
                     ));
                 }
-                // An Ollama blob is named by its hash; the daemon knows the quant.
-                let ollama_quant = || {
-                    d.live
-                        .ollama
-                        .as_ref()
-                        .and_then(|o| o.loaded.as_ref())
-                        .map(|p| p.quantization.clone())
-                        .filter(|q| !q.is_empty())
-                };
-                let config_quant = || m.gguf.as_ref().and_then(|g| g.quant.clone());
-                if let Some(q) = quant_from_path(m)
-                    .or_else(ollama_quant)
-                    .or_else(config_quant)
-                {
+                if let Some(q) = quant_label(m, d.live) {
                     segs.push((2, vec![Span::styled(q, st(pal::TEAL))]));
                 }
                 if !m.tensor_split.is_empty() {
@@ -3676,14 +3663,25 @@ impl Renderer {
             }
         };
         let count = speeds.as_ref().map_or(1, |v| v.len());
-        lines.push(Line::from(vec![
+        // The quant keeps its own colour, as in the header; samples logged
+        // before the quant was say nothing.
+        let quant = m.quant.as_deref().map(|q| format!(" · {q}"));
+        let quant_w = quant.as_ref().map_or(0, |q| q.chars().count());
+        let mut title = vec![
             Span::styled(" model ", dim),
             Span::styled(
-                truncate(&m.model, w.saturating_sub(16)),
+                truncate(&m.model, w.saturating_sub(16 + quant_w)),
                 text.add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("  {}/{count}", sel.min(count - 1) + 1), dim),
-        ]));
+        ];
+        if let Some(q) = quant {
+            title.push(Span::styled(q, Style::default().fg(pal::c(pal::TEAL))));
+        }
+        title.push(Span::styled(
+            format!("  {}/{count}", sel.min(count - 1) + 1),
+            dim,
+        ));
+        lines.push(Line::from(fit_spans(&title, w)));
         lines.push(Line::styled(
             truncate(
                 &format!(
@@ -3699,7 +3697,10 @@ impl Renderer {
 
         // The regression baseline on this screen's own rows: the model's
         // last hour and its baseline window, both on the GPUs it has now.
-        let running = d.models.iter().find(|v| v.detected.name == m.model);
+        let running = d
+            .models
+            .iter()
+            .find(|v| v.detected.name == m.model && quant_label(v.detected, v.live) == m.quant);
         let history = running.and_then(|v| v.regression);
         let (lo, per) = (m.buckets[0].0 / CTX_GRAIN, m.step / CTX_GRAIN);
         let windows = history.map(|h| {
@@ -5759,6 +5760,22 @@ fn ollama_segments(o: &ollama::Status, busy: bool) -> Vec<(u8, Vec<Span<'static>
         ));
     }
     segs
+}
+
+/// The model's quantisation: from the file name, else the Ollama daemon (a
+/// blob is named by its hash), else the checkpoint's config.
+pub fn quant_label(m: &DetectedModel, live: &LiveStats) -> Option<String> {
+    let ollama_quant = || {
+        live.ollama
+            .as_ref()
+            .and_then(|o| o.loaded.as_ref())
+            .map(|p| p.quantization.clone())
+            .filter(|q| !q.is_empty())
+    };
+    let config_quant = || m.gguf.as_ref().and_then(|g| g.quant.clone());
+    quant_from_path(m)
+        .or_else(ollama_quant)
+        .or_else(config_quant)
 }
 
 fn quant_from_path(m: &DetectedModel) -> Option<String> {

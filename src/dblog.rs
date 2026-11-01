@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS model_samples (
     ts REAL NOT NULL, pid INTEGER NOT NULL, model TEXT NOT NULL, engine TEXT NOT NULL,
     processing INTEGER NOT NULL, decode_tps REAL NOT NULL, prefill_tps REAL NOT NULL,
     ctx_used INTEGER NOT NULL, ctx_max INTEGER NOT NULL,
-    session_decoded INTEGER NOT NULL, session_prefilled INTEGER NOT NULL);
+    session_decoded INTEGER NOT NULL, session_prefilled INTEGER NOT NULL, quant TEXT);
 CREATE TABLE IF NOT EXISTS gpu_samples (
     ts REAL NOT NULL, gpu INTEGER NOT NULL, name TEXT NOT NULL,
     util_pct REAL NOT NULL, mem_used_mb INTEGER NOT NULL, mem_total_mb INTEGER NOT NULL,
@@ -58,6 +58,28 @@ pub(crate) fn unix_now() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Adds `column` to `table` unless the table has it already.
+fn add_column(conn: &Connection, table: &str, column: &str, ty: &str) -> rusqlite::Result<()> {
+    let has = |conn: &Connection| -> rusqlite::Result<bool> {
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name = '{column}'"),
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+    };
+    if !has(conn)? {
+        if let Err(e) = conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} {ty}"), []) {
+            // Another dashboard opening the same file can add the column
+            // between the look and the ALTER; that is the outcome wanted.
+            if !has(conn)? {
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
+}
+
 impl DbLog {
     pub fn open(path: &Path, every: std::time::Duration, max_bytes: u64) -> rusqlite::Result<Self> {
         let conn = Connection::open(path)?;
@@ -67,26 +89,11 @@ impl DbLog {
         // one's commit instead of failing and switching logging off.
         conn.busy_timeout(std::time::Duration::from_millis(100))?;
         conn.execute_batch(SCHEMA)?;
-        // A log file created before memory temperature shipped still holds the
-        // 8-column gpu_samples (CREATE TABLE IF NOT EXISTS does not extend
-        // it), and the INSERT below would fail on it forever.
-        let has_mem_temp = |conn: &Connection| -> rusqlite::Result<bool> {
-            conn.query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('gpu_samples') WHERE name = 'mem_temp_c'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .map(|n| n > 0)
-        };
-        if !has_mem_temp(&conn)? {
-            if let Err(e) = conn.execute("ALTER TABLE gpu_samples ADD COLUMN mem_temp_c REAL", []) {
-                // Another dashboard opening the same file can add the column
-                // between the look and the ALTER; that is the outcome wanted.
-                if !has_mem_temp(&conn)? {
-                    return Err(e);
-                }
-            }
-        }
+        // A log file created before memory temperature or the quant shipped
+        // lacks those columns (CREATE TABLE IF NOT EXISTS does not extend a
+        // table), and the INSERTs below would fail on it forever.
+        add_column(&conn, "gpu_samples", "mem_temp_c", "REAL")?;
+        add_column(&conn, "model_samples", "quant", "TEXT")?;
         Ok(Self {
             conn,
             last: None,
@@ -135,7 +142,15 @@ impl DbLog {
     /// Call every frame; writes at most once per `every`.
     pub fn tick<'a>(
         &mut self,
-        models: impl Iterator<Item = (&'a DetectedModel, &'a PerfTracker, usize, usize)>,
+        models: impl Iterator<
+            Item = (
+                &'a DetectedModel,
+                Option<String>,
+                &'a PerfTracker,
+                usize,
+                usize,
+            ),
+        >,
         gpus: &[GpuStats],
         now: Instant,
     ) -> rusqlite::Result<()> {
@@ -145,9 +160,12 @@ impl DbLog {
         self.last = Some(now);
         let ts = unix_now();
         let tx = self.conn.transaction()?;
-        for (m, perf, ctx_used, ctx_max) in models {
+        for (m, quant, perf, ctx_used, ctx_max) in models {
             tx.execute(
-                "INSERT INTO model_samples VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                // By name, as gpu_samples below.
+                "INSERT INTO model_samples (ts, pid, model, engine, processing, decode_tps, \
+                 prefill_tps, ctx_used, ctx_max, session_decoded, session_prefilled, quant) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
                 params![
                     ts,
                     m.pid,
@@ -159,7 +177,8 @@ impl DbLog {
                     ctx_used as i64,
                     ctx_max as i64,
                     perf.session_decoded as i64,
-                    perf.session_prefilled as i64
+                    perf.session_prefilled as i64,
+                    quant
                 ],
             )?;
             let seen = self.logged.entry(m.pid).or_insert(0);
@@ -421,9 +440,11 @@ pub(crate) fn merge_grains(grains: &[(i64, f64, i64)], lo: i64, per: i64) -> Vec
     rows
 }
 
-/// Mean decode rate against context length for one model.
+/// Mean decode rate against context length for one model at one quant.
 pub struct ContextSpeed {
     pub model: String,
+    /// None for samples logged before the quant was, or with none known.
+    pub quant: Option<String>,
     pub samples: i64,
     /// Tokens covered by each bucket.
     pub step: i64,
@@ -434,37 +455,41 @@ pub struct ContextSpeed {
 
 /// Decode rate by context length, per model, from the samples taken while
 /// the model was decoding and not also prefilling (a sample straddling the
-/// two reads a partly empty window). Most-sampled model first.
+/// two reads a partly empty window). Each quant of a model is its own
+/// entry, as it runs at its own speed. Most-sampled first.
 pub fn context_speed(path: &Path) -> Result<Vec<ContextSpeed>, String> {
     let conn = open_read_only(path)?;
     // One scan of the table; the fine buckets are merged below.
-    let rows: Vec<(String, i64, f64, i64)> = conn
+    let rows: Vec<(String, Option<String>, i64, f64, i64)> = conn
         .prepare(&format!(
-            "SELECT model, ctx_used / {CTX_GRAIN}, SUM(decode_tps), COUNT(*) FROM model_samples \
-             WHERE {DECODING} GROUP BY 1, 2 ORDER BY 1, 2"
+            "SELECT model, quant, ctx_used / {CTX_GRAIN}, SUM(decode_tps), COUNT(*) \
+             FROM model_samples WHERE {DECODING} GROUP BY 1, 2, 3 ORDER BY 1, 2, 3"
         ))
         .and_then(|mut q| {
-            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-                .collect()
+            q.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })?
+            .collect()
         })
         .map_err(|e| format!("{}: {e}", path.display()))?;
     let mut out: Vec<ContextSpeed> = Vec::new();
     let mut i = 0;
     while i < rows.len() {
-        // Rows are ordered by model; `group` is one model's run.
+        // Rows are ordered by model and quant; `group` is one pair's run.
         let end = rows[i..]
             .iter()
-            .position(|r| r.0 != rows[i].0)
+            .position(|r| (&r.0, &r.1) != (&rows[i].0, &rows[i].1))
             .map_or(rows.len(), |k| i + k);
         let group = &rows[i..end];
         i = end;
-        let (lo, hi) = (group[0].1, group[group.len() - 1].1);
+        let (lo, hi) = (group[0].2, group[group.len() - 1].2);
         let per = grains_per_row(lo, hi);
-        let grains: Vec<(i64, f64, i64)> = group.iter().map(|g| (g.1, g.2, g.3)).collect();
+        let grains: Vec<(i64, f64, i64)> = group.iter().map(|g| (g.2, g.3, g.4)).collect();
         let buckets = merge_grains(&grains, lo, per);
         out.push(ContextSpeed {
             model: group[0].0.clone(),
-            samples: group.iter().map(|g| g.3).sum(),
+            quant: group[0].1.clone(),
+            samples: group.iter().map(|g| g.4).sum(),
             step: per * CTX_GRAIN,
             buckets,
         });
@@ -572,8 +597,12 @@ mod tests {
         let gpus = [crate::gpu::DemoGpu::new(0).step(0.5)];
         let now = t0 + Duration::from_millis(700);
         for _ in 0..2 {
-            log.tick(std::iter::once((&model, &perf, 110, 8192)), &gpus, now)
-                .unwrap();
+            log.tick(
+                std::iter::once((&model, Some("Q4_K_M".into()), &perf, 110, 8192)),
+                &gpus,
+                now,
+            )
+            .unwrap();
         }
         let count = |t: &str| -> i64 {
             log.conn
@@ -588,6 +617,11 @@ mod tests {
             .query_row("SELECT decoded FROM requests", [], |r| r.get(0))
             .unwrap();
         assert_eq!(decoded, 10);
+        let quant: String = log
+            .conn
+            .query_row("SELECT quant FROM model_samples", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(quant, "Q4_K_M");
 
         let sum = summarize(&path).unwrap();
         assert_eq!(
@@ -606,18 +640,24 @@ mod tests {
     }
 
     #[test]
-    fn old_log_file_gains_the_mem_temp_column() {
+    fn old_log_file_gains_the_mem_temp_and_quant_columns() {
         let path =
             std::env::temp_dir().join(format!("llm-visuals-dblog-old-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
         {
-            // A gpu_samples table exactly as pre-memory-temp builds created it.
+            // Tables exactly as pre-memory-temp builds created them.
             let old = Connection::open(&path).unwrap();
             old.execute_batch(
                 "CREATE TABLE gpu_samples (
                     ts REAL NOT NULL, gpu INTEGER NOT NULL, name TEXT NOT NULL,
                     util_pct REAL NOT NULL, mem_used_mb INTEGER NOT NULL,
-                    mem_total_mb INTEGER NOT NULL, power_w REAL NOT NULL, temp_c REAL);",
+                    mem_total_mb INTEGER NOT NULL, power_w REAL NOT NULL, temp_c REAL);
+                CREATE TABLE model_samples (
+                    ts REAL NOT NULL, pid INTEGER NOT NULL, model TEXT NOT NULL,
+                    engine TEXT NOT NULL, processing INTEGER NOT NULL,
+                    decode_tps REAL NOT NULL, prefill_tps REAL NOT NULL,
+                    ctx_used INTEGER NOT NULL, ctx_max INTEGER NOT NULL,
+                    session_decoded INTEGER NOT NULL, session_prefilled INTEGER NOT NULL);",
             )
             .unwrap();
         }
@@ -629,12 +669,24 @@ mod tests {
             temperature_memory: Some(71.0),
             ..Default::default()
         }];
-        log.tick(std::iter::empty(), &gpus, Instant::now()).unwrap();
+        let model = crate::demo::demo_models(8192, 1).remove(0);
+        let perf = PerfTracker::new();
+        log.tick(
+            std::iter::once((&model, Some("IQ2_XXS".into()), &perf, 0, 8192)),
+            &gpus,
+            Instant::now(),
+        )
+        .unwrap();
         let mem_temp: f64 = log
             .conn
             .query_row("SELECT mem_temp_c FROM gpu_samples", [], |r| r.get(0))
             .unwrap();
         assert_eq!(mem_temp, 71.0);
+        let quant: String = log
+            .conn
+            .query_row("SELECT quant FROM model_samples", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(quant, "IQ2_XXS");
         drop(log);
         for ext in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
@@ -642,35 +694,43 @@ mod tests {
     }
 
     #[test]
-    fn context_speed_buckets_decode_samples_per_model() {
+    fn context_speed_buckets_decode_samples_per_model_and_quant() {
         let path =
             std::env::temp_dir().join(format!("llm-visuals-ctxspeed-{}", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let log = DbLog::open(&path, Duration::ZERO, 0).unwrap();
-        // (model, processing, decode, prefill, ctx)
+        // (model, quant, processing, decode, prefill, ctx)
         let rows = [
-            ("a", 1, 60.0, 0.0, 1000),
-            ("a", 1, 40.0, 0.0, 1100),
-            ("a", 1, 30.0, 0.0, 9000),
-            ("a", 1, 99.0, 500.0, 1000), // still prefilling
-            ("a", 0, 99.0, 0.0, 1000),   // idle
-            ("b", 1, 20.0, 0.0, 500),
+            ("a", Some("Q4"), 1, 60.0, 0.0, 1000),
+            ("a", Some("Q4"), 1, 40.0, 0.0, 1100),
+            ("a", Some("Q4"), 1, 30.0, 0.0, 9000),
+            ("a", Some("Q4"), 1, 99.0, 500.0, 1000), // still prefilling
+            ("a", Some("Q4"), 0, 99.0, 0.0, 1000),   // idle
+            ("a", Some("Q8"), 1, 25.0, 0.0, 1000),
+            ("a", Some("Q8"), 1, 15.0, 0.0, 1000),
+            ("b", None, 1, 20.0, 0.0, 500),
         ];
-        for (m, p, d, pf, ctx) in rows {
+        for (m, q, p, d, pf, ctx) in rows {
             log.conn
                 .execute(
-                    "INSERT INTO model_samples VALUES (0,1,?1,'x',?2,?3,?4,?5,8192,0,0)",
-                    params![m, p, d, pf, ctx],
+                    "INSERT INTO model_samples VALUES (0,1,?1,'x',?2,?3,?4,?5,8192,0,0,?6)",
+                    params![m, p, d, pf, ctx, q],
                 )
                 .unwrap();
         }
         let got = context_speed(&path).unwrap();
-        assert_eq!(got.len(), 2);
-        assert_eq!((got[0].model.as_str(), got[0].samples), ("a", 3));
+        let names: Vec<_> = got
+            .iter()
+            .map(|m| (m.model.as_str(), m.quant.as_deref()))
+            .collect();
+        assert_eq!(names, [("a", Some("Q4")), ("a", Some("Q8")), ("b", None)]);
+        assert_eq!(got[0].samples, 3);
         // 1000..9000 in ≤ 13 rows of whole 256-token grains.
         assert_eq!(got[0].step, 768);
         assert_eq!(got[0].buckets, vec![(768, 50.0, 2), (8448, 30.0, 1)]);
-        assert_eq!(got[1].buckets, vec![(256, 20.0, 1)]);
+        // The other quant's samples stay out of the first one's rows.
+        assert_eq!(got[1].buckets, vec![(768, 20.0, 2)]);
+        assert_eq!(got[2].buckets, vec![(256, 20.0, 1)]);
         drop(log);
         for ext in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
@@ -696,7 +756,7 @@ mod tests {
         let gpus = [crate::gpu::DemoGpu::new(0).step(0.5)];
         let now = Instant::now();
         for _ in 0..3000 {
-            log.tick(std::iter::once((&model, &perf, 0, 8192)), &gpus, now)
+            log.tick(std::iter::once((&model, None, &perf, 0, 8192)), &gpus, now)
                 .unwrap();
         }
         assert!(log.used_bytes().unwrap() <= cap);

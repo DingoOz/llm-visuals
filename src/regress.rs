@@ -29,9 +29,11 @@ const BASELINE_REREAD_SECS: f64 = 3600.0;
 /// the cards logged within the same ten minutes.
 const SPAN_SECS: f64 = 600.0;
 
-/// One model as the log names it. The engine is part of the key: the same
-/// GGUF under llama.cpp and under Strata are different programs.
-pub type ModelKey = (String, String);
+/// One model as the log names it: `(model, engine, quant)`. The engine is
+/// part of the key, as the same GGUF under llama.cpp and under Strata are
+/// different programs; so is the quant ("" when none is known), as each
+/// quant of a model runs at its own speed.
+pub type ModelKey = (String, String, String);
 
 /// `(context grain, sum of decode tok/s, samples)`, ascending by grain;
 /// a grain is `CTX_GRAIN` tokens.
@@ -160,20 +162,22 @@ fn gpu_sets(conn: &Connection, from: i64, to: i64) -> rusqlite::Result<GpuSets> 
     Ok(sets)
 }
 
-/// `(model, engine)` → `(span, grain, sum, n)` ascending by span then grain.
+/// `(model, engine, quant)` → `(span, grain, sum, n)` ascending by span then
+/// grain.
 type SpanGrains = HashMap<ModelKey, Vec<(i64, i64, f64, i64)>>;
 
 fn span_grains(conn: &Connection, from: i64, to: i64) -> rusqlite::Result<SpanGrains> {
     let mut out = SpanGrains::new();
     let mut q = conn.prepare(&format!(
-        "SELECT model, engine, CAST(ts / {SPAN_SECS} AS INTEGER), ctx_used / {CTX_GRAIN}, \
-         SUM(decode_tps), COUNT(*) FROM model_samples \
-         WHERE rowid >= ?1 AND rowid < ?2 AND {DECODING} GROUP BY 1, 2, 3, 4 ORDER BY 1, 2, 3, 4"
+        "SELECT model, engine, COALESCE(quant, ''), CAST(ts / {SPAN_SECS} AS INTEGER), \
+         ctx_used / {CTX_GRAIN}, SUM(decode_tps), COUNT(*) FROM model_samples \
+         WHERE rowid >= ?1 AND rowid < ?2 AND {DECODING} \
+         GROUP BY 1, 2, 3, 4, 5 ORDER BY 1, 2, 3, 4, 5"
     ))?;
     let rows = q.query_map([from, to], |r| {
         Ok((
-            (r.get(0)?, r.get(1)?),
-            (r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?),
+            (r.get(0)?, r.get(1)?, r.get(2)?),
+            (r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?),
         ))
     })?;
     for row in rows {
@@ -365,7 +369,7 @@ mod tests {
         let day = 86_400.0;
         let put = |ts: f64, model: &str, tps: f64, ctx: i64, gpus: &[&str]| {
             conn.execute(
-                "INSERT INTO model_samples VALUES (?1,1,?2,'llama.cpp',1,?3,0,?4,8192,0,0)",
+                "INSERT INTO model_samples VALUES (?1,1,?2,'llama.cpp',1,?3,0,?4,8192,0,0,'Q4')",
                 params![ts, model, tps, ctx],
             )
             .unwrap();
@@ -397,10 +401,16 @@ mod tests {
         for i in 0..40 {
             put(now - 600.0 + i as f64, "m", 40.0, 900, &["A", "B"]);
         }
-        let key = ("m".to_string(), "llama.cpp".to_string());
-        let other = ("m".to_string(), "vllm".to_string());
+        let key = |engine: &str, quant: &str| ("m".to_string(), engine.into(), quant.into());
+        let (other, requant) = (key("vllm", "Q4"), key("llama.cpp", "Q8"));
+        let key = key("llama.cpp", "Q4");
         let got = Reader::default()
-            .read(&path, now, 7, &[key.clone(), other.clone()])
+            .read(
+                &path,
+                now,
+                7,
+                &[key.clone(), other.clone(), requant.clone()],
+            )
             .unwrap();
         let h = &got[&key];
         assert_eq!(h.base, vec![(3, 500.0, 10)]);
@@ -408,6 +418,7 @@ mod tests {
         let c = h.compare().unwrap();
         assert!((c.change + 0.2).abs() < 1e-9, "{c:?}");
         assert!(got[&other].cur.is_empty());
+        assert!(got[&requant].cur.is_empty() && got[&requant].base.is_empty());
         drop(log);
         for ext in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{ext}", path.display()));
