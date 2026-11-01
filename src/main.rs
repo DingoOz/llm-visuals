@@ -153,9 +153,15 @@ impl ModelSlot {
         self.num_heads = self.model.n_heads();
     }
 
+    /// The quant the header shows, which the log records with each sample.
+    fn quant(&self) -> Option<String> {
+        render::quant_label(&self.model, &self.live)
+    }
+
     /// How the log names this model.
     fn log_key(&self) -> regress::ModelKey {
-        (self.model.name.clone(), self.model.engine.clone())
+        let quant = self.quant().unwrap_or_default();
+        (self.model.name.clone(), self.model.engine.clone(), quant)
     }
 
     fn view(&self) -> ModelView<'_> {
@@ -1275,12 +1281,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('B') if bench_run.is_some() => bench_open = true,
                         KeyCode::Char('c') => {
                             let speeds = read_ctx(&args);
-                            // Open on the focused model when it has samples.
-                            let name = slots.get(focus).map(|s| s.model.name.as_str());
+                            // Open on the focused model when it has samples,
+                            // at the quant it runs now.
+                            let focused =
+                                slots.get(focus).map(|s| (s.model.name.as_str(), s.quant()));
                             let sel = speeds
                                 .as_ref()
                                 .ok()
-                                .and_then(|v| v.iter().position(|m| Some(m.model.as_str()) == name))
+                                .and_then(|v| {
+                                    let (name, quant) = focused?;
+                                    let named = |m: &&dblog::ContextSpeed| m.model == name;
+                                    v.iter()
+                                        .position(|m| named(&m) && m.quant == quant)
+                                        .or_else(|| v.iter().position(|m| named(&m)))
+                                })
                                 .unwrap_or(0);
                             ctx_view = Some((speeds, sel));
                         }
@@ -1716,11 +1730,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Err(e) => regress_err = Some(e),
             }
         }
-        let models_changed = slots.len() != regress_keys.len()
-            || slots
-                .iter()
-                .zip(&regress_keys)
-                .any(|(s, k)| s.model.name != k.0 || s.model.engine != k.1);
+        // The quant counts too: Ollama's is known only once the daemon answers.
+        let models_changed = !slots
+            .iter()
+            .map(ModelSlot::log_key)
+            .eq(regress_keys.iter().cloned());
         let regress_now =
             regress_reader.is_some() && !slots.is_empty() && (now >= regress_due || models_changed);
         // Only the file this dashboard writes holds this session's samples.
@@ -1790,7 +1804,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(log) = db.as_mut() {
             let rows = slots
                 .iter()
-                .map(|s| (&s.model, &s.perf, s.live.ctx_used(), s.ctx_max));
+                .map(|s| (&s.model, s.quant(), &s.perf, s.live.ctx_used(), s.ctx_max));
             if let Err(e) = log.tick(rows, &latest_gpu, now) {
                 // Keep the dashboard up; stop writing and say why.
                 status = format!("--log-db stopped: {e}");

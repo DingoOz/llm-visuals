@@ -990,7 +990,8 @@ mod tests {
 
     fn model_row(c: &Connection, ts: f64, busy: bool, ctx: i64, dec: i64, pre: i64) {
         c.execute(
-            "INSERT INTO model_samples VALUES (?1, 77, 'm', 'llama.cpp', ?2, 0, 0, ?3, 8192, ?4, ?5)",
+            "INSERT INTO model_samples VALUES \
+             (?1, 77, 'm', 'llama.cpp', ?2, 0, 0, ?3, 8192, ?4, ?5, NULL)",
             rusqlite::params![ts, busy, ctx, dec, pre],
         )
         .unwrap();

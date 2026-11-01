@@ -754,7 +754,7 @@ for anything else.
 | `r` | rescan for running servers |
 | `s` | settings screen (shows the version): change launch options, apply them now or save them as the default |
 | `l` | log viewer: per-model totals and the latest requests from the SQLite log (`r` refreshes) |
-| `c` | decode speed vs context length from the SQLite log, one model at a time (`←` `→` switch model, `r` refreshes) |
+| `c` | decode speed vs context length from the SQLite log, one model and quant at a time (`←` `→` switch model, `r` refreshes) |
 | `B` | the `--bench` results table (opens by itself when the run ends) |
 | `q` / `Esc` | quit |
 
@@ -1124,7 +1124,8 @@ history. If the default location cannot be opened, the dashboard keeps
 running without logging; an explicit path that fails is an error.
 
 Three tables are written (timestamps are Unix seconds):
-`model_samples` (decode/prefill tok/s, context fill, session totals per model),
+`model_samples` (decode/prefill tok/s, context fill, session totals and quant
+per model),
 `gpu_samples` (utilisation, VRAM, power, die and memory temperature per card)
 and `requests` (one row per finished request: tokens, TTFT, duration, average
 rates). `--bench` adds `bench_runs` (tag, start, model, engine, GPUs,
@@ -1140,11 +1141,14 @@ covered, per-model request totals with average decode rate and TTFT, and the
 newest requests. With logging off it shows the default file from earlier
 sessions. Press `c` to see how decode speed falls as the context fills: the mean
 decode tok/s of every logged sample, grouped into about a dozen context-length
-ranges per model, with the change from the shortest to the longest range. Only
+ranges per model, with the change from the shortest to the longest range.
+Each quant of a model is its own entry, named `model · Q4_K_M`, since a Q8 and
+a Q4 of the same weights decode at different speeds; samples logged before the
+quant was recorded show under the bare name. Only
 samples taken while the model was decoding count; ones that overlap a prefill
 are left out, since their one-second window is partly empty. Ranges with fewer
-than five samples are dimmed. It opens on the focused model; `←` / `→` switch
-to the others in the file.
+than five samples are dimmed. It opens on the focused model at the quant it
+runs now; `←` / `→` switch to the others in the file.
 
 ### Regression flag
 
@@ -1166,7 +1170,8 @@ The comparison is the model against itself, from the log:
   five samples on each side are compared. The two means are weighted by
   where the model is working now, and no verdict is given under 30 current
   samples (about half a minute of decoding at the default `--log-every`).
-- **Same model, same cards.** A model is its name and engine, as logged.
+- **Same model, same cards.** A model is its name, engine and quant, as
+  logged.
   Samples carry no GPU of their own, so the baseline keeps only the
   ten-minute spans whose logged GPUs (index and name) match the ones the
   model has now; a swapped card starts a fresh baseline rather than raising
