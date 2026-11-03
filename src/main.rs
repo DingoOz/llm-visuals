@@ -12,6 +12,8 @@ mod gguf;
 mod gpu;
 mod host;
 mod landscape;
+mod layers;
+mod layers_view;
 mod llm;
 mod model_detect;
 mod ninfer;
@@ -787,6 +789,40 @@ fn status_for(slots: &[ModelSlot], rescanned: bool) -> String {
     }
 }
 
+/// `--layers MODEL.gguf`: the GGUF's shape, one real forward pass through
+/// the probe, then the 3D replay (or, with `--layers-dump`, a table).
+fn run_layers(args: &Args, model: &std::path::Path) -> Result<(), String> {
+    let topo = layers::Topology::read(model).map_err(|e| format!("{}: {e}", model.display()))?;
+    let probe = layers::find_probe(args.probe.as_deref()).ok_or_else(|| {
+        format!(
+            "{} not found. Build it against your llama.cpp checkout:\n  \
+             scripts/build-probe.sh /path/to/llama.cpp\n\
+             then pass --probe PATH, set LLM_VISUALS_PROBE, or put it on PATH.",
+            layers::PROBE_BIN
+        )
+    })?;
+    eprintln!(
+        "llm-visuals: {} ({}, {} blocks) — running {:?} through {} ...",
+        topo.name,
+        topo.arch,
+        topo.blocks.len(),
+        args.prompt,
+        probe.display()
+    );
+    let run = layers::run_probe(&probe, model, &args.prompt, args.ngl, false)?;
+    if args.layers_dump {
+        let stages = layers::build_stages(&topo, &run);
+        print!("{}", layers::dump(&topo, &run, &stages, layers::Metric::L2));
+        return Ok(());
+    }
+    let file = model
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let app = layers_view::App::new(topo, run, args.delay.max(0.04) / 2.0, file);
+    layers_view::run(app).map_err(|e| e.to_string())
+}
+
 /// Override rules the server accepted but this dashboard cannot read: the
 /// tensors they place are shown by `--tensor-split` share instead, so the
 /// CPU-side figures may be off and the status line says which rule.
@@ -818,6 +854,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let launch = settings::launch();
     let mut args = launch.args.clone();
+    if let Some(model) = args.layers.clone() {
+        colors::init_color_mode(&args.color);
+        colors::set_chrome(colors::get_theme(&args.theme).chrome);
+        return run_layers(&args, &model).map_err(Into::into);
+    }
     // `--bench-report`: a table on stdout, no terminal takeover.
     if let Some(tags) = &args.bench_report {
         let path = args
