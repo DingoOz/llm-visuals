@@ -148,6 +148,28 @@ pub struct Args {
     #[arg(long, default_value_t = 1024)]
     pub log_db_max_mb: u64,
 
+    /// Layer view: run --prompt once through this GGUF with llama.cpp and
+    /// replay the residual stream layer by layer in 3D (needs llm-visuals-probe)
+    #[arg(long, value_name = "GGUF")]
+    pub layers: Option<PathBuf>,
+
+    /// Layer view: seconds the replay spends on each block
+    #[arg(long, default_value_t = 0.5, value_name = "SECS")]
+    pub delay: f32,
+
+    /// Layer view: path to the llm-visuals-probe binary
+    /// (default: $LLM_VISUALS_PROBE, beside this binary, then PATH)
+    #[arg(long, value_name = "PATH")]
+    pub probe: Option<PathBuf>,
+
+    /// Layer view: layers to offload to the GPU (-1 = all, 0 = CPU only)
+    #[arg(long, default_value_t = -1, allow_hyphen_values = true)]
+    pub ngl: i32,
+
+    /// Layer view: print the per-stage table instead of opening the 3D view
+    #[arg(long)]
+    pub layers_dump: bool,
+
     /// Print the version and exit
     #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
     version: Option<bool>,

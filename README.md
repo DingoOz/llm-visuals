@@ -445,6 +445,59 @@ CPU), the view shows the GPUs under 40 % busy, memory controllers at 24 %,
 and flags RAM as the bound at under 3 tok/s, which is what a CPU-offloaded
 layer set feels like.
 
+### Layer replay (`--layers`)
+
+```sh
+scripts/build-probe.sh ~/llama.cpp        # once: builds target/llm-visuals-probe
+llm-visuals --layers model.gguf --prompt "The capital of France is"
+```
+
+A separate mode that needs no running server. It loads a GGUF through your
+own llama.cpp build (CUDA, Metal, whatever it was built with), runs the prompt
+through it once, and replays that forward pass at human speed in a 3D view
+you can turn. The stages sit on a helix, from the token embedding at the
+bottom to the LM head at the top, and a pulse carries the residual stream up
+through every block:
+
+- **Nodes** are what each sublayer *wrote* into the residual stream (the
+  difference between consecutive captures), so they can be compared with
+  each other. Colour gives the kind, read from the GGUF tensor table: cyan
+  for attention, violet for linear attention (gated delta-net, Mamba, RWKV),
+  amber for a dense FFN, magenta for a mixture of experts.
+- **Edges** are the stream itself, brighter as its norm grows.
+- **The head** shows the top-1 probability, and the side panel lists the
+  model's real next-token guesses at the focused position.
+- **The strip** under the picture is the whole pass as bars, with the pulse
+  marked.
+
+The numbers come from llama.cpp's eval callback, the hook its own
+`eval-callback` example uses, so every architecture llama.cpp runs works,
+hybrids included. A stage the probe could not see is drawn as a hollow ring
+and says why. These are a vision tower when the prompt is text, an MTP draft
+head (not part of the main pass), and a block whose mid-point the
+architecture names differently (drawn as one whole-block node, not a guessed
+split).
+
+| Key | Action |
+|---|---|
+| `space` | play / pause |
+| `←` `→` (`,` `.`) | step one stage |
+| `Home` `End` | first / last stage |
+| `w` `a` `s` `d`, `↑` `↓` | turn and tilt |
+| `+` `-` | zoom |
+| `[` `]` | slower / faster |
+| `t` `T` | read the numbers at the next / previous prompt token, or the mean |
+| `m` | metric: L2 norm, mean \|x\|, max \|x\| |
+| `g` | log or linear brightness |
+| `o` | auto-orbit |
+| `r` | reset the camera |
+| `l` | loop |
+| `q` | quit |
+
+`--layers-dump` prints the same pass as a table instead. `--delay` sets the
+seconds per block (default 0.5), and `--ngl` the layers offloaded (default
+-1, all). The prompt is capped at 64 tokens.
+
 ### Requests
 
 One row per server task: prompt, cached and generated tokens, average prefill
@@ -688,6 +741,12 @@ concurrent request traces.
 --log-db auto|off|FILE  SQLite log of samples and requests (default: auto)
 --log-every 1.0      seconds between --log-db sample rows
 --log-db-max-mb 1024 size cap for --log-db; oldest rows are dropped (0 = none)
+--layers GGUF        layer replay: one real forward pass, replayed in 3D
+--prompt TEXT        the prompt --layers runs (default "Once upon a time")
+--delay 0.5          --layers: seconds per block
+--ngl -1             --layers: layers offloaded to the GPU (-1 = all)
+--probe PATH         --layers: llm-visuals-probe binary (default: beside this one, then PATH)
+--layers-dump        --layers: print the per-stage table and exit
 --version, -v        print the version and exit
 ```
 
@@ -892,6 +951,8 @@ src/
 ├── host.rs          /proc disk, faults, RSS; in-process NVML PCIe (dmon fallback)
 ├── fade.rs          smoothing, expert heat and usage
 ├── landscape.rs     the expert landscape: camera, projection, rasteriser
+├── layers.rs        --layers: GGUF topology, probe output, stages, playback
+├── layers_view.rs   --layers: helix camera, rasteriser, screen and keys
 ├── observe.rs       /slots, /metrics, /experts parsers
 ├── gpu.rs           NVIDIA/AMD/Intel collectors, demo GPUs
 ├── nvml.rs          in-process NVML driver bindings & PCIe throughput
@@ -903,6 +964,7 @@ src/
 ├── colors.rs        palette, gradients, truecolor/256 gating
 └── llm/             optional HF transformers attention bridge
 patches/             llama.cpp patch for GET /experts
+probe/               llm-visuals-probe, the llama.cpp forward-pass helper
 docs/                architecture, roadmap, screenshots
 ```
 

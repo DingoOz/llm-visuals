@@ -233,9 +233,58 @@ pub fn read_tensor_summary(path: &Path) -> Result<TensorSummary, String> {
     Ok(out)
 }
 
+/// Every tensor name in a GGUF, over all shards of a split file. Walks the
+/// whole header, tokenizer arrays included, so it costs what
+/// `read_tensor_summary` does.
+pub fn read_tensor_names(path: &Path) -> Result<Vec<String>, String> {
+    let mut names = Vec::new();
+    for shard in split_shards(path) {
+        let (table, _) = read_tensor_table(&shard)?;
+        names.extend(table.into_iter().map(|(name, _)| name));
+    }
+    Ok(names)
+}
+
 /// Walk the whole header (including tokenizer arrays) to reach the tensor
 /// info table. Takes ~100 ms on a 25 GB file; call it once per detection.
 fn read_tensor_summary_one(path: &Path) -> Result<TensorSummary, String> {
+    let (mut tensors, data_len) = read_tensor_table(path)?;
+    tensors.sort_by_key(|(_, off)| *off);
+    let mut out = TensorSummary {
+        n_tensors: tensors.len(),
+        ..Default::default()
+    };
+    for i in 0..tensors.len() {
+        let (name, off) = &tensors[i];
+        let next = tensors.get(i + 1).map(|(_, o)| *o).unwrap_or(data_len);
+        let size = next.saturating_sub(*off);
+        out.total_bytes += size;
+        if name.contains("_exps") {
+            out.expert_bytes += size;
+        }
+        if name.starts_with("token_embd") {
+            out.embd_bytes += size;
+        }
+        if name.starts_with("per_layer_token_embd") {
+            out.engram_bytes += size;
+        }
+        if let Some(rest) = name.strip_prefix("blk.") {
+            if let Some(n) = rest.split('.').next().and_then(|n| n.parse::<usize>().ok()) {
+                if n < 4096 {
+                    if out.block_bytes.len() <= n {
+                        out.block_bytes.resize(n + 1, 0);
+                    }
+                    out.block_bytes[n] += size;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The tensor info table of one GGUF file: (name, data offset) per tensor,
+/// in file order, and the length of the data section.
+fn read_tensor_table(path: &Path) -> Result<(Vec<(String, u64)>, u64), String> {
     let file_len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
     let mut f = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mut magic = [0u8; 4];
@@ -278,38 +327,7 @@ fn read_tensor_summary_one(path: &Path) -> Result<TensorSummary, String> {
     }
     let header_end = f.stream_position().map_err(|e| e.to_string())?;
     let data_start = (header_end + alignment - 1) / alignment * alignment;
-    let data_len = file_len.saturating_sub(data_start);
-    tensors.sort_by_key(|(_, off)| *off);
-    let mut out = TensorSummary {
-        n_tensors: tensors.len(),
-        ..Default::default()
-    };
-    for i in 0..tensors.len() {
-        let (name, off) = &tensors[i];
-        let next = tensors.get(i + 1).map(|(_, o)| *o).unwrap_or(data_len);
-        let size = next.saturating_sub(*off);
-        out.total_bytes += size;
-        if name.contains("_exps") {
-            out.expert_bytes += size;
-        }
-        if name.starts_with("token_embd") {
-            out.embd_bytes += size;
-        }
-        if name.starts_with("per_layer_token_embd") {
-            out.engram_bytes += size;
-        }
-        if let Some(rest) = name.strip_prefix("blk.") {
-            if let Some(n) = rest.split('.').next().and_then(|n| n.parse::<usize>().ok()) {
-                if n < 4096 {
-                    if out.block_bytes.len() <= n {
-                        out.block_bytes.resize(n + 1, 0);
-                    }
-                    out.block_bytes[n] += size;
-                }
-            }
-        }
-    }
-    Ok(out)
+    Ok((tensors, file_len.saturating_sub(data_start)))
 }
 
 #[derive(Debug, Clone)]
