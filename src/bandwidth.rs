@@ -27,6 +27,9 @@ pub struct Verdict {
 /// Build the weight layout from the detected model and current VRAM use.
 /// Weights on a GPU are estimated as the file's `--tensor-split` share,
 /// clamped to what the card actually holds; the remainder is CPU-side.
+/// Tensors llama.cpp's `-ot` / `--cpu-moe` rules placed are taken as placed:
+/// the ones in RAM are CPU-side outright, the ones pinned to a card join
+/// that card's share before the clamp.
 pub fn weight_layout(detected: Option<&DetectedModel>, gpus: &[GpuStats]) -> WeightLayout {
     let Some(m) = detected else {
         return WeightLayout::default();
@@ -44,6 +47,9 @@ pub fn weight_layout(detected: Option<&DetectedModel>, gpus: &[GpuStats]) -> Wei
         .unwrap_or((0, 0));
     let total = t.total_bytes;
     let active = t.active_bytes_per_token(n_exp, k);
+    let rules = m.offload.as_ref().filter(|o| o.n_rules > 0);
+    let mut cpu_by_rule = 0;
+    let mut cpu_active_bytes = None;
     // A unified part has no VRAM that weights could fail to fit in: the
     // pool is the GPU, and whatever the server did not report as resident
     // (file-offloaded lookup tables) is not a CPU-side layer either.
@@ -53,12 +59,23 @@ pub fn weight_layout(detected: Option<&DetectedModel>, gpus: &[GpuStats]) -> Wei
     // is llama.cpp's partial offload; it shares the file across every card
     // on the host, so a server pinned to one card of two would be told that
     // the other card's share is in RAM, and the verdict would blame RAM.
+    let mut gpu_bytes = Vec::new();
     let cpu_bytes = if m.n_gpu_layers == Some(0) || gpus.is_empty() {
         total
     } else if t.estimated || gpus.iter().all(|g| g.unified) {
+        // Sharded evenly over the server's own cards (all of them when the
+        // detector could not tell which).
+        let mine: Vec<u32> = gpus
+            .iter()
+            .map(|g| g.index)
+            .filter(|i| m.gpu_indices.is_empty() || m.gpu_indices.contains(i))
+            .collect();
+        let n = mine.len().max(1) as u64;
+        gpu_bytes = mine.into_iter().map(|i| (i, total / n)).collect();
         0
     } else {
         let split_sum: f32 = m.tensor_split.iter().copied().sum::<f32>().max(1.0);
+        let shared = rules.map_or(total, |o| o.split_bytes);
         let mut on_gpu = 0u64;
         for g in gpus {
             let i = g.index as usize;
@@ -67,18 +84,50 @@ pub fn weight_layout(detected: Option<&DetectedModel>, gpus: &[GpuStats]) -> Wei
             } else {
                 m.tensor_split.get(i).copied().unwrap_or(0.0) / split_sum
             };
-            let want = (total as f64 * share as f64) as u64;
-            on_gpu += want.min(g.mem_used_mb * 1024 * 1024);
+            let pinned = rules.map_or(0, |o| o.pinned_on(g.index));
+            let want = (shared as f64 * share as f64) as u64 + pinned;
+            let held = want.min(g.mem_used_mb * 1024 * 1024);
+            gpu_bytes.push((g.index, held));
+            on_gpu += held;
         }
-        total.saturating_sub(on_gpu)
+        let cpu = total.saturating_sub(on_gpu);
+        if let Some(o) = rules {
+            cpu_by_rule = o.cpu_bytes.min(cpu);
+            // What the cards could not hold on top of the rules' share is
+            // read like the rest of the model, at its active fraction.
+            let spill = cpu - cpu_by_rule;
+            let rest_total = total.saturating_sub(o.cpu_bytes);
+            let rest_active = active.saturating_sub(o.cpu_active_bytes);
+            let spill_active = if rest_total == 0 {
+                0
+            } else {
+                (spill as f64 * rest_active as f64 / rest_total as f64) as u64
+            };
+            cpu_active_bytes = Some(o.cpu_active_bytes + spill_active);
+        }
+        cpu
     };
     WeightLayout {
         known: true,
         total_bytes: total,
         active_bytes: active,
         cpu_bytes,
+        cpu_by_rule,
+        cpu_active_bytes,
         ubatch: ubatch_from(&m.cmdline),
+        gpu_bytes,
+        // vLLM and SGLang shard by tensor parallelism; llama.cpp splits by
+        // layer unless told to split rows.
+        parallel: t.estimated || split_mode_row(&m.cmdline),
     }
+}
+
+fn split_mode_row(cmdline: &str) -> bool {
+    let toks: Vec<&str> = cmdline.split_whitespace().collect();
+    toks.iter().enumerate().any(|(i, t)| {
+        ((*t == "--split-mode" || *t == "-sm") && toks.get(i + 1) == Some(&"row"))
+            || *t == "--split-mode=row"
+    })
 }
 
 fn ubatch_from(cmdline: &str) -> usize {
@@ -99,9 +148,17 @@ fn ubatch_from(cmdline: &str) -> usize {
     512
 }
 
+/// Estimated VRAM weight stream, as a fraction of the cards' theoretical
+/// peak, past which decode is named bandwidth bound. Decode matmuls reach
+/// roughly 60–85 % of the datasheet figure in practice, so 60 % is already
+/// most of the headroom there is; the stream itself is an estimate (bytes
+/// per step × steps), which the verdict says.
+pub const VRAM_PEAK_BOUND: f32 = 0.6;
+
 /// Thresholds are fractions of each stage's scale, chosen so a stage is only
 /// named when it is plainly busy: a saturated link, a memory controller past
-/// three quarters, a disk that is actually being read.
+/// three quarters, a weight stream past `VRAM_PEAK_BOUND` of the cards' peak,
+/// a disk that is actually being read.
 pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
     let bw = &p.bw;
     let max_mem_busy = bw.vram_busy.iter().map(|m| m.value).fold(0.0f32, f32::max);
@@ -138,6 +195,11 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
     // memory-controller counter: a zero from them is an absent sensor, not a
     // free bus, so neither may decide the verdict there.
     let unified = gpus.iter().any(|g| g.unified);
+    // Estimated weight stream against the ceiling the cards' peaks allow.
+    let vram_peak = bw
+        .vram_peak_gb_s
+        .filter(|_| !unified && bw.layout.known)
+        .map(|peak| (bw.vram_gb_s, peak, bw.vram_gb_s / peak));
 
     match p.phase {
         Phase::Idle => {
@@ -235,6 +297,16 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
                     ),
                 };
             }
+            if let Some((gb_s, peak, frac)) = vram_peak.filter(|v| v.2 >= VRAM_PEAK_BOUND) {
+                return Verdict {
+                    stage: Some(StageId::Vram),
+                    headline: "VRAM bandwidth bound: weights stream near the cards' peak".into(),
+                    detail: format!(
+                        "~{gb_s:.0} of {peak:.0} GB/s est ({:.0}% of peak; decode kernels top out near 80%) — a smaller quant is faster",
+                        frac * 100.0
+                    ),
+                };
+            }
             if cpu_side && max_gpu_util < 60.0 {
                 return Verdict {
                     stage: Some(StageId::Ram),
@@ -274,9 +346,12 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
                     )
                 } else {
                     format!(
-                        "GPU {:.0}%, memory {:.0}%, PCIe {:.0}% — latency, sampling or host overhead between tokens",
+                        "GPU {:.0}%, memory {:.0}%{}, PCIe {:.0}% — latency, sampling or host overhead between tokens",
                         max_gpu_util,
                         max_mem_busy,
+                        vram_peak
+                            .map(|v| format!(" ({:.0}% of peak est)", v.2 * 100.0))
+                            .unwrap_or_default(),
                         pcie_frac * 100.0
                     )
                 },
@@ -352,6 +427,86 @@ mod tests {
         assert!(v.detail.contains("C2C"), "{}", v.detail);
     }
 
+    fn all_in_vram(bytes: u64) -> WeightLayout {
+        WeightLayout {
+            known: true,
+            total_bytes: bytes,
+            active_bytes: bytes,
+            gpu_bytes: vec![(0, bytes)],
+            ubatch: 512,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn vram_bound_when_the_stream_nears_the_cards_peak() {
+        // 10 tok/s × 40 GB per token = 400 GB/s against a 549 GB/s P100:
+        // 73 % of peak, though the controller counter reads only 50 %.
+        let (mut p, now) = decoding();
+        let mut g = gpu(70.0, 50.0, 11_000);
+        g.mem_peak_gb_s = Some(549.0);
+        let g = vec![g];
+        p.observe_gpu(&g, now);
+        p.decode_tps_smooth = 10.0;
+        p.tick_bandwidth(&all_in_vram(40_000_000_000), now, 0.2);
+        assert_eq!(p.bw.vram_peak_gb_s, Some(549.0));
+        let v = assess(&p, &g);
+        assert_eq!(v.stage, Some(StageId::Vram), "{}", v.headline);
+        assert!(v.detail.contains("400 of 549 GB/s"), "{}", v.detail);
+        // Well under the peak the rule stays quiet, and the catch-all says
+        // how far under.
+        p.tick_bandwidth(&all_in_vram(10_000_000_000), now, 0.2);
+        let v = assess(&p, &g);
+        assert_eq!(v.stage, None);
+        assert!(v.detail.contains("(18% of peak est)"), "{}", v.detail);
+    }
+
+    #[test]
+    fn no_peak_no_bandwidth_verdict() {
+        // The same stream on a card whose peak is unknown is not judged.
+        let (mut p, now) = decoding();
+        let g = vec![gpu(70.0, 50.0, 11_000)];
+        p.observe_gpu(&g, now);
+        p.decode_tps_smooth = 10.0;
+        p.tick_bandwidth(&all_in_vram(40_000_000_000), now, 0.2);
+        assert_eq!(p.bw.vram_peak_gb_s, None);
+        let v = assess(&p, &g);
+        assert_eq!(v.stage, None);
+        assert!(!v.detail.contains("peak"), "{}", v.detail);
+    }
+
+    #[test]
+    fn layout_records_each_cards_share_and_the_split_mode() {
+        let mut m = crate::demo::demo_models(4096, 1).remove(0);
+        m.tensor_split = vec![3.0, 1.0];
+        m.tensors = Some(crate::gguf::TensorSummary {
+            total_bytes: 8_000_000_000,
+            n_tensors: 1,
+            ..Default::default()
+        });
+        m.cmdline = "llama-server -m x.gguf".into();
+        let gpus = vec![
+            gpu(0.0, 0.0, 20_000),
+            GpuStats {
+                index: 1,
+                ..gpu(0.0, 0.0, 20_000)
+            },
+        ];
+        let l = weight_layout(Some(&m), &gpus);
+        assert_eq!(l.gpu_bytes, vec![(0, 6_000_000_000), (1, 2_000_000_000)]);
+        assert!(!l.parallel);
+        m.cmdline = "llama-server -m x.gguf -sm row".into();
+        assert!(weight_layout(Some(&m), &gpus).parallel);
+        m.cmdline = "llama-server -m x.gguf --split-mode=row".into();
+        assert!(weight_layout(Some(&m), &gpus).parallel);
+        // A safetensors server shards evenly over its own cards, at once.
+        m.tensors.as_mut().unwrap().estimated = true;
+        m.gpu_indices = vec![1];
+        let l = weight_layout(Some(&m), &gpus);
+        assert_eq!(l.gpu_bytes, vec![(1, 8_000_000_000)]);
+        assert!(l.parallel);
+    }
+
     #[test]
     fn disk_wins_over_everything() {
         let (mut p, now) = decoding();
@@ -377,6 +532,7 @@ mod tests {
             active_bytes: 24_000_000_000,
             cpu_bytes: 6_000_000_000,
             ubatch: 512,
+            ..Default::default()
         };
         p.tick_bandwidth(&layout, now, 0.2);
         let v = assess(&p, &g);
@@ -413,6 +569,72 @@ mod tests {
         assert_eq!(l.cpu_bytes, 25_000_000_000 - on_gpu);
         assert_eq!(l.active_bytes, 24_000_000_000);
         assert_eq!(weight_layout(None, &gpus).known, false);
+    }
+
+    /// A 20 GB MoE (128 experts, 8 routed) whose 18 GB of experts are kept
+    /// in RAM by `--cpu-moe`, on a 24 GB card that holds the other 2 GB and
+    /// 10 GB of KV cache.
+    fn experts_on_cpu() -> (DetectedModel, Vec<GpuStats>) {
+        let mut m = crate::demo::demo_models(4096, 1).remove(0);
+        m.tensor_split = vec![];
+        m.cmdline = "llama-server -m m.gguf -ngl 99 --cpu-moe".into();
+        let mut table = vec![("token_embd.weight".to_string(), 400_000_000u64)];
+        for n in 0..40 {
+            table.push((format!("blk.{n}.attn_qkv.weight"), 40_000_000));
+            table.push((format!("blk.{n}.ffn_up_exps.weight"), 225_000_000));
+            table.push((format!("blk.{n}.ffn_down_exps.weight"), 225_000_000));
+        }
+        table.push(("output.weight".into(), 0));
+        if let Some(g) = m.gguf.as_mut() {
+            g.n_experts = 128;
+            g.n_experts_used = 8;
+        }
+        m.tensors = Some(crate::gguf::summarize_tensors(&table));
+        let rules = crate::offload::parse_rules(&m.cmdline, &Default::default());
+        m.offload = Some(crate::offload::place(&table, &rules, 128, 8, |_, _| None));
+        (m, vec![gpu(40.0, 30.0, 12_000)])
+    }
+
+    #[test]
+    fn experts_kept_in_ram_are_cpu_side_whatever_the_card_holds() {
+        let (m, gpus) = experts_on_cpu();
+        let l = weight_layout(Some(&m), &gpus);
+        // The split-share clamp alone would credit the card with 12 GB of
+        // weights and leave only 8 GB on the CPU side.
+        assert_eq!(l.cpu_bytes, 18_000_000_000);
+        assert_eq!(l.cpu_by_rule, 18_000_000_000);
+        // Each step reads the routed 8 of 128 experts from RAM, and the dense
+        // 1.6 GB from VRAM.
+        assert_eq!(l.cpu_active_bytes, Some(1_125_000_000));
+        let (ram, vram) = l.per_step();
+        assert_eq!(ram, 1_125_000_000.0);
+        assert_eq!(vram, 1_600_000_000.0);
+    }
+
+    #[test]
+    fn experts_in_ram_make_decode_ram_bound() {
+        let (m, gpus) = experts_on_cpu();
+        let (mut p, now) = decoding();
+        p.observe_gpu(&gpus, now);
+        p.tick_bandwidth(&weight_layout(Some(&m), &gpus), now, 0.2);
+        let v = assess(&p, &gpus);
+        assert_eq!(v.stage, Some(StageId::Ram));
+        assert!(v.detail.contains("18.0 GB"), "{}", v.detail);
+    }
+
+    #[test]
+    fn a_card_too_small_for_the_rest_spills_at_the_dense_rate() {
+        // Same model on a 1 GB card: 0.6 GB of the dense part spills too.
+        let (m, _) = experts_on_cpu();
+        let gpus = vec![gpu(40.0, 30.0, 1_000)];
+        let l = weight_layout(Some(&m), &gpus);
+        let spill = 2_000_000_000 - 1_000 * 1024 * 1024;
+        assert_eq!(l.cpu_bytes, 18_000_000_000 + spill);
+        assert_eq!(l.cpu_by_rule, 18_000_000_000);
+        // The spill is read at the rest of the model's active fraction:
+        // 1.6 GB of every 2 GB (the embedding is a lookup).
+        let spill_active = (spill as f64 * 1.6 / 2.0) as u64;
+        assert_eq!(l.cpu_active_bytes, Some(1_125_000_000 + spill_active));
     }
 
     #[test]

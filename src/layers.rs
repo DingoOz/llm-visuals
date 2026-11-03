@@ -64,7 +64,10 @@ pub struct Topology {
 impl Topology {
     pub fn read(path: &Path) -> Result<Topology, String> {
         let info = gguf::read_info(path)?;
-        let names = gguf::read_tensor_names(path)?;
+        let names: Vec<String> = gguf::read_tensor_table(path)?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
         Ok(Self::from_names(&info, &names))
     }
 

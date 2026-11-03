@@ -1,0 +1,1589 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1204" height="776" viewBox="0 0 1204 776">
+<rect width="100%" height="100%" rx="10" fill="#0d0f16"/>
+<style>text{font-family:"JetBrains Mono","Fira Code","DejaVu Sans Mono",Menlo,monospace;font-size:14px;white-space:pre}</style>
+<rect x="921.2" y="14.0" width="67.5" height="17.0" fill="#282b35"/>
+<rect x="392.0" y="116.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="946.4" y="116.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="358.4" y="150.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="358.4" y="167.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="946.4" y="167.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="358.4" y="218.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="946.4" y="218.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="946.4" y="235.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="358.4" y="252.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="946.4" y="303.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="946.4" y="320.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="358.4" y="337.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="358.4" y="371.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="946.4" y="371.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="366.8" y="388.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="358.4" y="405.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="946.4" y="405.0" width="8.7" height="17.0" fill="#242836"/>
+<rect x="14.0" y="745.0" width="1167.9" height="17.0" fill="#12151e"/>
+<rect x="114.8" y="124.5" width="8.7" height="8.8" fill="#7eee88"/>
+<rect x="123.2" y="124.5" width="8.7" height="8.8" fill="#70ed92"/>
+<rect x="131.6" y="124.5" width="8.7" height="8.8" fill="#6aea97"/>
+<rect x="140.0" y="124.5" width="8.7" height="8.8" fill="#61e79e"/>
+<rect x="274.4" y="116.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="116.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="116.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="116.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="116.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="116.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="116.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="116.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="116.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="116.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="358.4" y="116.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="366.8" y="116.0" width="8.7" height="17.3" fill="#5cecec"/>
+<rect x="375.2" y="116.0" width="8.7" height="17.3" fill="#72f7e7"/>
+<rect x="383.6" y="116.0" width="8.7" height="17.3" fill="#96fbeb"/>
+<rect x="400.4" y="116.0" width="8.7" height="17.3" fill="#242836"/>
+<rect x="862.4" y="116.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="116.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="116.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="116.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="116.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="116.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="116.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="116.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="116.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="116.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="954.8" y="116.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="133.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="133.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="133.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="133.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="133.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="133.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="133.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="133.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="133.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="133.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="358.4" y="133.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="366.8" y="133.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="862.4" y="133.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="133.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="133.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="133.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="133.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="133.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="133.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="133.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="133.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="133.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="946.4" y="133.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="954.8" y="133.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="150.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="150.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="150.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="150.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="150.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="150.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="150.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="150.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="150.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="150.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="366.8" y="150.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="862.4" y="150.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="150.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="150.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="150.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="150.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="150.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="150.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="150.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="150.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="150.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="946.4" y="150.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="954.8" y="150.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="167.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="167.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="167.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="167.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="167.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="167.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="167.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="167.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="167.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="167.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="366.8" y="167.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="862.4" y="167.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="167.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="167.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="167.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="167.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="167.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="167.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="167.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="167.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="167.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="954.8" y="167.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="184.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="184.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="184.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="184.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="184.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="184.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="184.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="184.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="184.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="184.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="358.4" y="184.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="366.8" y="184.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="862.4" y="184.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="184.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="184.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="184.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="184.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="184.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="184.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="184.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="184.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="184.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="946.4" y="184.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="954.8" y="184.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="201.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="201.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="201.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="201.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="201.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="201.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="201.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="201.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="201.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="201.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="358.4" y="201.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="366.8" y="201.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="862.4" y="201.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="201.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="201.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="201.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="201.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="201.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="201.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="201.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="201.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="201.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="946.4" y="201.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="954.8" y="201.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="218.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="218.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="218.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="218.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="218.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="218.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="218.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="218.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="218.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="218.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="366.8" y="218.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="862.4" y="218.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="218.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="218.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="218.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="218.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="218.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="218.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="218.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="218.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="218.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="954.8" y="218.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="235.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="235.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="235.0" width="117.9" height="17.3" fill="#242836"/>
+<rect x="862.4" y="235.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="235.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="235.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="235.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="235.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="235.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="235.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="235.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="235.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="235.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="954.8" y="235.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="252.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="252.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="252.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="252.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="252.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="252.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="252.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="252.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="252.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="252.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="366.8" y="252.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="862.4" y="252.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="252.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="252.0" width="117.9" height="17.3" fill="#242836"/>
+<rect x="274.4" y="269.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="269.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="269.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="269.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="269.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="269.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="269.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="269.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="269.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="269.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="358.4" y="269.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="366.8" y="269.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="660.8" y="269.0" width="8.7" height="17.3" fill="#fff1ce"/>
+<rect x="862.4" y="269.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="269.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="269.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="269.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="269.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="269.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="269.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="269.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="269.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="269.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="946.4" y="269.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="954.8" y="269.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="286.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="286.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="286.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="286.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="286.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="286.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="286.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="286.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="286.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="286.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="358.4" y="286.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="366.8" y="286.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="862.4" y="286.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="286.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="286.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="286.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="286.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="286.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="286.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="286.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="286.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="286.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="946.4" y="286.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="954.8" y="286.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="303.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="303.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="303.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="303.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="303.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="303.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="303.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="303.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="303.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="303.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="358.4" y="303.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="366.8" y="303.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="862.4" y="303.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="303.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="303.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="303.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="303.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="303.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="303.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="303.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="303.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="303.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="954.8" y="303.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="320.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="320.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="320.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="320.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="320.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="320.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="320.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="320.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="320.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="320.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="358.4" y="320.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="366.8" y="320.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="862.4" y="320.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="320.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="320.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="320.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="320.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="320.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="320.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="320.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="320.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="320.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="954.8" y="320.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="337.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="337.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="337.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="337.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="337.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="337.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="337.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="337.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="337.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="337.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="366.8" y="337.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="862.4" y="337.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="337.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="337.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="337.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="337.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="337.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="337.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="337.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="337.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="337.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="946.4" y="337.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="954.8" y="337.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="354.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="354.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="354.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="354.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="354.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="354.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="354.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="354.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="354.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="354.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="358.4" y="354.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="366.8" y="354.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="862.4" y="354.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="354.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="354.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="354.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="354.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="354.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="354.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="354.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="354.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="354.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="946.4" y="354.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="954.8" y="354.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="371.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="371.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="371.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="371.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="371.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="371.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="371.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="371.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="371.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="371.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="366.8" y="371.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="862.4" y="371.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="371.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="371.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="371.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="371.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="371.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="371.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="371.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="371.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="371.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="954.8" y="371.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="388.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="388.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="388.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="388.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="388.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="388.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="388.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="388.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="388.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="388.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="358.4" y="388.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="375.2" y="388.0" width="33.9" height="17.3" fill="#242836"/>
+<rect x="862.4" y="388.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="388.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="388.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="388.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="388.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="388.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="388.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="388.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="388.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="388.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="946.4" y="388.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="954.8" y="388.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="405.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="405.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="405.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="405.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="405.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="405.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="405.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="405.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="405.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="405.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="366.8" y="405.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="862.4" y="405.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="405.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="405.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="405.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="405.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="405.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="405.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="405.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="405.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="405.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="954.8" y="405.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="422.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="422.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="422.0" width="117.9" height="17.3" fill="#242836"/>
+<rect x="862.4" y="422.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="422.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="422.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="887.6" y="422.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="896.0" y="422.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="904.4" y="422.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="912.8" y="422.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="921.2" y="422.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="929.6" y="422.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="938.0" y="422.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="946.4" y="422.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="954.8" y="422.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="274.4" y="439.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="439.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="439.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="439.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="439.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="439.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="439.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="439.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="439.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="439.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="358.4" y="439.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="366.8" y="439.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="862.4" y="439.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="870.8" y="439.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="879.2" y="439.0" width="117.9" height="17.3" fill="#242836"/>
+<rect x="274.4" y="456.0" width="8.7" height="17.3" fill="#544ecc"/>
+<rect x="282.8" y="456.0" width="8.7" height="17.3" fill="#475fd3"/>
+<rect x="291.2" y="456.0" width="8.7" height="17.3" fill="#3b70db"/>
+<rect x="299.6" y="456.0" width="8.7" height="17.3" fill="#2e80e3"/>
+<rect x="308.0" y="456.0" width="8.7" height="17.3" fill="#2291ea"/>
+<rect x="316.4" y="456.0" width="8.7" height="17.3" fill="#15a2f2"/>
+<rect x="324.8" y="456.0" width="8.7" height="17.3" fill="#09b2fa"/>
+<rect x="333.2" y="456.0" width="8.7" height="17.3" fill="#06c1fe"/>
+<rect x="341.6" y="456.0" width="8.7" height="17.3" fill="#1cccf9"/>
+<rect x="350.0" y="456.0" width="8.7" height="17.3" fill="#31d7f5"/>
+<rect x="358.4" y="456.0" width="8.7" height="17.3" fill="#47e1f0"/>
+<rect x="366.8" y="456.0" width="42.3" height="17.3" fill="#242836"/>
+<rect x="56.0" y="515.5" width="25.5" height="8.8" fill="#cafdf5"/>
+<rect x="56.0" y="524.0" width="25.5" height="17.3" fill="#cafdf5"/>
+<rect x="56.0" y="541.0" width="25.5" height="17.3" fill="#cafdf5"/>
+<rect x="81.2" y="541.0" width="25.5" height="17.3" fill="#4de5ef"/>
+<rect x="106.4" y="541.0" width="25.5" height="17.3" fill="#4ce4ef"/>
+<rect x="131.6" y="541.0" width="25.5" height="17.3" fill="#47e1f0"/>
+<rect x="156.8" y="541.0" width="25.5" height="17.3" fill="#52e7ee"/>
+<rect x="182.0" y="541.0" width="25.5" height="17.3" fill="#50e6ee"/>
+<rect x="207.2" y="541.0" width="25.5" height="17.3" fill="#47e1f0"/>
+<rect x="282.8" y="541.0" width="25.5" height="17.3" fill="#4ce4ef"/>
+<rect x="308.0" y="541.0" width="25.5" height="17.3" fill="#4fe5ef"/>
+<rect x="333.2" y="541.0" width="25.5" height="17.3" fill="#53e7ee"/>
+<rect x="358.4" y="541.0" width="25.5" height="17.3" fill="#4ee5ef"/>
+<rect x="383.6" y="541.0" width="25.5" height="17.3" fill="#4ae3ef"/>
+<rect x="408.8" y="541.0" width="25.5" height="17.3" fill="#4ee5ef"/>
+<rect x="434.0" y="541.0" width="25.5" height="17.3" fill="#49e2f0"/>
+<rect x="459.2" y="541.0" width="25.5" height="17.3" fill="#57e9ed"/>
+<rect x="484.4" y="541.0" width="25.5" height="17.3" fill="#4be4ef"/>
+<rect x="534.8" y="541.0" width="25.5" height="17.3" fill="#4ee5ef"/>
+<rect x="560.0" y="541.0" width="25.5" height="17.3" fill="#4ce4ef"/>
+<rect x="585.2" y="541.0" width="25.5" height="17.3" fill="#49e2f0"/>
+<rect x="610.4" y="541.0" width="25.5" height="17.3" fill="#4de4ef"/>
+<rect x="635.6" y="541.0" width="25.5" height="17.3" fill="#50e6ee"/>
+<rect x="686.0" y="541.0" width="50.7" height="17.3" fill="#4ee5ef"/>
+<rect x="736.4" y="541.0" width="25.5" height="17.3" fill="#4ce4ef"/>
+<rect x="761.6" y="541.0" width="25.5" height="17.3" fill="#4ae3f0"/>
+<rect x="812.0" y="541.0" width="25.5" height="17.3" fill="#4de4ef"/>
+<rect x="837.2" y="541.0" width="25.5" height="17.3" fill="#4de5ef"/>
+<rect x="862.4" y="541.0" width="50.7" height="17.3" fill="#4ae3f0"/>
+<rect x="912.8" y="541.0" width="25.5" height="17.3" fill="#52e7ee"/>
+<rect x="938.0" y="541.0" width="25.5" height="17.3" fill="#4fe6ef"/>
+<rect x="963.2" y="541.0" width="25.5" height="17.3" fill="#47e2f0"/>
+<rect x="988.4" y="541.0" width="25.5" height="17.3" fill="#51e6ee"/>
+<rect x="1013.6" y="541.0" width="25.5" height="17.3" fill="#49e3f0"/>
+<rect x="1038.8" y="541.0" width="25.5" height="17.3" fill="#4fe5ef"/>
+<rect x="56.0" y="558.0" width="25.5" height="17.3" fill="#cafdf5"/>
+<rect x="81.2" y="558.0" width="25.5" height="17.3" fill="#4de5ef"/>
+<rect x="106.4" y="558.0" width="25.5" height="17.3" fill="#4ce4ef"/>
+<rect x="131.6" y="558.0" width="25.5" height="17.3" fill="#47e1f0"/>
+<rect x="156.8" y="558.0" width="25.5" height="17.3" fill="#52e7ee"/>
+<rect x="182.0" y="558.0" width="25.5" height="17.3" fill="#50e6ee"/>
+<rect x="207.2" y="558.0" width="25.5" height="17.3" fill="#47e1f0"/>
+<rect x="257.6" y="558.0" width="25.5" height="17.3" fill="#46e1f0"/>
+<rect x="282.8" y="558.0" width="25.5" height="17.3" fill="#4ce4ef"/>
+<rect x="308.0" y="558.0" width="25.5" height="17.3" fill="#4fe5ef"/>
+<rect x="333.2" y="558.0" width="25.5" height="17.3" fill="#53e7ee"/>
+<rect x="358.4" y="558.0" width="25.5" height="17.3" fill="#4ee5ef"/>
+<rect x="383.6" y="558.0" width="25.5" height="17.3" fill="#4ae3ef"/>
+<rect x="408.8" y="558.0" width="25.5" height="17.3" fill="#4ee5ef"/>
+<rect x="434.0" y="558.0" width="25.5" height="17.3" fill="#49e2f0"/>
+<rect x="459.2" y="558.0" width="25.5" height="17.3" fill="#57e9ed"/>
+<rect x="484.4" y="558.0" width="25.5" height="17.3" fill="#4be4ef"/>
+<rect x="534.8" y="558.0" width="25.5" height="17.3" fill="#4ee5ef"/>
+<rect x="560.0" y="558.0" width="25.5" height="17.3" fill="#4ce4ef"/>
+<rect x="585.2" y="558.0" width="25.5" height="17.3" fill="#49e2f0"/>
+<rect x="610.4" y="558.0" width="25.5" height="17.3" fill="#4de4ef"/>
+<rect x="635.6" y="558.0" width="25.5" height="17.3" fill="#50e6ee"/>
+<rect x="660.8" y="558.0" width="25.5" height="17.3" fill="#45e1f1"/>
+<rect x="686.0" y="558.0" width="50.7" height="17.3" fill="#4ee5ef"/>
+<rect x="736.4" y="558.0" width="25.5" height="17.3" fill="#4ce4ef"/>
+<rect x="761.6" y="558.0" width="25.5" height="17.3" fill="#4ae3f0"/>
+<rect x="812.0" y="558.0" width="25.5" height="17.3" fill="#4de4ef"/>
+<rect x="837.2" y="558.0" width="25.5" height="17.3" fill="#4de5ef"/>
+<rect x="862.4" y="558.0" width="50.7" height="17.3" fill="#4ae3f0"/>
+<rect x="912.8" y="558.0" width="25.5" height="17.3" fill="#52e7ee"/>
+<rect x="938.0" y="558.0" width="25.5" height="17.3" fill="#4fe6ef"/>
+<rect x="963.2" y="558.0" width="25.5" height="17.3" fill="#47e2f0"/>
+<rect x="988.4" y="558.0" width="25.5" height="17.3" fill="#51e6ee"/>
+<rect x="1013.6" y="558.0" width="25.5" height="17.3" fill="#49e3f0"/>
+<rect x="1038.8" y="558.0" width="25.5" height="17.3" fill="#4fe5ef"/>
+<rect x="56.0" y="575.0" width="25.5" height="17.3" fill="#cafdf5"/>
+<rect x="81.2" y="575.0" width="25.5" height="17.3" fill="#4de5ef"/>
+<rect x="106.4" y="575.0" width="25.5" height="17.3" fill="#4ce4ef"/>
+<rect x="131.6" y="575.0" width="25.5" height="17.3" fill="#47e1f0"/>
+<rect x="156.8" y="575.0" width="25.5" height="17.3" fill="#52e7ee"/>
+<rect x="182.0" y="575.0" width="25.5" height="17.3" fill="#50e6ee"/>
+<rect x="207.2" y="575.0" width="25.5" height="17.3" fill="#47e1f0"/>
+<rect x="257.6" y="575.0" width="25.5" height="17.3" fill="#46e1f0"/>
+<rect x="282.8" y="575.0" width="25.5" height="17.3" fill="#4ce4ef"/>
+<rect x="308.0" y="575.0" width="25.5" height="17.3" fill="#4fe5ef"/>
+<rect x="333.2" y="575.0" width="25.5" height="17.3" fill="#53e7ee"/>
+<rect x="358.4" y="575.0" width="25.5" height="17.3" fill="#4ee5ef"/>
+<rect x="383.6" y="575.0" width="25.5" height="17.3" fill="#4ae3ef"/>
+<rect x="408.8" y="575.0" width="25.5" height="17.3" fill="#4ee5ef"/>
+<rect x="434.0" y="575.0" width="25.5" height="17.3" fill="#49e2f0"/>
+<rect x="459.2" y="575.0" width="25.5" height="17.3" fill="#57e9ed"/>
+<rect x="484.4" y="575.0" width="25.5" height="17.3" fill="#4be4ef"/>
+<rect x="534.8" y="575.0" width="25.5" height="17.3" fill="#4ee5ef"/>
+<rect x="560.0" y="575.0" width="25.5" height="17.3" fill="#4ce4ef"/>
+<rect x="585.2" y="575.0" width="25.5" height="17.3" fill="#49e2f0"/>
+<rect x="610.4" y="575.0" width="25.5" height="17.3" fill="#4de4ef"/>
+<rect x="635.6" y="575.0" width="25.5" height="17.3" fill="#50e6ee"/>
+<rect x="660.8" y="575.0" width="25.5" height="17.3" fill="#45e1f1"/>
+<rect x="686.0" y="575.0" width="50.7" height="17.3" fill="#4ee5ef"/>
+<rect x="736.4" y="575.0" width="25.5" height="17.3" fill="#4ce4ef"/>
+<rect x="761.6" y="575.0" width="25.5" height="17.3" fill="#4ae3f0"/>
+<rect x="812.0" y="575.0" width="25.5" height="17.3" fill="#4de4ef"/>
+<rect x="837.2" y="575.0" width="25.5" height="17.3" fill="#4de5ef"/>
+<rect x="862.4" y="575.0" width="50.7" height="17.3" fill="#4ae3f0"/>
+<rect x="912.8" y="575.0" width="25.5" height="17.3" fill="#52e7ee"/>
+<rect x="938.0" y="575.0" width="25.5" height="17.3" fill="#4fe6ef"/>
+<rect x="963.2" y="575.0" width="25.5" height="17.3" fill="#47e2f0"/>
+<rect x="988.4" y="575.0" width="25.5" height="17.3" fill="#51e6ee"/>
+<rect x="1013.6" y="575.0" width="25.5" height="17.3" fill="#49e3f0"/>
+<rect x="1038.8" y="575.0" width="25.5" height="17.3" fill="#4fe5ef"/>
+<rect x="56.0" y="592.0" width="25.5" height="17.3" fill="#cafdf5"/>
+<rect x="81.2" y="592.0" width="25.5" height="17.3" fill="#4de5ef"/>
+<rect x="106.4" y="592.0" width="25.5" height="17.3" fill="#4ce4ef"/>
+<rect x="131.6" y="592.0" width="25.5" height="17.3" fill="#47e1f0"/>
+<rect x="156.8" y="592.0" width="25.5" height="17.3" fill="#52e7ee"/>
+<rect x="182.0" y="592.0" width="25.5" height="17.3" fill="#50e6ee"/>
+<rect x="207.2" y="592.0" width="25.5" height="17.3" fill="#47e1f0"/>
+<rect x="257.6" y="592.0" width="25.5" height="17.3" fill="#46e1f0"/>
+<rect x="282.8" y="592.0" width="25.5" height="17.3" fill="#4ce4ef"/>
+<rect x="308.0" y="592.0" width="25.5" height="17.3" fill="#4fe5ef"/>
+<rect x="333.2" y="592.0" width="25.5" height="17.3" fill="#53e7ee"/>
+<rect x="358.4" y="592.0" width="25.5" height="17.3" fill="#4ee5ef"/>
+<rect x="383.6" y="592.0" width="25.5" height="17.3" fill="#4ae3ef"/>
+<rect x="408.8" y="592.0" width="25.5" height="17.3" fill="#4ee5ef"/>
+<rect x="434.0" y="592.0" width="25.5" height="17.3" fill="#49e2f0"/>
+<rect x="459.2" y="592.0" width="25.5" height="17.3" fill="#57e9ed"/>
+<rect x="484.4" y="592.0" width="25.5" height="17.3" fill="#4be4ef"/>
+<rect x="534.8" y="592.0" width="25.5" height="17.3" fill="#4ee5ef"/>
+<rect x="560.0" y="592.0" width="25.5" height="17.3" fill="#4ce4ef"/>
+<rect x="585.2" y="592.0" width="25.5" height="17.3" fill="#49e2f0"/>
+<rect x="610.4" y="592.0" width="25.5" height="17.3" fill="#4de4ef"/>
+<rect x="635.6" y="592.0" width="25.5" height="17.3" fill="#50e6ee"/>
+<rect x="660.8" y="592.0" width="25.5" height="17.3" fill="#45e1f1"/>
+<rect x="686.0" y="592.0" width="50.7" height="17.3" fill="#4ee5ef"/>
+<rect x="736.4" y="592.0" width="25.5" height="17.3" fill="#4ce4ef"/>
+<rect x="761.6" y="592.0" width="25.5" height="17.3" fill="#4ae3f0"/>
+<rect x="812.0" y="592.0" width="25.5" height="17.3" fill="#4de4ef"/>
+<rect x="837.2" y="592.0" width="25.5" height="17.3" fill="#4de5ef"/>
+<rect x="862.4" y="592.0" width="50.7" height="17.3" fill="#4ae3f0"/>
+<rect x="912.8" y="592.0" width="25.5" height="17.3" fill="#52e7ee"/>
+<rect x="938.0" y="592.0" width="25.5" height="17.3" fill="#4fe6ef"/>
+<rect x="963.2" y="592.0" width="25.5" height="17.3" fill="#47e2f0"/>
+<rect x="988.4" y="592.0" width="25.5" height="17.3" fill="#51e6ee"/>
+<rect x="1013.6" y="592.0" width="25.5" height="17.3" fill="#49e3f0"/>
+<rect x="1038.8" y="592.0" width="25.5" height="17.3" fill="#4fe5ef"/>
+<text x="14.0" y="27.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">╭</text>
+<text x="22.4" y="27.0" fill="#00e0ff" font-weight="bold" textLength="126.0" lengthAdjust="spacingAndGlyphs"> ◆ LLM VISUALS </text>
+<text x="148.4" y="27.0" fill="#343a4e" textLength="772.8" lengthAdjust="spacingAndGlyphs">────────────────────────────────────────────────────────────────────────────────────────────</text>
+<text x="921.2" y="27.0" fill="#7a8296" font-weight="bold" textLength="67.2" lengthAdjust="spacingAndGlyphs"> ● IDLE </text>
+<text x="988.4" y="27.0" fill="#7a8296" textLength="193.2" lengthAdjust="spacingAndGlyphs"> up 00:00:14  11:32:25 </text>
+<text x="1181.6" y="27.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">╮</text>
+<text x="14.0" y="44.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="44.0" fill="#fafaff" font-weight="bold" textLength="159.6" lengthAdjust="spacingAndGlyphs"> Qwen3-Demo-35B-A3B</text>
+<text x="182.0" y="44.0" fill="#484e60" textLength="42.0" lengthAdjust="spacingAndGlyphs">  ·  </text>
+<text x="224.0" y="44.0" fill="#dee2ec" textLength="75.6" lengthAdjust="spacingAndGlyphs">llama.cpp</text>
+<text x="299.6" y="44.0" fill="#7a8296" textLength="75.6" lengthAdjust="spacingAndGlyphs"> pid 4242</text>
+<text x="375.2" y="44.0" fill="#484e60" textLength="42.0" lengthAdjust="spacingAndGlyphs">  ·  </text>
+<text x="417.2" y="44.0" fill="#dee2ec" textLength="75.6" lengthAdjust="spacingAndGlyphs">41L × 16H</text>
+<text x="492.8" y="44.0" fill="#7a8296" textLength="58.8" lengthAdjust="spacingAndGlyphs"> (4 KV)</text>
+<text x="551.6" y="44.0" fill="#484e60" textLength="42.0" lengthAdjust="spacingAndGlyphs">  ·  </text>
+<text x="593.6" y="44.0" fill="#966eff" textLength="75.6" lengthAdjust="spacingAndGlyphs">MoE 8/256</text>
+<text x="669.2" y="44.0" fill="#484e60" textLength="42.0" lengthAdjust="spacingAndGlyphs">  ·  </text>
+<text x="711.2" y="44.0" fill="#ffbe32" textLength="50.4" lengthAdjust="spacingAndGlyphs">MTP ×1</text>
+<text x="761.6" y="44.0" fill="#484e60" textLength="42.0" lengthAdjust="spacingAndGlyphs">  ·  </text>
+<text x="803.6" y="44.0" fill="#ff54c8" textLength="58.8" lengthAdjust="spacingAndGlyphs">vision </text>
+<text x="862.4" y="44.0" fill="#fafaff" font-weight="bold" textLength="92.4" lengthAdjust="spacingAndGlyphs">G0 GTX 1070</text>
+<text x="954.8" y="44.0" fill="#7a8296" textLength="67.2" lengthAdjust="spacingAndGlyphs"> (CUDA1)</text>
+<text x="1022.0" y="44.0" fill="#484e60" textLength="42.0" lengthAdjust="spacingAndGlyphs">  ·  </text>
+<text x="1064.0" y="44.0" fill="#ffbe32" textLength="117.6" lengthAdjust="spacingAndGlyphs">synthetic demo</text>
+<text x="1181.6" y="44.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="61.0" fill="#343a4e" textLength="1176.0" lengthAdjust="spacingAndGlyphs">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</text>
+<text x="14.0" y="78.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">╭</text>
+<text x="22.4" y="78.0" fill="#966eff" font-weight="bold" textLength="378.0" lengthAdjust="spacingAndGlyphs"> ◆ EXPERT BALANCE  8 of 256 per token · live </text>
+<text x="400.4" y="78.0" fill="#343a4e" textLength="403.2" lengthAdjust="spacingAndGlyphs">────────────────────────────────────────────────</text>
+<text x="803.6" y="78.0" fill="#484e60" textLength="378.0" lengthAdjust="spacingAndGlyphs"> 256 tokens · curve = experts ranked by hits </text>
+<text x="1181.6" y="78.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">╮</text>
+<text x="14.0" y="95.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="95.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs"> mean </text>
+<text x="72.8" y="95.0" fill="#dee2ec" font-weight="bold" textLength="42.0" lengthAdjust="spacingAndGlyphs">160.2</text>
+<text x="114.8" y="95.0" fill="#7a8296" textLength="168.0" lengthAdjust="spacingAndGlyphs"> effective of 256 · </text>
+<text x="282.8" y="95.0" fill="#ffbe32" font-weight="bold" textLength="84.0" lengthAdjust="spacingAndGlyphs">4 layers ●</text>
+<text x="366.8" y="95.0" fill="#7a8296" textLength="327.6" lengthAdjust="spacingAndGlyphs"> top-8 ≥ 2× median 16% · most lopsided </text>
+<text x="694.4" y="95.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">L7 31</text>
+<text x="736.4" y="95.0" fill="#7a8296" textLength="109.2" lengthAdjust="spacingAndGlyphs"> · most even </text>
+<text x="845.6" y="95.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs">L0 236</text>
+<text x="1181.6" y="95.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="112.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="112.0" fill="#484e60" textLength="1150.8" lengthAdjust="spacingAndGlyphs">layer hits, busiest first     effective experts     used top8 ×even   layer hits, busiest first     effective experts     used top8 ×even</text>
+<text x="1181.6" y="112.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="129.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="129.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">   0</text>
+<text x="72.8" y="129.0" fill="#ffe295" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="129.0" fill="#e3d045" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="89.6" y="129.0" fill="#bbdc60" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="98.0" y="129.0" fill="#a9e16b" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="106.4" y="129.0" fill="#92e87a" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="148.4" y="129.0" fill="#57e2a6" textLength="16.8" lengthAdjust="spacingAndGlyphs">▃▃</text>
+<text x="165.2" y="129.0" fill="#4fdfac" textLength="8.4" lengthAdjust="spacingAndGlyphs">▃</text>
+<text x="173.6" y="129.0" fill="#45dbb4" textLength="16.8" lengthAdjust="spacingAndGlyphs">▃▃</text>
+<text x="190.4" y="129.0" fill="#3ed8ba" textLength="8.4" lengthAdjust="spacingAndGlyphs">▃</text>
+<text x="198.8" y="129.0" fill="#33d3c3" textLength="16.8" lengthAdjust="spacingAndGlyphs">▃▃</text>
+<text x="215.6" y="129.0" fill="#25cdce" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="224.0" y="129.0" fill="#20cbd2" textLength="16.8" lengthAdjust="spacingAndGlyphs">▂▂</text>
+<text x="240.8" y="129.0" fill="#0ec4e0" textLength="16.8" lengthAdjust="spacingAndGlyphs">▂▂</text>
+<text x="257.6" y="129.0" fill="#00bcea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="392.0" y="129.0" fill="#c0fdf3" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="408.8" y="129.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 235.8</text>
+<text x="459.2" y="129.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 256</text>
+<text x="492.8" y="129.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">   7%</text>
+<text x="534.8" y="129.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  2.2×</text>
+<text x="610.4" y="129.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  21</text>
+<text x="660.8" y="129.0" fill="#ffe399" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="129.0" fill="#c0db5c" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="677.6" y="129.0" fill="#2ad0c9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="686.0" y="129.0" fill="#06c1e6" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="694.4" y="129.0" fill="#01beea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="702.8" y="129.0" fill="#02b8e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="711.2" y="129.0" fill="#02b7e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="719.6" y="129.0" fill="#02b6e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="728.0" y="129.0" fill="#04aee3" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="753.2" y="129.0" fill="#06aae1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="761.6" y="129.0" fill="#07a6df" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="778.4" y="129.0" fill="#07a5df" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="786.8" y="129.0" fill="#099ddb" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="812.0" y="129.0" fill="#0a98d8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="820.4" y="129.0" fill="#0b95d7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="828.8" y="129.0" fill="#242836" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="946.4" y="129.0" fill="#47e1f0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="996.8" y="129.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 169.3</text>
+<text x="1047.2" y="129.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 254</text>
+<text x="1080.8" y="129.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  17%</text>
+<text x="1122.8" y="129.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.4×</text>
+<text x="1181.6" y="129.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="146.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="146.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">   1</text>
+<text x="72.8" y="146.0" fill="#ffe49c" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="146.0" fill="#e1d146" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="89.6" y="146.0" fill="#2fd2c6" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="98.0" y="146.0" fill="#0dc4e1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="106.4" y="146.0" fill="#09c2e4" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="114.8" y="146.0" fill="#04c0e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="123.2" y="146.0" fill="#01bbe9" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="140.0" y="146.0" fill="#02b6e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="148.4" y="146.0" fill="#03b2e5" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="165.2" y="146.0" fill="#05ade3" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="173.6" y="146.0" fill="#06a9e1" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="190.4" y="146.0" fill="#06a8e0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="198.8" y="146.0" fill="#08a0dc" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="224.0" y="146.0" fill="#0a99d9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="232.4" y="146.0" fill="#0b97d8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="240.8" y="146.0" fill="#0b94d7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="249.2" y="146.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="408.8" y="146.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 172.8</text>
+<text x="459.2" y="146.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 254</text>
+<text x="492.8" y="146.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  16%</text>
+<text x="534.8" y="146.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.0×</text>
+<text x="610.4" y="146.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  22</text>
+<text x="660.8" y="146.0" fill="#ffde86" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="146.0" fill="#dcd249" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="677.6" y="146.0" fill="#35d4c1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▃</text>
+<text x="686.0" y="146.0" fill="#0cc3e2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="694.4" y="146.0" fill="#04c0e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="702.8" y="146.0" fill="#00beeb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="711.2" y="146.0" fill="#01b9e9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="719.6" y="146.0" fill="#02b6e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="728.0" y="146.0" fill="#04b1e4" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="753.2" y="146.0" fill="#05ace2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="761.6" y="146.0" fill="#06a8e0" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="786.8" y="146.0" fill="#08a2dd" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="795.2" y="146.0" fill="#089fdc" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="812.0" y="146.0" fill="#099ddb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="820.4" y="146.0" fill="#0b96d7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="828.8" y="146.0" fill="#242836" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="996.8" y="146.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 172.3</text>
+<text x="1047.2" y="146.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 255</text>
+<text x="1080.8" y="146.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  15%</text>
+<text x="1122.8" y="146.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.0×</text>
+<text x="1181.6" y="146.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="163.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="163.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">   2</text>
+<text x="72.8" y="163.0" fill="#ffe49c" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="163.0" fill="#f4cb39" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="89.6" y="163.0" fill="#2bd0c9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="98.0" y="163.0" fill="#0cc3e2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="106.4" y="163.0" fill="#05c0e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="114.8" y="163.0" fill="#01bbea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="123.2" y="163.0" fill="#01bbe9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="131.6" y="163.0" fill="#01b9e9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="140.0" y="163.0" fill="#03b2e5" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="165.2" y="163.0" fill="#04b1e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="173.6" y="163.0" fill="#06a9e1" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="198.8" y="163.0" fill="#07a3de" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="207.2" y="163.0" fill="#08a0dc" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="224.0" y="163.0" fill="#0a9ad9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="232.4" y="163.0" fill="#0b97d8" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="249.2" y="163.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="358.4" y="163.0" fill="#47e1f0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="408.8" y="163.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 171.8</text>
+<text x="459.2" y="163.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 255</text>
+<text x="492.8" y="163.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  15%</text>
+<text x="534.8" y="163.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  4.9×</text>
+<text x="610.4" y="163.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  23</text>
+<text x="660.8" y="163.0" fill="#ffda78" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="163.0" fill="#e0d147" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="677.6" y="163.0" fill="#2ed1c6" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="686.0" y="163.0" fill="#0cc3e2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="694.4" y="163.0" fill="#05c0e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="702.8" y="163.0" fill="#01bfea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="711.2" y="163.0" fill="#01b9e9" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="728.0" y="163.0" fill="#04b1e4" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="753.2" y="163.0" fill="#05ade2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="761.6" y="163.0" fill="#06a8e0" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="786.8" y="163.0" fill="#08a1dd" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="795.2" y="163.0" fill="#089fdc" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="803.6" y="163.0" fill="#099ddb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="812.0" y="163.0" fill="#0b96d7" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="837.2" y="163.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="996.8" y="163.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 174.8</text>
+<text x="1047.2" y="163.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 256</text>
+<text x="1080.8" y="163.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  15%</text>
+<text x="1122.8" y="163.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  4.9×</text>
+<text x="1181.6" y="163.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="180.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="180.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">   3</text>
+<text x="72.8" y="180.0" fill="#ffdc7c" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="180.0" fill="#c8d856" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="89.6" y="180.0" fill="#2dd1c7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="98.0" y="180.0" fill="#04c0e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="106.4" y="180.0" fill="#01bbea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="114.8" y="180.0" fill="#02b5e7" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="140.0" y="180.0" fill="#05ade3" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="165.2" y="180.0" fill="#06a7e0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="173.6" y="180.0" fill="#07a5df" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="190.4" y="180.0" fill="#07a4de" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="198.8" y="180.0" fill="#099ddb" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="215.6" y="180.0" fill="#099bda" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="224.0" y="180.0" fill="#0b95d7" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="240.8" y="180.0" fill="#242836" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="358.4" y="180.0" fill="#47e1f0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="408.8" y="180.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 168.0</text>
+<text x="459.2" y="180.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 253</text>
+<text x="492.8" y="180.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  16%</text>
+<text x="534.8" y="180.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.2×</text>
+<text x="610.4" y="180.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  24</text>
+<text x="660.8" y="180.0" fill="#ffe5a1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="180.0" fill="#f0cc3c" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="677.6" y="180.0" fill="#37d5bf" textLength="8.4" lengthAdjust="spacingAndGlyphs">▃</text>
+<text x="686.0" y="180.0" fill="#0dc3e1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="694.4" y="180.0" fill="#03bfe9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="702.8" y="180.0" fill="#01b9e9" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="719.6" y="180.0" fill="#03b3e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="728.0" y="180.0" fill="#04b1e4" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="744.8" y="180.0" fill="#06a9e0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="753.2" y="180.0" fill="#06a8e0" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="778.4" y="180.0" fill="#08a2dd" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="786.8" y="180.0" fill="#089fdc" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="812.0" y="180.0" fill="#0b96d7" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="837.2" y="180.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="946.4" y="180.0" fill="#47e1f0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="996.8" y="180.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 166.8</text>
+<text x="1047.2" y="180.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 254</text>
+<text x="1080.8" y="180.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  16%</text>
+<text x="1122.8" y="180.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.1×</text>
+<text x="1181.6" y="180.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="197.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="197.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">   4</text>
+<text x="72.8" y="197.0" fill="#ffe398" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="197.0" fill="#f6cb38" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="89.6" y="197.0" fill="#35d4c1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▃</text>
+<text x="98.0" y="197.0" fill="#13c6dc" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="106.4" y="197.0" fill="#0ac2e3" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="114.8" y="197.0" fill="#08c1e4" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="123.2" y="197.0" fill="#01beeb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="131.6" y="197.0" fill="#00beeb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="140.0" y="197.0" fill="#01bbea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="148.4" y="197.0" fill="#03b4e6" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="165.2" y="197.0" fill="#04afe4" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="173.6" y="197.0" fill="#05abe2" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="198.8" y="197.0" fill="#06a9e1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="207.2" y="197.0" fill="#08a2dd" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="224.0" y="197.0" fill="#099cda" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="232.4" y="197.0" fill="#0a98d8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="240.8" y="197.0" fill="#0b97d8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="249.2" y="197.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="408.8" y="197.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 176.5</text>
+<text x="459.2" y="197.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 255</text>
+<text x="492.8" y="197.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  15%</text>
+<text x="534.8" y="197.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  4.6×</text>
+<text x="610.4" y="197.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  25</text>
+<text x="660.8" y="197.0" fill="#ffd870" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="197.0" fill="#d2d550" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="677.6" y="197.0" fill="#2fd2c5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="686.0" y="197.0" fill="#0ec4e0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="694.4" y="197.0" fill="#04c0e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="702.8" y="197.0" fill="#00bdeb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="711.2" y="197.0" fill="#02b8e8" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="728.0" y="197.0" fill="#03b2e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="736.4" y="197.0" fill="#04afe4" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="753.2" y="197.0" fill="#05ace2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="761.6" y="197.0" fill="#06a7e0" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="778.4" y="197.0" fill="#07a6df" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="786.8" y="197.0" fill="#099edb" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="812.0" y="197.0" fill="#0b96d7" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="828.8" y="197.0" fill="#242836" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="996.8" y="197.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 173.3</text>
+<text x="1047.2" y="197.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 256</text>
+<text x="1080.8" y="197.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  15%</text>
+<text x="1122.8" y="197.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  4.9×</text>
+<text x="1181.6" y="197.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="214.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="214.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">   5</text>
+<text x="72.8" y="214.0" fill="#ffdb79" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="214.0" fill="#d3d54f" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="89.6" y="214.0" fill="#2bd0c9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="98.0" y="214.0" fill="#0cc3e2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="106.4" y="214.0" fill="#07c1e6" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="114.8" y="214.0" fill="#04c0e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="123.2" y="214.0" fill="#01bbe9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="131.6" y="214.0" fill="#01b9e9" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="148.4" y="214.0" fill="#03b1e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="156.8" y="214.0" fill="#04b1e4" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="173.6" y="214.0" fill="#05abe2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="182.0" y="214.0" fill="#06a8e0" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="198.8" y="214.0" fill="#08a0dc" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="207.2" y="214.0" fill="#089fdc" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="224.0" y="214.0" fill="#0a98d8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="232.4" y="214.0" fill="#0b96d7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="240.8" y="214.0" fill="#242836" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="408.8" y="214.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 174.9</text>
+<text x="459.2" y="214.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 253</text>
+<text x="492.8" y="214.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  15%</text>
+<text x="534.8" y="214.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  4.9×</text>
+<text x="610.4" y="214.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  26</text>
+<text x="660.8" y="214.0" fill="#ffe49b" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="214.0" fill="#f4cb39" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="677.6" y="214.0" fill="#36d5c0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▃</text>
+<text x="686.0" y="214.0" fill="#11c5dd" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="694.4" y="214.0" fill="#0ac2e3" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="702.8" y="214.0" fill="#04c0e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="711.2" y="214.0" fill="#00bcea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="719.6" y="214.0" fill="#01b9e9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="728.0" y="214.0" fill="#03b3e6" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="744.8" y="214.0" fill="#03b2e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="753.2" y="214.0" fill="#05aae1" textLength="33.6" lengthAdjust="spacingAndGlyphs">▁▁▁▁</text>
+<text x="786.8" y="214.0" fill="#07a4de" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="795.2" y="214.0" fill="#08a1dd" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="812.0" y="214.0" fill="#099cda" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="820.4" y="214.0" fill="#0a98d8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="828.8" y="214.0" fill="#0b95d7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="837.2" y="214.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="996.8" y="214.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 173.6</text>
+<text x="1047.2" y="214.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 256</text>
+<text x="1080.8" y="214.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  15%</text>
+<text x="1122.8" y="214.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  4.8×</text>
+<text x="1181.6" y="214.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="231.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="231.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">   6</text>
+<text x="72.8" y="231.0" fill="#ffe295" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="231.0" fill="#eace40" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="89.6" y="231.0" fill="#25cdce" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="98.0" y="231.0" fill="#08c1e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="106.4" y="231.0" fill="#02bfe9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="114.8" y="231.0" fill="#00bdea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="123.2" y="231.0" fill="#02b8e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="131.6" y="231.0" fill="#03b3e6" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="140.0" y="231.0" fill="#04afe4" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="156.8" y="231.0" fill="#05ace2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="165.2" y="231.0" fill="#06a7e0" textLength="33.6" lengthAdjust="spacingAndGlyphs">▁▁▁▁</text>
+<text x="198.8" y="231.0" fill="#099edb" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="224.0" y="231.0" fill="#0b96d7" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="240.8" y="231.0" fill="#0b95d7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="249.2" y="231.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="358.4" y="231.0" fill="#47e1f0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="408.8" y="231.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 168.0</text>
+<text x="459.2" y="231.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 255</text>
+<text x="492.8" y="231.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  16%</text>
+<text x="534.8" y="231.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.1×</text>
+<text x="610.4" y="231.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  27</text>
+<text x="660.8" y="231.0" fill="#ffda76" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="231.0" fill="#ced753" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="677.6" y="231.0" fill="#23cdcf" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="686.0" y="231.0" fill="#08c2e4" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="694.4" y="231.0" fill="#02bfea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="702.8" y="231.0" fill="#01beea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="711.2" y="231.0" fill="#01bbea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="719.6" y="231.0" fill="#02b7e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="728.0" y="231.0" fill="#03b1e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="736.4" y="231.0" fill="#04aee3" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="753.2" y="231.0" fill="#05aae1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="761.6" y="231.0" fill="#07a6df" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="778.4" y="231.0" fill="#07a3de" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="786.8" y="231.0" fill="#099ddb" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="803.6" y="231.0" fill="#0a98d8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="812.0" y="231.0" fill="#0b95d7" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="837.2" y="231.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="946.4" y="231.0" fill="#47e1f0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="996.8" y="231.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 172.0</text>
+<text x="1047.2" y="231.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 256</text>
+<text x="1080.8" y="231.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  16%</text>
+<text x="1122.8" y="231.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.0×</text>
+<text x="1181.6" y="231.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="248.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="248.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">   7</text>
+<text x="56.0" y="248.0" fill="#ffbe32" font-weight="bold" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="72.8" y="248.0" fill="#ffdf89" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="248.0" fill="#07a4de" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="89.6" y="248.0" fill="#242836" textLength="176.4" lengthAdjust="spacingAndGlyphs">▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁</text>
+<text x="408.8" y="248.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs">  31.0</text>
+<text x="459.2" y="248.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 196</text>
+<text x="492.8" y="248.0" fill="#ffbe32" font-weight="bold" textLength="42.0" lengthAdjust="spacingAndGlyphs">  56%</text>
+<text x="534.8" y="248.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 17.8×</text>
+<text x="610.4" y="248.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  28</text>
+<text x="660.8" y="248.0" fill="#ffd971" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="248.0" fill="#c4d959" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="677.6" y="248.0" fill="#29cfcb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="686.0" y="248.0" fill="#0ac2e3" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="694.4" y="248.0" fill="#00beeb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="702.8" y="248.0" fill="#01bae9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="711.2" y="248.0" fill="#02b5e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="719.6" y="248.0" fill="#03b1e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="728.0" y="248.0" fill="#05ade3" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="753.2" y="248.0" fill="#06a7e0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="761.6" y="248.0" fill="#07a5df" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="778.4" y="248.0" fill="#08a1dd" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="786.8" y="248.0" fill="#099ddb" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="812.0" y="248.0" fill="#0a99d9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="820.4" y="248.0" fill="#0b95d7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="828.8" y="248.0" fill="#242836" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="946.4" y="248.0" fill="#47e1f0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="996.8" y="248.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 170.4</text>
+<text x="1047.2" y="248.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 255</text>
+<text x="1080.8" y="248.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  16%</text>
+<text x="1122.8" y="248.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.2×</text>
+<text x="1181.6" y="248.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="265.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="265.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">   8</text>
+<text x="72.8" y="265.0" fill="#ffd565" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="265.0" fill="#a6e26d" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="89.6" y="265.0" fill="#18c8d8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="98.0" y="265.0" fill="#01beea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="106.4" y="265.0" fill="#02b8e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="114.8" y="265.0" fill="#04b1e5" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="131.6" y="265.0" fill="#05ade3" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="140.0" y="265.0" fill="#06a9e1" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="156.8" y="265.0" fill="#06a7df" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="165.2" y="265.0" fill="#08a2dd" textLength="33.6" lengthAdjust="spacingAndGlyphs">▁▁▁▁</text>
+<text x="198.8" y="265.0" fill="#0a9bda" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="207.2" y="265.0" fill="#0a9ad9" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="224.0" y="265.0" fill="#242836" textLength="42.0" lengthAdjust="spacingAndGlyphs">▁▁▁▁▁</text>
+<text x="358.4" y="265.0" fill="#47e1f0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="408.8" y="265.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 167.4</text>
+<text x="459.2" y="265.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 253</text>
+<text x="492.8" y="265.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  17%</text>
+<text x="534.8" y="265.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.6×</text>
+<text x="610.4" y="265.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  29</text>
+<text x="644.0" y="265.0" fill="#ffbe32" font-weight="bold" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="660.8" y="265.0" fill="#ffebb7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="265.0" fill="#08a2dd" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="677.6" y="265.0" fill="#242836" textLength="176.4" lengthAdjust="spacingAndGlyphs">▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁</text>
+<text x="996.8" y="265.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs">  31.8</text>
+<text x="1047.2" y="265.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 202</text>
+<text x="1080.8" y="265.0" fill="#ffbe32" font-weight="bold" textLength="42.0" lengthAdjust="spacingAndGlyphs">  57%</text>
+<text x="1122.8" y="265.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 18.1×</text>
+<text x="1181.6" y="265.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="282.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="282.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">   9</text>
+<text x="72.8" y="282.0" fill="#ffde85" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="282.0" fill="#d2d550" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="89.6" y="282.0" fill="#2acfca" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="98.0" y="282.0" fill="#09c2e4" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="106.4" y="282.0" fill="#02bfe9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="114.8" y="282.0" fill="#00beeb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="123.2" y="282.0" fill="#02b8e8" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="140.0" y="282.0" fill="#02b6e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="148.4" y="282.0" fill="#04afe4" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="165.2" y="282.0" fill="#05aae1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="173.6" y="282.0" fill="#06a7e0" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="198.8" y="282.0" fill="#08a0dc" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="207.2" y="282.0" fill="#099edb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="215.6" y="282.0" fill="#099cda" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="224.0" y="282.0" fill="#0b96d7" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="240.8" y="282.0" fill="#242836" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="408.8" y="282.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 172.1</text>
+<text x="459.2" y="282.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 256</text>
+<text x="492.8" y="282.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  16%</text>
+<text x="534.8" y="282.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.0×</text>
+<text x="610.4" y="282.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  30</text>
+<text x="669.2" y="282.0" fill="#ffde85" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="677.6" y="282.0" fill="#42d9b7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▃</text>
+<text x="686.0" y="282.0" fill="#15c7da" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="694.4" y="282.0" fill="#0ec4e0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="702.8" y="282.0" fill="#0cc3e1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="711.2" y="282.0" fill="#04c0e7" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="728.0" y="282.0" fill="#01bbe9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="736.4" y="282.0" fill="#01b9e8" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="753.2" y="282.0" fill="#02b5e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="761.6" y="282.0" fill="#04afe3" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="786.8" y="282.0" fill="#07a5df" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="795.2" y="282.0" fill="#07a5de" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="812.0" y="282.0" fill="#099ddb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="820.4" y="282.0" fill="#0a9ad9" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="837.2" y="282.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="996.8" y="282.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 172.6</text>
+<text x="1047.2" y="282.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 255</text>
+<text x="1080.8" y="282.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  14%</text>
+<text x="1122.8" y="282.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  4.6×</text>
+<text x="1181.6" y="282.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="299.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="299.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  10</text>
+<text x="72.8" y="299.0" fill="#ffdf8a" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="299.0" fill="#e4d044" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="89.6" y="299.0" fill="#39d6be" textLength="8.4" lengthAdjust="spacingAndGlyphs">▃</text>
+<text x="98.0" y="299.0" fill="#0ec4e0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="106.4" y="299.0" fill="#06c0e6" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="114.8" y="299.0" fill="#03bfe9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="123.2" y="299.0" fill="#01bbe9" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="140.0" y="299.0" fill="#03b2e5" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="165.2" y="299.0" fill="#05aae1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="173.6" y="299.0" fill="#06a9e1" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="190.4" y="299.0" fill="#06a6df" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="198.8" y="299.0" fill="#08a0dc" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="224.0" y="299.0" fill="#0a98d8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="232.4" y="299.0" fill="#0b97d8" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="249.2" y="299.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="408.8" y="299.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 174.2</text>
+<text x="459.2" y="299.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 256</text>
+<text x="492.8" y="299.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  15%</text>
+<text x="534.8" y="299.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  4.8×</text>
+<text x="610.4" y="299.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  31</text>
+<text x="660.8" y="299.0" fill="#f6cb38" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="669.2" y="299.0" fill="#9fe472" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="677.6" y="299.0" fill="#1fcbd2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="686.0" y="299.0" fill="#01beea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="694.4" y="299.0" fill="#02b7e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="702.8" y="299.0" fill="#03b3e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="711.2" y="299.0" fill="#04b0e4" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="728.0" y="299.0" fill="#06a9e1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="736.4" y="299.0" fill="#06a8e0" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="753.2" y="299.0" fill="#08a2dd" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="761.6" y="299.0" fill="#08a1dd" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="786.8" y="299.0" fill="#0a9ad9" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="812.0" y="299.0" fill="#242836" textLength="42.0" lengthAdjust="spacingAndGlyphs">▁▁▁▁▁</text>
+<text x="996.8" y="299.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 172.7</text>
+<text x="1047.2" y="299.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 255</text>
+<text x="1080.8" y="299.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  16%</text>
+<text x="1122.8" y="299.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.1×</text>
+<text x="1181.6" y="299.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="316.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="316.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  11</text>
+<text x="72.8" y="316.0" fill="#ffd45e" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="316.0" fill="#bfdb5c" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="89.6" y="316.0" fill="#28cfcc" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="98.0" y="316.0" fill="#08c2e4" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="106.4" y="316.0" fill="#04c0e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="114.8" y="316.0" fill="#00bdea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="123.2" y="316.0" fill="#02b7e7" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="140.0" y="316.0" fill="#03b1e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="148.4" y="316.0" fill="#04aee3" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="165.2" y="316.0" fill="#05ace2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="173.6" y="316.0" fill="#07a6df" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="190.4" y="316.0" fill="#07a5df" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="198.8" y="316.0" fill="#099ddb" textLength="33.6" lengthAdjust="spacingAndGlyphs">▁▁▁▁</text>
+<text x="232.4" y="316.0" fill="#0b95d7" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="249.2" y="316.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="408.8" y="316.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 177.1</text>
+<text x="459.2" y="316.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 256</text>
+<text x="492.8" y="316.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  15%</text>
+<text x="534.8" y="316.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  4.9×</text>
+<text x="610.4" y="316.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  32</text>
+<text x="660.8" y="316.0" fill="#ffe6a4" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="316.0" fill="#ffc935" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="677.6" y="316.0" fill="#30d2c5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="686.0" y="316.0" fill="#0dc3e1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="694.4" y="316.0" fill="#07c1e6" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="702.8" y="316.0" fill="#02bfe9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="711.2" y="316.0" fill="#00bcea" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="728.0" y="316.0" fill="#02b6e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="736.4" y="316.0" fill="#03b3e6" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="753.2" y="316.0" fill="#04afe4" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="761.6" y="316.0" fill="#05aae1" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="786.8" y="316.0" fill="#07a5df" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="795.2" y="316.0" fill="#08a1dd" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="812.0" y="316.0" fill="#099ddb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="820.4" y="316.0" fill="#0a98d8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="828.8" y="316.0" fill="#242836" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="946.4" y="316.0" fill="#47e1f0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="996.8" y="316.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 170.5</text>
+<text x="1047.2" y="316.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 254</text>
+<text x="1080.8" y="316.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  15%</text>
+<text x="1122.8" y="316.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  4.9×</text>
+<text x="1181.6" y="316.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="333.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="333.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  12</text>
+<text x="72.8" y="333.0" fill="#ffdf89" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="333.0" fill="#b7dd62" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="89.6" y="333.0" fill="#26cecd" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="98.0" y="333.0" fill="#0bc3e2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="106.4" y="333.0" fill="#02bfea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="114.8" y="333.0" fill="#00beeb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="123.2" y="333.0" fill="#02b7e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="131.6" y="333.0" fill="#02b5e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="140.0" y="333.0" fill="#04aee3" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="156.8" y="333.0" fill="#05ade3" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="165.2" y="333.0" fill="#07a6df" textLength="33.6" lengthAdjust="spacingAndGlyphs">▁▁▁▁</text>
+<text x="198.8" y="333.0" fill="#089fdc" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="207.2" y="333.0" fill="#099ddb" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="224.0" y="333.0" fill="#099bda" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="232.4" y="333.0" fill="#0b95d7" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="249.2" y="333.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="408.8" y="333.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 173.7</text>
+<text x="459.2" y="333.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 255</text>
+<text x="492.8" y="333.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  16%</text>
+<text x="534.8" y="333.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.2×</text>
+<text x="610.4" y="333.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  33</text>
+<text x="660.8" y="333.0" fill="#ffe8ad" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="333.0" fill="#f5cb39" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="677.6" y="333.0" fill="#2fd1c6" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="686.0" y="333.0" fill="#0dc4e1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="694.4" y="333.0" fill="#05c0e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="702.8" y="333.0" fill="#00bcea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="711.2" y="333.0" fill="#01bbe9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="719.6" y="333.0" fill="#03b4e6" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="728.0" y="333.0" fill="#03b2e5" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="744.8" y="333.0" fill="#04b1e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="753.2" y="333.0" fill="#06a9e1" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="778.4" y="333.0" fill="#08a0dc" textLength="33.6" lengthAdjust="spacingAndGlyphs">▁▁▁▁</text>
+<text x="812.0" y="333.0" fill="#099ddb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="820.4" y="333.0" fill="#0b97d8" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="837.2" y="333.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="946.4" y="333.0" fill="#47e1f0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="996.8" y="333.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 170.1</text>
+<text x="1047.2" y="333.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 255</text>
+<text x="1080.8" y="333.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  16%</text>
+<text x="1122.8" y="333.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.1×</text>
+<text x="1181.6" y="333.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="350.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="350.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  13</text>
+<text x="72.8" y="350.0" fill="#ffda78" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="350.0" fill="#d3d54f" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="89.6" y="350.0" fill="#26cecd" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="98.0" y="350.0" fill="#07c1e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="106.4" y="350.0" fill="#01beea" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="123.2" y="350.0" fill="#02b7e7" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="140.0" y="350.0" fill="#04afe4" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="148.4" y="350.0" fill="#04aee3" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="156.8" y="350.0" fill="#05ade2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="165.2" y="350.0" fill="#07a6df" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="190.4" y="350.0" fill="#07a5df" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="198.8" y="350.0" fill="#099ddb" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="224.0" y="350.0" fill="#0b97d8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="232.4" y="350.0" fill="#0b95d7" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="249.2" y="350.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="358.4" y="350.0" fill="#47e1f0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="408.8" y="350.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 170.8</text>
+<text x="459.2" y="350.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 255</text>
+<text x="492.8" y="350.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  16%</text>
+<text x="534.8" y="350.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.1×</text>
+<text x="610.4" y="350.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  34</text>
+<text x="660.8" y="350.0" fill="#ffcb3e" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="669.2" y="350.0" fill="#b2df65" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="677.6" y="350.0" fill="#26cecd" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="686.0" y="350.0" fill="#04c0e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="694.4" y="350.0" fill="#00bcea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="702.8" y="350.0" fill="#01bbea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="711.2" y="350.0" fill="#03b4e6" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="728.0" y="350.0" fill="#04afe4" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="736.4" y="350.0" fill="#05ace2" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="753.2" y="350.0" fill="#05abe1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="761.6" y="350.0" fill="#07a4de" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="786.8" y="350.0" fill="#08a2dd" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="795.2" y="350.0" fill="#099cda" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="812.0" y="350.0" fill="#0a9ad9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="820.4" y="350.0" fill="#0b94d6" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="837.2" y="350.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="996.8" y="350.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 176.6</text>
+<text x="1047.2" y="350.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 256</text>
+<text x="1080.8" y="350.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  15%</text>
+<text x="1122.8" y="350.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  4.9×</text>
+<text x="1181.6" y="350.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="367.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="367.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  14</text>
+<text x="72.8" y="367.0" fill="#ffd45f" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="367.0" fill="#bcdc5f" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="89.6" y="367.0" fill="#28cfcb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="98.0" y="367.0" fill="#0cc3e2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="106.4" y="367.0" fill="#02bfea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="114.8" y="367.0" fill="#01bcea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="123.2" y="367.0" fill="#02b5e7" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="140.0" y="367.0" fill="#03b2e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="148.4" y="367.0" fill="#05ade3" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="165.2" y="367.0" fill="#06a6df" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="173.6" y="367.0" fill="#07a5df" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="190.4" y="367.0" fill="#07a3de" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="198.8" y="367.0" fill="#099ddb" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="215.6" y="367.0" fill="#0a9bda" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="224.0" y="367.0" fill="#0b95d7" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="240.8" y="367.0" fill="#242836" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="408.8" y="367.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 173.3</text>
+<text x="459.2" y="367.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 256</text>
+<text x="492.8" y="367.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  16%</text>
+<text x="534.8" y="367.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.0×</text>
+<text x="610.4" y="367.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  35</text>
+<text x="660.8" y="367.0" fill="#ffe5a1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="367.0" fill="#efcd3d" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="677.6" y="367.0" fill="#33d3c3" textLength="8.4" lengthAdjust="spacingAndGlyphs">▃</text>
+<text x="686.0" y="367.0" fill="#0fc4df" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="694.4" y="367.0" fill="#07c1e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="702.8" y="367.0" fill="#01bfea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="711.2" y="367.0" fill="#00bcea" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="728.0" y="367.0" fill="#02b7e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="736.4" y="367.0" fill="#03b3e6" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="753.2" y="367.0" fill="#04afe4" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="761.6" y="367.0" fill="#05aae1" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="786.8" y="367.0" fill="#07a3de" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="795.2" y="367.0" fill="#08a1dd" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="812.0" y="367.0" fill="#099cda" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="820.4" y="367.0" fill="#0a98d8" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="837.2" y="367.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="996.8" y="367.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 174.3</text>
+<text x="1047.2" y="367.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 256</text>
+<text x="1080.8" y="367.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  15%</text>
+<text x="1122.8" y="367.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  4.9×</text>
+<text x="1181.6" y="367.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="384.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="384.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  15</text>
+<text x="72.8" y="384.0" fill="#ffebb6" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="384.0" fill="#f3cc3a" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="89.6" y="384.0" fill="#2ed1c7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="98.0" y="384.0" fill="#0ec4e0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="106.4" y="384.0" fill="#05c0e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="114.8" y="384.0" fill="#00bcea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="123.2" y="384.0" fill="#01bbe9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="131.6" y="384.0" fill="#02b6e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="140.0" y="384.0" fill="#03b2e5" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="165.2" y="384.0" fill="#06a9e1" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="190.4" y="384.0" fill="#08a2dd" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="198.8" y="384.0" fill="#08a0dc" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="215.6" y="384.0" fill="#089fdc" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="224.0" y="384.0" fill="#0b97d8" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="249.2" y="384.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="358.4" y="384.0" fill="#47e1f0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="408.8" y="384.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 169.5</text>
+<text x="459.2" y="384.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 256</text>
+<text x="492.8" y="384.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  16%</text>
+<text x="534.8" y="384.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.1×</text>
+<text x="610.4" y="384.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  36</text>
+<text x="660.8" y="384.0" fill="#ffd45f" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="384.0" fill="#b4de64" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="677.6" y="384.0" fill="#1fcbd2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="686.0" y="384.0" fill="#02bfe9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="694.4" y="384.0" fill="#01bae9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="702.8" y="384.0" fill="#03b2e5" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="719.6" y="384.0" fill="#05aae1" textLength="33.6" lengthAdjust="spacingAndGlyphs">▁▁▁▁</text>
+<text x="753.2" y="384.0" fill="#07a3dd" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="778.4" y="384.0" fill="#099edb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="786.8" y="384.0" fill="#0a9bda" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="812.0" y="384.0" fill="#0b95d7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="820.4" y="384.0" fill="#242836" textLength="33.6" lengthAdjust="spacingAndGlyphs">▁▁▁▁</text>
+<text x="946.4" y="384.0" fill="#47e1f0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="996.8" y="384.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 168.4</text>
+<text x="1047.2" y="384.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 256</text>
+<text x="1080.8" y="384.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  17%</text>
+<text x="1122.8" y="384.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.4×</text>
+<text x="1181.6" y="384.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="401.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="401.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  16</text>
+<text x="72.8" y="401.0" fill="#ffe296" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="401.0" fill="#e5d043" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="89.6" y="401.0" fill="#2fd2c6" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="98.0" y="401.0" fill="#11c5de" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="106.4" y="401.0" fill="#0bc3e2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="114.8" y="401.0" fill="#08c1e4" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="123.2" y="401.0" fill="#00beeb" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="140.0" y="401.0" fill="#01bae9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="148.4" y="401.0" fill="#03b4e6" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="173.6" y="401.0" fill="#03b2e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="182.0" y="401.0" fill="#05abe2" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="198.8" y="401.0" fill="#05aae1" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="207.2" y="401.0" fill="#08a2dd" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="224.0" y="401.0" fill="#08a0dc" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="232.4" y="401.0" fill="#0a98d8" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="249.2" y="401.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="366.8" y="401.0" fill="#5cecec" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="408.8" y="401.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 180.1</text>
+<text x="459.2" y="401.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 256</text>
+<text x="492.8" y="401.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  15%</text>
+<text x="534.8" y="401.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  4.7×</text>
+<text x="610.4" y="401.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  37</text>
+<text x="660.8" y="401.0" fill="#ffdd82" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="401.0" fill="#dcd249" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="677.6" y="401.0" fill="#2bd0c9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="686.0" y="401.0" fill="#07c1e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="694.4" y="401.0" fill="#04c0e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="702.8" y="401.0" fill="#00bdeb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="711.2" y="401.0" fill="#01b9e9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="719.6" y="401.0" fill="#01b9e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="728.0" y="401.0" fill="#04b1e4" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="753.2" y="401.0" fill="#05ace2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="761.6" y="401.0" fill="#06a8e0" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="786.8" y="401.0" fill="#08a2dd" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="795.2" y="401.0" fill="#089fdc" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="812.0" y="401.0" fill="#099ddb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="820.4" y="401.0" fill="#0b96d7" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="837.2" y="401.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="996.8" y="401.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 175.3</text>
+<text x="1047.2" y="401.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 255</text>
+<text x="1080.8" y="401.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  15%</text>
+<text x="1122.8" y="401.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  4.9×</text>
+<text x="1181.6" y="401.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="418.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="418.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  17</text>
+<text x="72.8" y="418.0" fill="#ffd769" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="418.0" fill="#d7d44d" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="89.6" y="418.0" fill="#28cfcb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="98.0" y="418.0" fill="#05c0e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="106.4" y="418.0" fill="#01beea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="114.8" y="418.0" fill="#01bcea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="123.2" y="418.0" fill="#02b7e7" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="140.0" y="418.0" fill="#03b1e5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="148.4" y="418.0" fill="#04aee3" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="156.8" y="418.0" fill="#05ade3" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="165.2" y="418.0" fill="#07a6df" textLength="33.6" lengthAdjust="spacingAndGlyphs">▁▁▁▁</text>
+<text x="198.8" y="418.0" fill="#099ddb" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="224.0" y="418.0" fill="#0a9ad9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="232.4" y="418.0" fill="#0b95d7" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="249.2" y="418.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="358.4" y="418.0" fill="#47e1f0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="408.8" y="418.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 171.4</text>
+<text x="459.2" y="418.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 255</text>
+<text x="492.8" y="418.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  16%</text>
+<text x="534.8" y="418.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.0×</text>
+<text x="610.4" y="418.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  38</text>
+<text x="660.8" y="418.0" fill="#ffde85" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="418.0" fill="#dbd34a" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="677.6" y="418.0" fill="#2dd1c7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="686.0" y="418.0" fill="#09c2e4" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="694.4" y="418.0" fill="#02bfe9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="702.8" y="418.0" fill="#01bcea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="711.2" y="418.0" fill="#02b8e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="719.6" y="418.0" fill="#02b5e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="728.0" y="418.0" fill="#04afe4" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="753.2" y="418.0" fill="#05abe2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="761.6" y="418.0" fill="#06a7e0" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="786.8" y="418.0" fill="#08a0dc" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="795.2" y="418.0" fill="#099edb" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="812.0" y="418.0" fill="#0b96d7" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="837.2" y="418.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="946.4" y="418.0" fill="#47e1f0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="996.8" y="418.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 170.0</text>
+<text x="1047.2" y="418.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 253</text>
+<text x="1080.8" y="418.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  16%</text>
+<text x="1122.8" y="418.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.1×</text>
+<text x="1181.6" y="418.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="435.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="435.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  18</text>
+<text x="56.0" y="435.0" fill="#ffbe32" font-weight="bold" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="72.8" y="435.0" fill="#ffe49c" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="435.0" fill="#07a3de" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="89.6" y="435.0" fill="#242836" textLength="176.4" lengthAdjust="spacingAndGlyphs">▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁</text>
+<text x="408.8" y="435.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs">  32.0</text>
+<text x="459.2" y="435.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 212</text>
+<text x="492.8" y="435.0" fill="#ffbe32" font-weight="bold" textLength="42.0" lengthAdjust="spacingAndGlyphs">  56%</text>
+<text x="534.8" y="435.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 18.0×</text>
+<text x="610.4" y="435.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  39</text>
+<text x="660.8" y="435.0" fill="#ffdc7f" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="435.0" fill="#dbd34a" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="677.6" y="435.0" fill="#2fd2c6" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="686.0" y="435.0" fill="#0ec4e0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="694.4" y="435.0" fill="#05c0e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="702.8" y="435.0" fill="#03bfe9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="711.2" y="435.0" fill="#01b9e9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="719.6" y="435.0" fill="#01b9e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="728.0" y="435.0" fill="#04b1e4" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="753.2" y="435.0" fill="#05ace2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="761.6" y="435.0" fill="#06a8e0" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="786.8" y="435.0" fill="#07a3de" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="795.2" y="435.0" fill="#089fdc" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="812.0" y="435.0" fill="#0a99d9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="820.4" y="435.0" fill="#0b96d7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="828.8" y="435.0" fill="#0b95d7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="837.2" y="435.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="996.8" y="435.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 174.0</text>
+<text x="1047.2" y="435.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 255</text>
+<text x="1080.8" y="435.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  15%</text>
+<text x="1122.8" y="435.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.0×</text>
+<text x="1181.6" y="435.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="452.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="452.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  19</text>
+<text x="72.8" y="452.0" fill="#ffe398" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="452.0" fill="#e2d145" textLength="8.4" lengthAdjust="spacingAndGlyphs">▆</text>
+<text x="89.6" y="452.0" fill="#30d2c5" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="98.0" y="452.0" fill="#0cc3e2" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="106.4" y="452.0" fill="#05c0e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="114.8" y="452.0" fill="#02bfe9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="123.2" y="452.0" fill="#01bbe9" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="140.0" y="452.0" fill="#03b4e6" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="148.4" y="452.0" fill="#03b2e5" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="165.2" y="452.0" fill="#05ade3" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="173.6" y="452.0" fill="#06a9e1" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="198.8" y="452.0" fill="#07a5df" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="207.2" y="452.0" fill="#08a0dc" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="224.0" y="452.0" fill="#099ddb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="232.4" y="452.0" fill="#0b97d8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="240.8" y="452.0" fill="#0b95d7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="249.2" y="452.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="408.8" y="452.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 173.7</text>
+<text x="459.2" y="452.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 256</text>
+<text x="492.8" y="452.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  15%</text>
+<text x="534.8" y="452.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  4.9×</text>
+<text x="610.4" y="452.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  40</text>
+<text x="644.0" y="452.0" fill="#ffbe32" font-weight="bold" textLength="8.4" lengthAdjust="spacingAndGlyphs">●</text>
+<text x="660.8" y="452.0" fill="#ffe7a7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="669.2" y="452.0" fill="#07a3de" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="677.6" y="452.0" fill="#242836" textLength="176.4" lengthAdjust="spacingAndGlyphs">▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁</text>
+<text x="996.8" y="452.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs">  31.4</text>
+<text x="1047.2" y="452.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 201</text>
+<text x="1080.8" y="452.0" fill="#ffbe32" font-weight="bold" textLength="42.0" lengthAdjust="spacingAndGlyphs">  56%</text>
+<text x="1122.8" y="452.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 17.9×</text>
+<text x="1181.6" y="452.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="469.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="469.0" fill="#484e60" textLength="33.6" lengthAdjust="spacingAndGlyphs">  20</text>
+<text x="72.8" y="469.0" fill="#ffd35e" textLength="8.4" lengthAdjust="spacingAndGlyphs">▇</text>
+<text x="81.2" y="469.0" fill="#c5d958" textLength="8.4" lengthAdjust="spacingAndGlyphs">▅</text>
+<text x="89.6" y="469.0" fill="#29cfcb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▂</text>
+<text x="98.0" y="469.0" fill="#04c0e8" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="106.4" y="469.0" fill="#00beeb" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="114.8" y="469.0" fill="#01bbea" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="123.2" y="469.0" fill="#02b5e7" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="131.6" y="469.0" fill="#03b4e6" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="140.0" y="469.0" fill="#05ade3" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="165.2" y="469.0" fill="#06a8e0" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="173.6" y="469.0" fill="#07a5df" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="198.8" y="469.0" fill="#08a1dd" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="207.2" y="469.0" fill="#099ddb" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="224.0" y="469.0" fill="#0a99d9" textLength="8.4" lengthAdjust="spacingAndGlyphs">▁</text>
+<text x="232.4" y="469.0" fill="#0b95d7" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="249.2" y="469.0" fill="#242836" textLength="16.8" lengthAdjust="spacingAndGlyphs">▁▁</text>
+<text x="408.8" y="469.0" fill="#dee2ec" textLength="50.4" lengthAdjust="spacingAndGlyphs"> 172.1</text>
+<text x="459.2" y="469.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> 254</text>
+<text x="492.8" y="469.0" fill="#dee2ec" textLength="42.0" lengthAdjust="spacingAndGlyphs">  16%</text>
+<text x="534.8" y="469.0" fill="#7a8296" textLength="50.4" lengthAdjust="spacingAndGlyphs">  5.0×</text>
+<text x="1181.6" y="469.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="486.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1181.6" y="486.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="503.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="22.4" y="503.0" fill="#7a8296" textLength="226.8" lengthAdjust="spacingAndGlyphs"> effective experts by layer</text>
+<text x="249.2" y="503.0" fill="#484e60" textLength="252.0" lengthAdjust="spacingAndGlyphs">  L0 → L40 · full height = 256</text>
+<text x="1181.6" y="503.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="520.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1181.6" y="520.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="537.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="156.8" y="537.0" fill="#52e7ee" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="182.0" y="537.0" fill="#50e6ee" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="308.0" y="537.0" fill="#4fe5ef" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="333.2" y="537.0" fill="#53e7ee" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="358.4" y="537.0" fill="#4ee5ef" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="459.2" y="537.0" fill="#57e9ed" textLength="25.2" lengthAdjust="spacingAndGlyphs">▂▂▂</text>
+<text x="534.8" y="537.0" fill="#4ee5ef" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="635.6" y="537.0" fill="#50e6ee" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="711.2" y="537.0" fill="#4ee5ef" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="912.8" y="537.0" fill="#52e7ee" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="938.0" y="537.0" fill="#4fe6ef" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="988.4" y="537.0" fill="#51e6ee" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="1038.8" y="537.0" fill="#4fe5ef" textLength="25.2" lengthAdjust="spacingAndGlyphs">▁▁▁</text>
+<text x="1181.6" y="537.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="554.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="257.6" y="554.0" fill="#46e1f0" textLength="25.2" lengthAdjust="spacingAndGlyphs">▇▇▇</text>
+<text x="660.8" y="554.0" fill="#45e1f1" textLength="25.2" lengthAdjust="spacingAndGlyphs">▇▇▇</text>
+<text x="1181.6" y="554.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="571.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1181.6" y="571.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="588.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1181.6" y="588.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="605.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="232.4" y="605.0" fill="#4266d7" textLength="25.2" lengthAdjust="spacingAndGlyphs">▆▆▆</text>
+<text x="509.6" y="605.0" fill="#4167d7" textLength="25.2" lengthAdjust="spacingAndGlyphs">▆▆▆</text>
+<text x="786.8" y="605.0" fill="#4167d7" textLength="25.2" lengthAdjust="spacingAndGlyphs">▆▆▆</text>
+<text x="1064.0" y="605.0" fill="#4167d7" textLength="25.2" lengthAdjust="spacingAndGlyphs">▆▆▆</text>
+<text x="1181.6" y="605.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="622.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="56.0" y="622.0" fill="#ffbe32" font-weight="bold" textLength="1033.2" lengthAdjust="spacingAndGlyphs">                     ●                                ●                                ●                                ●  </text>
+<text x="1181.6" y="622.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="639.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1181.6" y="639.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="656.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1181.6" y="656.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="673.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1181.6" y="673.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="690.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1181.6" y="690.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="707.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1181.6" y="707.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="724.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="1181.6" y="724.0" fill="#343a4e" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="14.0" y="741.0" fill="#343a4e" textLength="1176.0" lengthAdjust="spacingAndGlyphs">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</text>
+<text x="14.0" y="758.0" fill="#dee2ec" font-weight="bold" textLength="16.8" lengthAdjust="spacingAndGlyphs"> q</text>
+<text x="30.8" y="758.0" fill="#7a8296" textLength="42.0" lengthAdjust="spacingAndGlyphs"> quit</text>
+<text x="72.8" y="758.0" fill="#dee2ec" font-weight="bold" textLength="16.8" lengthAdjust="spacingAndGlyphs"> a</text>
+<text x="89.6" y="758.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> all</text>
+<text x="123.2" y="758.0" fill="#dee2ec" font-weight="bold" textLength="16.8" lengthAdjust="spacingAndGlyphs"> p</text>
+<text x="140.0" y="758.0" fill="#7a8296" textLength="42.0" lengthAdjust="spacingAndGlyphs"> perf</text>
+<text x="182.0" y="758.0" fill="#dee2ec" font-weight="bold" textLength="16.8" lengthAdjust="spacingAndGlyphs"> h</text>
+<text x="198.8" y="758.0" fill="#7a8296" textLength="58.8" lengthAdjust="spacingAndGlyphs"> layers</text>
+<text x="257.6" y="758.0" fill="#dee2ec" font-weight="bold" textLength="16.8" lengthAdjust="spacingAndGlyphs"> m</text>
+<text x="274.4" y="758.0" fill="#7a8296" textLength="67.2" lengthAdjust="spacingAndGlyphs"> experts</text>
+<text x="341.6" y="758.0" fill="#dee2ec" font-weight="bold" textLength="16.8" lengthAdjust="spacingAndGlyphs"> e</text>
+<text x="358.4" y="758.0" fill="#7a8296" textLength="25.2" lengthAdjust="spacingAndGlyphs"> 3d</text>
+<text x="383.6" y="758.0" fill="#00e0ff" font-weight="bold" textLength="16.8" lengthAdjust="spacingAndGlyphs"> u</text>
+<text x="400.4" y="758.0" fill="#00e0ff" textLength="67.2" lengthAdjust="spacingAndGlyphs"> balance</text>
+<text x="467.6" y="758.0" fill="#dee2ec" font-weight="bold" textLength="16.8" lengthAdjust="spacingAndGlyphs"> b</text>
+<text x="484.4" y="758.0" fill="#7a8296" textLength="84.0" lengthAdjust="spacingAndGlyphs"> bandwidth</text>
+<text x="568.4" y="758.0" fill="#dee2ec" font-weight="bold" textLength="16.8" lengthAdjust="spacingAndGlyphs"> t</text>
+<text x="585.2" y="758.0" fill="#7a8296" textLength="109.2" lengthAdjust="spacingAndGlyphs"> theme:defrag</text>
+<text x="694.4" y="758.0" fill="#dee2ec" font-weight="bold" textLength="16.8" lengthAdjust="spacingAndGlyphs"> s</text>
+<text x="711.2" y="758.0" fill="#7a8296" textLength="75.6" lengthAdjust="spacingAndGlyphs"> settings</text>
+<text x="786.8" y="758.0" fill="#dee2ec" font-weight="bold" textLength="16.8" lengthAdjust="spacingAndGlyphs"> l</text>
+<text x="803.6" y="758.0" fill="#7a8296" textLength="33.6" lengthAdjust="spacingAndGlyphs"> log</text>
+<text x="837.2" y="758.0" fill="#dee2ec" font-weight="bold" textLength="16.8" lengthAdjust="spacingAndGlyphs"> c</text>
+<text x="854.0" y="758.0" fill="#7a8296" textLength="84.0" lengthAdjust="spacingAndGlyphs"> ctx speed</text>
+<text x="938.0" y="758.0" fill="#dee2ec" font-weight="bold" textLength="16.8" lengthAdjust="spacingAndGlyphs"> r</text>
+<text x="954.8" y="758.0" fill="#7a8296" textLength="58.8" lengthAdjust="spacingAndGlyphs"> rescan</text>
+<text x="1022.0" y="758.0" fill="#484e60" textLength="159.6" lengthAdjust="spacingAndGlyphs">demo: 1 sy…  24-bit</text>
+</svg>

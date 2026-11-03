@@ -271,6 +271,14 @@ pub fn llama_place(
     }
 }
 
+/// The host card (nvidia-smi index) behind each CUDA ordinal of a process
+/// with this environment, in ordinal order. `None` when CUDA is unavailable.
+pub fn cuda_host_indices(env: &HashMap<String, String>) -> Option<Vec<Option<u32>>> {
+    let ids = cuda_bus_ids(env)?;
+    let smi = nvidia_bus_ids();
+    Some(ids.iter().map(|id| host_index_for_bus(id, &smi)).collect())
+}
+
 /// `dddd:bb:dd.f` with the domain in either the CUDA (4 digit) or NVML
 /// (8 digit) width, as numbers.
 fn parse_bus_id(s: &str) -> Option<(u32, u32, u32, u32)> {

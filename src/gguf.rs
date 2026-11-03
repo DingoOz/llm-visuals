@@ -19,6 +19,9 @@ pub struct GgufInfo {
     pub n_mtp: usize,
     /// Hashed n-gram memory (llama.cpp "PLE / engrams"), if the model has one.
     pub engram: Option<Engram>,
+    /// A checkpoint folder's quantization as its `config.json` states it
+    /// (`4-bit`, `FP8`); a GGUF's is in its file name.
+    pub quant: Option<String>,
 }
 
 /// An engram module: a conditional-memory table indexed by hashing the last
@@ -129,6 +132,7 @@ pub fn read_info(path: &Path) -> Result<GgufInfo, String> {
         n_embd,
         n_mtp,
         engram,
+        quant: None,
     })
 }
 
@@ -215,49 +219,26 @@ pub fn split_shards(path: &Path) -> Vec<std::path::PathBuf> {
 /// Tensor byte layout of a model. A split GGUF is summed over every shard
 /// found next to `path`; the first shard usually holds only the header.
 pub fn read_tensor_summary(path: &Path) -> Result<TensorSummary, String> {
-    let mut out = TensorSummary::default();
+    Ok(summarize_tensors(&read_tensor_table(path)?))
+}
+
+/// Every tensor of a model with its size in bytes, across all shards.
+pub fn read_tensor_table(path: &Path) -> Result<Vec<(String, u64)>, String> {
+    let mut out = Vec::new();
     for shard in split_shards(path) {
-        let t = read_tensor_summary_one(&shard)?;
-        out.total_bytes += t.total_bytes;
-        out.expert_bytes += t.expert_bytes;
-        out.embd_bytes += t.embd_bytes;
-        out.engram_bytes += t.engram_bytes;
-        out.n_tensors += t.n_tensors;
-        if out.block_bytes.len() < t.block_bytes.len() {
-            out.block_bytes.resize(t.block_bytes.len(), 0);
-        }
-        for (i, b) in t.block_bytes.iter().enumerate() {
-            out.block_bytes[i] += b;
-        }
+        out.extend(read_tensor_table_one(&shard)?);
     }
     Ok(out)
 }
 
-/// Every tensor name in a GGUF, over all shards of a split file. Walks the
-/// whole header, tokenizer arrays included, so it costs what
-/// `read_tensor_summary` does.
-pub fn read_tensor_names(path: &Path) -> Result<Vec<String>, String> {
-    let mut names = Vec::new();
-    for shard in split_shards(path) {
-        let (table, _) = read_tensor_table(&shard)?;
-        names.extend(table.into_iter().map(|(name, _)| name));
-    }
-    Ok(names)
-}
-
-/// Walk the whole header (including tokenizer arrays) to reach the tensor
-/// info table. Takes ~100 ms on a 25 GB file; call it once per detection.
-fn read_tensor_summary_one(path: &Path) -> Result<TensorSummary, String> {
-    let (mut tensors, data_len) = read_tensor_table(path)?;
-    tensors.sort_by_key(|(_, off)| *off);
+/// The byte layout of a tensor table.
+pub fn summarize_tensors(table: &[(String, u64)]) -> TensorSummary {
     let mut out = TensorSummary {
-        n_tensors: tensors.len(),
+        n_tensors: table.len(),
         ..Default::default()
     };
-    for i in 0..tensors.len() {
-        let (name, off) = &tensors[i];
-        let next = tensors.get(i + 1).map(|(_, o)| *o).unwrap_or(data_len);
-        let size = next.saturating_sub(*off);
+    for (name, size) in table {
+        let size = *size;
         out.total_bytes += size;
         if name.contains("_exps") {
             out.expert_bytes += size;
@@ -279,12 +260,12 @@ fn read_tensor_summary_one(path: &Path) -> Result<TensorSummary, String> {
             }
         }
     }
-    Ok(out)
+    out
 }
 
-/// The tensor info table of one GGUF file: (name, data offset) per tensor,
-/// in file order, and the length of the data section.
-fn read_tensor_table(path: &Path) -> Result<(Vec<(String, u64)>, u64), String> {
+/// Walk the whole header (including tokenizer arrays) to reach the tensor
+/// info table. Takes ~100 ms on a 25 GB file; call it once per detection.
+fn read_tensor_table_one(path: &Path) -> Result<Vec<(String, u64)>, String> {
     let file_len = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
     let mut f = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let mut magic = [0u8; 4];
@@ -327,7 +308,15 @@ fn read_tensor_table(path: &Path) -> Result<(Vec<(String, u64)>, u64), String> {
     }
     let header_end = f.stream_position().map_err(|e| e.to_string())?;
     let data_start = (header_end + alignment - 1) / alignment * alignment;
-    Ok((tensors, file_len.saturating_sub(data_start)))
+    let data_len = file_len.saturating_sub(data_start);
+    tensors.sort_by_key(|(_, off)| *off);
+    let mut out = Vec::with_capacity(tensors.len());
+    for i in 0..tensors.len() {
+        let next = tensors.get(i + 1).map(|(_, o)| *o).unwrap_or(data_len);
+        let size = next.saturating_sub(tensors[i].1);
+        out.push((std::mem::take(&mut tensors[i].0), size));
+    }
+    Ok(out)
 }
 
 #[derive(Debug, Clone)]
@@ -621,6 +610,28 @@ mod tests {
         let s = split_shards(Path::new("/nope/m-00002-of-00003.gguf"));
         assert_eq!(s.len(), 1);
         assert!(s[0].ends_with("m-00002-of-00003.gguf"));
+    }
+
+    #[test]
+    fn summary_sorts_a_table_into_its_kinds() {
+        let table: Vec<(String, u64)> = [
+            ("token_embd.weight", 50),
+            ("blk.0.attn_q.weight", 10),
+            ("blk.0.ffn_up_exps.weight", 400),
+            ("blk.1.ffn_down_exps.weight", 400),
+            ("per_layer_token_embd.weight", 30),
+            ("output.weight", 50),
+        ]
+        .iter()
+        .map(|(n, s)| (n.to_string(), *s))
+        .collect();
+        let t = summarize_tensors(&table);
+        assert_eq!(t.total_bytes, 940);
+        assert_eq!(t.expert_bytes, 800);
+        assert_eq!(t.embd_bytes, 50);
+        assert_eq!(t.engram_bytes, 30);
+        assert_eq!(t.block_bytes, vec![410, 400]);
+        assert_eq!(t.n_tensors, 6);
     }
 
     #[test]

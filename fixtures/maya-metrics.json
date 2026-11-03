@@ -1,0 +1,367 @@
+{
+ "engine": {
+  "model": "glm-5.3-flash",
+  "max_context": 32768,
+  "images": true,
+  "version": null,
+  "context": 32768,
+  "kv": "fp16",
+  "kv_resident": 0,
+  "expert_slots": 1058,
+  "expert_cache_mib": 7180,
+  "engine_kind": "glm-fast",
+  "experts": 12096,
+  "vram_slots": 1058,
+  "vram_gb": "7.0",
+  "ram_slots": 11784,
+  "ram_gb": "78.1",
+  "mtp": 0,
+  "dflash": 0,
+  "vision_lend": 0,
+  "cpu_threads": 24,
+  "pcie_share": "0.31",
+  "logit_bias": 1,
+  "kv_ctx": 32768,
+  "kv_gb": 0.62,
+  "maya_version": "1.1.25",
+  "trained_context": 1048576
+ },
+ "live": {
+  "state": "generating",
+  "queued": 0,
+  "active": 1,
+  "phase": "thinking",
+  "prompt_tokens": 40,
+  "prompt_read": null,
+  "prompt_total": null,
+  "generated": 490,
+  "max_tokens": 32720,
+  "elapsed_s": 39.2,
+  "tok_s": 13.6,
+  "tok_s_mean": 13.5,
+  "prefill_tok_s_mean": 13.8,
+  "tok_s_window_s": 5.0
+ },
+ "tiers": {
+  "now": {
+   "tok_s": 13.52,
+   "ms_tok": 73.99,
+   "vram_hit": 0.4473,
+   "ram_fetch": 60.82,
+   "disk": 0.0,
+   "promo": 52.637,
+   "vram_used": 973.0,
+   "vram_slots": 1058.0,
+   "ram_used": 11070.0,
+   "ram_slots": 11784.0,
+   "ram_gb": 78.1,
+   "vram_gb": 7.0,
+   "time": 1792804930.5616183
+  },
+  "history": {
+   "tok_s": [
+    13.52,
+    13.5,
+    13.49,
+    13.49,
+    13.5,
+    13.49,
+    13.52,
+    13.52
+   ],
+   "ms_tok": [
+    73.97,
+    74.07,
+    74.11,
+    74.12,
+    74.06,
+    74.11,
+    73.98,
+    73.99
+   ],
+   "vram_hit": [
+    0.4469,
+    0.4459,
+    0.4455,
+    0.4454,
+    0.4461,
+    0.4458,
+    0.4472,
+    0.4473
+   ],
+   "ram_fetch": [
+    60.852,
+    60.952,
+    61.016,
+    61.033,
+    60.953,
+    60.994,
+    60.837,
+    60.82
+   ],
+   "disk": [
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "promo": [
+    52.65,
+    52.711,
+    52.728,
+    52.743,
+    52.692,
+    52.72,
+    52.623,
+    52.637
+   ],
+   "cpu": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+   ],
+   "ram": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+   ],
+   "disk_mb": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+   ],
+   "engram_ms": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+   ]
+  }
+ },
+ "gpu_map": [
+  {
+   "dev": 0,
+   "index": 1,
+   "name": "Tesla V100-PCIE-16GB",
+   "total": 17179869184,
+   "free": 82051072,
+   "parts": {
+    "weights": 7362064384,
+    "kv": 660996096,
+    "act": 62814808,
+    "prompt": 0,
+    "tp": 0,
+    "drafter": 0,
+    "pool": 7528895616,
+    "vision": 322961408,
+    "rest": 1160085800,
+    "other": 0
+   },
+   "window": 0,
+   "drafter": 0,
+   "tail": 3586936320,
+   "borrow": 3567036672,
+   "lendable": 0,
+   "vision_lent": false,
+   "vision_own": 0,
+   "slots": 1058,
+   "layers": [
+    0,
+    45
+   ],
+   "ctx": 32768,
+   "tp_n": 0,
+   "kv_ram": 0,
+   "measured": "nvml"
+  }
+ ],
+ "requests": [
+  {
+   "projection": null,
+   "time": 1792804700.4456668,
+   "duration_s": 4.8,
+   "finish": "stop",
+   "api": "openai",
+   "prefill_tok_s": 11.0,
+   "prompt_tokens": 23,
+   "reused": 0,
+   "output_tokens": 41,
+   "engine_generated": 41,
+   "prompt_ms": 2091.7,
+   "decode_ms": 2714.4,
+   "decode_tok_s": 15.1,
+   "hit_rate": 0.493
+  }
+ ],
+ "requests_kept": 1,
+ "totals": {
+  "since": 1792804686.8055274,
+  "requests": 1,
+  "prompt_tokens": 23,
+  "reused": 0,
+  "output_tokens": 41,
+  "prompt_ms": 2091.7,
+  "decode_ms": 2714.4
+ },
+ "hardware": {
+  "gpu_util": 100,
+  "gpu_mem_used": 17097818112,
+  "gpu_mem_total": 17179869184,
+  "gpu_temp": 61,
+  "gpu_power": 106.348,
+  "gpu_power_limit": 250.0,
+  "gpu_pcie_gen": 3,
+  "gpu_pcie_gen_max": 3,
+  "gpu_pcie_width": 16,
+  "gpu_pcie_rx_mb": 6533.57421875,
+  "gpu_pcie_tx_mb": 4980.9931640625,
+  "cpu": 49.8,
+  "ram_used": 100406804480,
+  "ram_total": 198132887552,
+  "disk_read_mb": 0.3585650776658017,
+  "disk_write_mb": 5.49426280464994,
+  "tok_s": 13.520367581367662,
+  "tok_s_mean": 13.48302604062529,
+  "prefill_tok_s_mean": 0.0
+ },
+ "hardware_static": {
+  "gpu_name": "Tesla V100-PCIE-16GB",
+  "gpu_count": 1,
+  "cpu_name": "Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz",
+  "cores": 28,
+  "threads": 56,
+  "psutil": true
+ },
+ "history": {
+  "gpu_util": [
+   100,
+   100,
+   100,
+   100,
+   100,
+   100,
+   100,
+   100
+  ],
+  "gpu_mem_used": [
+   17097818112,
+   17097818112,
+   17097818112,
+   17097818112,
+   17097818112,
+   17097818112,
+   17097818112,
+   17097818112
+  ],
+  "gpu_temp": [
+   60,
+   61,
+   61,
+   61,
+   61,
+   61,
+   61,
+   61
+  ],
+  "gpu_power": [
+   110.36,
+   96.56,
+   87.19,
+   97.73,
+   97.54,
+   95.62,
+   101.52,
+   106.35
+  ],
+  "gpu_pcie_rx_mb": [
+   5998.47,
+   5987.83,
+   6460.48,
+   6113.53,
+   5963.61,
+   5577.23,
+   6234.84,
+   6533.57
+  ],
+  "cpu": [
+   49.9,
+   50.6,
+   50.4,
+   49.9,
+   49.9,
+   50.1,
+   50.2,
+   49.8
+  ],
+  "ram_used": [
+   100264493056,
+   100238356480,
+   100238602240,
+   100305604608,
+   100334682112,
+   100360376320,
+   100371005440,
+   100406804480
+  ],
+  "disk_read_mb": [
+   0.38,
+   0.59,
+   0.44,
+   0.18,
+   0.55,
+   0.35,
+   0.38,
+   0.36
+  ],
+  "tok_s": [
+   12.8,
+   12.97,
+   12.97,
+   13.21,
+   13.38,
+   13.51,
+   13.48,
+   13.52
+  ],
+  "prefill_tok_s_mean": [
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "time": 1792804930.7597528,
+ "reload": null,
+ "storage": {
+  "path": "/models/Maya-S-v2-IQ2_XXS",
+  "free": 39688499200,
+  "total": 399719534592
+ }
+}

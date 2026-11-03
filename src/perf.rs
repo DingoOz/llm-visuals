@@ -5,7 +5,8 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::gpu::GpuStats;
+use crate::energy::ModelEnergy;
+use crate::gpu::{ClockReasons, GpuStats};
 use crate::host::HostSample;
 use crate::observe::{LiveStats, SpecMetrics};
 
@@ -39,6 +40,10 @@ pub struct RequestRecord {
     pub measured_prefill_tps: Option<f32>,
     pub decode_secs: f32,
     pub peak_decode_tps: f32,
+    /// The request was already running when the dashboard first saw it:
+    /// the tokens it had decoded by then. Its first token came before the
+    /// watching did, and its rate counts only the tokens that were watched.
+    pub attached_after: Option<usize>,
 }
 
 impl RequestRecord {
@@ -59,6 +64,7 @@ impl RequestRecord {
             measured_prefill_tps: None,
             decode_secs: 0.0,
             peak_decode_tps: 0.0,
+            attached_after: None,
         }
     }
 
@@ -69,6 +75,9 @@ impl RequestRecord {
     pub fn ttft(&self) -> Option<Duration> {
         if let Some(secs) = self.ttft {
             return Some(Duration::from_secs_f64(secs as f64));
+        }
+        if self.attached_after.is_some() {
+            return None;
         }
         self.first_token.map(|t| t - self.started)
     }
@@ -90,7 +99,8 @@ impl RequestRecord {
             }
         }
         if self.decode_secs > 0.05 {
-            self.decoded as f32 / self.decode_secs
+            let watched = self.decoded - self.attached_after.unwrap_or(0).min(self.decoded);
+            watched as f32 / self.decode_secs
         } else {
             0.0
         }
@@ -325,6 +335,8 @@ pub struct PerfTracker {
     /// Peak-hold markers for VU meters (fraction 0..1, and time set).
     pub util_peak: Vec<(f32, Instant)>,
     pub power_peak: Vec<(f32, Instant)>,
+    /// Clocks-event reasons per GPU, held briefly so they can be read.
+    pub clock_hold: Vec<ReasonHold>,
     pub current: Option<RequestRecord>,
     pub history: VecDeque<RequestRecord>,
     pub session_decoded: u64,
@@ -339,6 +351,8 @@ pub struct PerfTracker {
     pub spec: SpecStats,
     /// Memory pipeline meters (`b` view).
     pub bw: BandwidthStats,
+    /// GPU energy billed to this model (see `energy.rs`).
+    pub energy: ModelEnergy,
 }
 
 #[derive(Debug, Clone)]
@@ -523,8 +537,16 @@ pub struct BandwidthStats {
     /// RAM), per GPU index. The stage the busy meter cannot cover on a part
     /// without device memory: it always reads 0 there.
     pub vram_pool: Vec<Meter>,
-    /// Estimated weight stream out of VRAM across all GPUs, GB/s.
+    /// Estimated weight stream out of VRAM across all GPUs, GB/s; full
+    /// scale is `vram_peak_gb_s` when that is known.
     pub vram: Meter,
+    /// The same estimate before the meter clamps it to its scale: a stream
+    /// estimated past the peak says the estimate is off, not the card.
+    pub vram_gb_s: f32,
+    /// Each card's peak memory bandwidth, GB/s, by GPU index.
+    pub vram_peak: Vec<Option<f32>>,
+    /// Ceiling of the VRAM weight stream for this model's split, GB/s.
+    pub vram_peak_gb_s: Option<f32>,
     pub prefill: Meter,
     pub decode: Meter,
     /// Latest weight layout the estimates were made from.
@@ -544,8 +566,22 @@ pub struct WeightLayout {
     /// Weights that did not fit in VRAM (estimate: file size minus per-GPU
     /// weight share), read from system RAM by the CPU every step.
     pub cpu_bytes: u64,
+    /// Of `cpu_bytes`, the part llama.cpp's `-ot` / `--cpu-moe` rules put
+    /// there: exact, not estimated.
+    pub cpu_by_rule: u64,
+    /// Bytes read from RAM per step when the rules say which tensors are
+    /// CPU-side; otherwise `cpu_bytes` is taken at the model's active fraction.
+    /// Experts pinned to RAM are read at the routed fraction, which is far
+    /// below the whole model's.
+    pub cpu_active_bytes: Option<u64>,
     /// llama.cpp `--ubatch-size` (weights are read once per micro-batch in prefill).
     pub ubatch: usize,
+    /// Weight bytes held by each card, `(GPU index, bytes)`: the same split
+    /// the CPU-side estimate is made from.
+    pub gpu_bytes: Vec<(u32, u64)>,
+    /// The cards read their shares at once (tensor parallel, llama.cpp
+    /// `--split-mode row`) rather than one after another (a layer split).
+    pub parallel: bool,
 }
 
 impl WeightLayout {
@@ -557,9 +593,34 @@ impl WeightLayout {
         }
     }
 
+    /// The fastest the VRAM weight stream can run, GB/s, from each card's
+    /// peak (`peaks` by GPU index). A step reads every card's share: one
+    /// card after another under a layer split, all at once under a parallel
+    /// one, so the ceiling is the bytes over the time that takes. Unknown
+    /// unless every card holding weights has a known peak.
+    pub fn vram_peak_gb_s(&self, peaks: &[Option<f32>]) -> Option<f32> {
+        let (mut bytes, mut serial, mut slowest) = (0.0f64, 0.0f64, 0.0f64);
+        for &(i, b) in self.gpu_bytes.iter().filter(|(_, b)| *b > 0) {
+            let peak = peaks
+                .get(i as usize)
+                .copied()
+                .flatten()
+                .filter(|p| *p > 0.0)?;
+            let t = b as f64 / peak as f64;
+            bytes += b as f64;
+            serial += t;
+            slowest = slowest.max(t);
+        }
+        let t = if self.parallel { slowest } else { serial };
+        (bytes > 0.0).then(|| (bytes / t) as f32)
+    }
+
     /// Bytes streamed per step from RAM and from VRAM respectively.
     pub fn per_step(&self) -> (f32, f32) {
-        let cpu_active = self.cpu_bytes as f32 * self.active_frac();
+        let cpu_active = match self.cpu_active_bytes {
+            Some(b) => b as f32,
+            None => self.cpu_bytes as f32 * self.active_frac(),
+        };
         let vram_active = (self.active_bytes as f32 - cpu_active).max(0.0);
         (cpu_active, vram_active)
     }
@@ -581,6 +642,9 @@ impl BandwidthStats {
             vram_busy: Vec::new(),
             vram_pool: Vec::new(),
             vram: Meter::auto(100.0),
+            vram_gb_s: 0.0,
+            vram_peak: Vec::new(),
+            vram_peak_gb_s: None,
             prefill: Meter::auto(100.0),
             decode: Meter::auto(10.0),
             layout: WeightLayout::default(),
@@ -594,11 +658,14 @@ impl BandwidthStats {
             self.pcie_tx.push(0.0);
             self.vram_busy.push(Meter::fixed(100.0));
             self.vram_pool.push(Meter::fixed(100.0));
+            self.vram_peak.push(None);
         }
         for g in gpus {
             let i = g.index as usize;
             if i < self.pcie_rx.len() {
                 self.pcie_rx[i].full_scale = pcie_link_mb_s(g.pcie_gen, g.pcie_width);
+                // A unified pool is not VRAM; its stage shows pool fill.
+                self.vram_peak[i] = g.mem_peak_gb_s.filter(|_| !g.unified);
             }
         }
     }
@@ -697,6 +764,7 @@ impl PerfTracker {
             temp_hist: Vec::new(),
             util_peak: Vec::new(),
             power_peak: Vec::new(),
+            clock_hold: Vec::new(),
             current: None,
             history: VecDeque::with_capacity(MAX_REQUESTS),
             session_decoded: 0,
@@ -708,6 +776,7 @@ impl PerfTracker {
             poll_ok: false,
             spec: SpecStats::new(),
             bw: BandwidthStats::new(),
+            energy: ModelEnergy::default(),
         }
     }
 
@@ -737,6 +806,14 @@ impl PerfTracker {
         } else {
             (0.0, 0.0)
         };
+        let peak = if layout.known {
+            layout.vram_peak_gb_s(&self.bw.vram_peak)
+        } else {
+            None
+        };
+        self.bw.vram_peak_gb_s = peak;
+        self.bw.vram.full_scale = peak;
+        self.bw.vram_gb_s = vram;
         self.bw.ram.update(ram, now, dt);
         self.bw.vram.update(vram, now, dt);
     }
@@ -764,7 +841,9 @@ impl PerfTracker {
         let Some((t0, prev)) = self.last_sample.clone() else {
             self.last_sample = Some((now, s.clone()));
             if s.processing {
-                self.current = Some(RequestRecord::new(s.id_task, now, s));
+                let mut rec = RequestRecord::new(s.id_task, now, s);
+                rec.attached_after = Some(s.decoded);
+                self.current = Some(rec);
                 self.session_requests += 1;
             }
             return;
@@ -1009,6 +1088,7 @@ impl PerfTracker {
             self.temp_hist.push(VecDeque::with_capacity(HISTORY));
             self.util_peak.push((0.0, now));
             self.power_peak.push((0.0, now));
+            self.clock_hold.push(ReasonHold::default());
         }
         self.total_power_w = gpus.iter().map(|g| g.power_watts).sum();
         self.bw.ensure_gpu(n, gpus);
@@ -1027,6 +1107,7 @@ impl PerfTracker {
             push(&mut self.temp_hist[i], g.temperature.unwrap_or(0.0));
             hold_peak(&mut self.util_peak[i], g.utilization_gpu / 100.0, now, dt);
             hold_peak(&mut self.power_peak[i], g.power_frac(), now, dt);
+            self.clock_hold[i].observe(g.clock_reasons, now);
         }
     }
 
@@ -1038,6 +1119,41 @@ impl PerfTracker {
         }
         out.extend(self.history.iter().rev().take(n.saturating_sub(out.len())));
         out
+    }
+}
+
+/// How long a clocks-event reason stays on the card after the driver last
+/// reported it.
+const REASON_HOLD: Duration = Duration::from_millis(1500);
+
+/// Clocks-event reasons with a short hold, bit by bit: a power cap that is on
+/// for one 200 ms poll stays on screen for 1.5 s rather than flashing past
+/// unread. The hold only stretches what the driver reported, and one reason
+/// never keeps another alive; nothing shows that was not seen in that time.
+#[derive(Debug, Default, Clone)]
+pub struct ReasonHold {
+    /// When each of the nine bits nvml.h defines was last reported.
+    seen: [Option<Instant>; 9],
+}
+
+impl ReasonHold {
+    pub fn observe(&mut self, reasons: Option<ClockReasons>, now: Instant) {
+        let Some(reasons) = reasons else { return };
+        for (bit, seen) in self.seen.iter_mut().enumerate() {
+            if reasons.0 & (1 << bit) != 0 {
+                *seen = Some(now);
+            }
+        }
+    }
+
+    pub fn held(&self, now: Instant) -> ClockReasons {
+        ClockReasons(
+            self.seen
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.is_some_and(|t| now.duration_since(t) <= REASON_HOLD))
+                .fold(0, |bits, (bit, _)| bits | 1 << bit),
+        )
     }
 }
 
@@ -1061,6 +1177,55 @@ fn push(h: &mut VecDeque<f32>, v: f32) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_request_seen_mid_flight_counts_only_what_was_watched() {
+        let t0 = Instant::now();
+        let busy = |decoded: usize| LiveStats {
+            processing: true,
+            id_task: 7,
+            prompt_tokens: 40,
+            prompt_processed: 40,
+            decoded,
+            decoded_present: true,
+            ..Default::default()
+        };
+        let mut p = PerfTracker::new();
+        // Attached 8,000 tokens into a long answer, then 12 tokens a second.
+        p.observe(&busy(8000), t0);
+        for i in 1..=5u64 {
+            p.observe(&busy(8000 + 12 * i as usize), t0 + Duration::from_secs(i));
+        }
+        let r = p.current.as_ref().unwrap();
+        assert!(
+            (r.avg_decode_tps() - 12.0).abs() < 0.5,
+            "{}",
+            r.avg_decode_tps()
+        );
+        // Its first token came before the dashboard was watching.
+        assert_eq!(r.ttft(), None);
+        assert_eq!(r.decoded, 8060);
+    }
+
+    #[test]
+    fn clock_reasons_are_held_briefly_and_bit_by_bit() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut h = ReasonHold::default();
+        assert_eq!(h.held(t0), ClockReasons(0));
+        // A power cap seen for a single poll is still on screen 1.5 s later,
+        // and gone after that.
+        h.observe(Some(ClockReasons(ClockReasons::SW_POWER_CAP)), at(0));
+        h.observe(Some(ClockReasons(0)), at(200));
+        assert_eq!(h.held(at(1500)), ClockReasons(ClockReasons::SW_POWER_CAP));
+        assert_eq!(h.held(at(1501)), ClockReasons(0));
+        // A later reason does not keep an earlier one alive.
+        h.observe(Some(ClockReasons(ClockReasons::SW_THERMAL)), at(1000));
+        assert_eq!(h.held(at(2000)), ClockReasons(ClockReasons::SW_THERMAL));
+        // A poll that could not read the reasons changes nothing.
+        h.observe(None, at(2100));
+        assert_eq!(h.held(at(2400)), ClockReasons(ClockReasons::SW_THERMAL));
+    }
+
     fn slot(
         id: i64,
         processing: bool,
@@ -1077,6 +1242,32 @@ mod tests {
             id_task: id,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn vram_ceiling_follows_the_split() {
+        let layout = |parallel| WeightLayout {
+            known: true,
+            gpu_bytes: vec![(0, 6_000_000_000), (1, 2_000_000_000)],
+            parallel,
+            ..Default::default()
+        };
+        let peaks = [Some(256.0), Some(732.0)];
+        // Layer split: 6 GB at 256 then 2 GB at 732, one after the other.
+        let serial = 8.0 / (6.0 / 256.0 + 2.0 / 732.0);
+        let got = layout(false).vram_peak_gb_s(&peaks).unwrap();
+        assert!((got - serial).abs() < 0.01, "{got}");
+        // Row split: both at once, so the slower card's 6 GB sets the pace.
+        let parallel = 8.0 / (6.0 / 256.0);
+        let got = layout(true).vram_peak_gb_s(&peaks).unwrap();
+        assert!((got - parallel).abs() < 0.01, "{got}");
+        // One card without a peak leaves the ceiling unknown; a card that
+        // holds no weights does not need one.
+        assert_eq!(layout(false).vram_peak_gb_s(&[Some(256.0), None]), None);
+        let mut one = layout(false);
+        one.gpu_bytes[1].1 = 0;
+        assert_eq!(one.vram_peak_gb_s(&[Some(256.0), None]), Some(256.0));
+        assert_eq!(WeightLayout::default().vram_peak_gb_s(&peaks), None);
     }
 
     #[test]
@@ -1590,6 +1781,7 @@ mod tests {
             active_bytes: 2_500_000_000,
             cpu_bytes: 8_000_000_000,
             ubatch: 512,
+            ..Default::default()
         };
         // 8 GB on the CPU side × 12.5 % active = 1 GB per step from RAM,
         // the other 1.5 GB per step from VRAM.

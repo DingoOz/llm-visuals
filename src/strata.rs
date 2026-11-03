@@ -5,9 +5,11 @@
 //! child that holds the GPU memory. `GET /metrics` is one JSON document
 //! with the engine's facts, the request in flight and the last finished
 //! requests; from 0.1.40.2 a client that accepts `text/plain` gets a
-//! Prometheus rendering of it instead, so this asks for JSON. One sequence runs
-//! at a time unless the engine batches (`live.parallel` slots); then `live`
-//! describes the newest request in flight.
+//! Prometheus rendering of it instead, so this asks for JSON. One sequence
+//! runs at a time unless the engine batches (`live.parallel` slots); then
+//! `live` describes the newest request in flight. From 0.2.1 the server may
+//! hold an `api_key` in the JSON config named by `--config` on its cmdline;
+//! the dashboard reads it there (`parse_config`).
 //!
 //! The in-flight request carries its prompt size, prefill progress
 //! (`prompt_read`), measured prefill rate (`prefill_tok_s_mean`, newer
@@ -16,6 +18,15 @@
 //! `requests`, so the idle sample reports them for the request that just
 //! closed. MTP draft counts (Strata 0.1.35+) likewise move only when a
 //! request ends.
+//!
+//! Project Maya is built on Strata's engine and keeps its front end: the same
+//! `serve/server.py --engine strata` drives a native `maya --serve` (GLM) or
+//! `maya-ds4 --serve` (DeepSeek) child, and its `/metrics` is this document
+//! plus what Maya adds: `engine.maya_version`, the expert tiers (`tiers`,
+//! where each token's experts were found: VRAM, RAM or SSD) and each card's
+//! VRAM by use (`gpu_map`). It runs its vision encoder as a separate
+//! `maya-vision` helper. The engine is named `maya` so it reads as itself
+//! on screen and in the log; [`is_family`] keeps the two on one adapter.
 
 use crate::observe::{http_get, http_get_json, ClosingRequest, HttpAuth, LiveStats, SpecMetrics};
 use serde_json::Value;
@@ -83,6 +94,85 @@ pub struct StrataMetrics {
     /// Running draft totals (`totals.drafts_offered` / `drafts_accepted`,
     /// Strata 0.1.35+). None on older servers.
     pub spec: Option<SpecMetrics>,
+    /// `engine.maya_version`: the server is Project Maya's.
+    pub maya_version: Option<String>,
+    /// Maya's expert tiers; None on Strata and before the first token.
+    pub tiers: Option<ExpertTiers>,
+    /// Maya's `gpu_map`, summed over its cards.
+    pub vram: Option<VramSplit>,
+}
+
+/// Where a Maya engine found the experts its tokens routed to (`tiers.now`,
+/// from the engine's own STAT lines). Counts are experts per token; slots
+/// are the expert-sized places each tier has, and how many hold one.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExpertTiers {
+    /// Share of the routed experts found in VRAM (0..1).
+    pub vram_hit: Option<f32>,
+    pub ram_fetch: Option<f32>,
+    pub disk: Option<f32>,
+    pub promo: Option<f32>,
+    /// DeepSeek's CPU lane: experts a token computed on the CPU.
+    pub cpu: Option<f32>,
+    pub vram_used: Option<usize>,
+    pub vram_slots: Option<usize>,
+    pub ram_used: Option<usize>,
+    pub ram_slots: Option<usize>,
+    /// The engine's recent `vram_hit` readings, oldest first.
+    pub hit_history: Vec<f32>,
+}
+
+/// What the engine says fills its cards, GiB (`gpu_map[].parts`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct VramSplit {
+    /// Dense weights, the expert pool, a drafter and the vision encoder:
+    /// everything that is model rather than working memory.
+    pub weights_gb: f32,
+    pub kv_gb: f32,
+    /// Activations, prompt buffers and the engine's remaining allocations.
+    pub other_gb: f32,
+}
+
+fn parse_tiers(v: &Value) -> Option<ExpertTiers> {
+    let now = v.get("now").filter(|n| n.is_object())?;
+    let f = |k: &str| f64_at(now, k).map(|x| x as f32).filter(|x| x.is_finite());
+    let hit_history = v
+        .get("history")
+        .and_then(|h| h.get("vram_hit"))
+        .and_then(|a| a.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_f64())
+                .map(|x| x as f32)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ExpertTiers {
+        vram_hit: f("vram_hit").map(|h| h.clamp(0.0, 1.0)),
+        ram_fetch: f("ram_fetch"),
+        disk: f("disk"),
+        promo: f("promo"),
+        cpu: f("cpu"),
+        vram_used: usize_at(now, "vram_used"),
+        vram_slots: usize_at(now, "vram_slots"),
+        ram_used: usize_at(now, "ram_used"),
+        ram_slots: usize_at(now, "ram_slots"),
+        hit_history,
+    })
+}
+
+fn parse_gpu_map(v: &Value) -> Option<VramSplit> {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let cards = v.as_array().filter(|a| !a.is_empty())?;
+    let mut out = VramSplit::default();
+    for card in cards {
+        let parts = card.get("parts")?;
+        let sum = |keys: &[&str]| keys.iter().filter_map(|k| f64_at(parts, k)).sum::<f64>() / GIB;
+        out.weights_gb += sum(&["weights", "pool", "drafter", "tp", "vision"]) as f32;
+        out.kv_gb += sum(&["kv"]) as f32;
+        out.other_gb += sum(&["act", "prompt", "rest"]) as f32;
+    }
+    Some(out)
 }
 
 impl StrataMetrics {
@@ -157,6 +247,13 @@ pub fn parse_metrics(body: &str) -> Option<StrataMetrics> {
         last,
         mtp_max: usize_at(engine, "mtp_max").unwrap_or(0),
         spec,
+        maya_version: engine
+            .get("maya_version")
+            .and_then(|m| m.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        tiers: v.get("tiers").and_then(parse_tiers),
+        vram: v.get("gpu_map").and_then(parse_gpu_map),
     })
 }
 
@@ -182,16 +279,25 @@ pub async fn poll_metrics(host: &str, port: u16, auth: &HttpAuth) -> Option<Stra
 pub struct StrataHealth {
     pub model: Option<String>,
     pub max_context: usize,
+    /// Maya's `/health`, which carries its version where Strata names its
+    /// service.
+    pub maya: bool,
 }
 
-/// Parse `/health`. `None` unless it names the strata service: llama.cpp
+/// Parse `/health`. `None` unless it is Strata's or Maya's: llama.cpp
 /// answers the same path with a bare `{"status":"ok"}`.
 pub fn parse_health(body: &str) -> Option<StrataHealth> {
     let v: Value = serde_json::from_str(body).ok()?;
-    if v.get("service").and_then(|s| s.as_str())? != "strata" {
+    let strata = v.get("service").and_then(|s| s.as_str()) == Some("strata");
+    // Maya names no service; its version beside the MCP switch is its own.
+    let maya = !strata
+        && v.get("version").is_some_and(Value::is_string)
+        && v.get("mcp_tools").is_some_and(Value::is_boolean);
+    if !strata && !maya {
         return None;
     }
     Some(StrataHealth {
+        maya,
         model: v
             .get("model")
             .and_then(|m| m.as_str())
@@ -244,6 +350,10 @@ pub fn live_stats(m: &StrataMetrics) -> LiveStats {
         } else {
             0.0
         }),
+        tiers: m.tiers.clone(),
+        weight_gb: m.vram.map(|v| v.weights_gb),
+        kv_cache_gb: m.vram.map(|v| v.kv_gb),
+        graph_gb: m.vram.map(|v| v.other_gb),
         ..Default::default()
     };
     if busy {
@@ -324,6 +434,25 @@ impl StrataAdapter {
     }
 }
 
+/// Engine names served by this adapter.
+pub fn is_family(engine: &str) -> bool {
+    matches!(engine, "strata" | "maya")
+}
+
+/// The base name of argv[0], lower-cased, without `.exe`.
+fn argv0_base(process_name: &str, cmdline: &str) -> String {
+    let argv0 = cmdline.split_whitespace().next().unwrap_or(process_name);
+    // Either separator, so a Windows path reads the same wherever it is parsed.
+    let base = argv0
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    base.strip_suffix(".exe")
+        .map(str::to_string)
+        .unwrap_or(base)
+}
+
 /// `serve/server.py --engine strata`: the process that serves HTTP.
 pub fn is_server(cmdline: &str) -> bool {
     let toks: Vec<&str> = cmdline.split_whitespace().collect();
@@ -334,15 +463,24 @@ pub fn is_server(cmdline: &str) -> bool {
         .any(|t| Path::new(t).file_name().is_some_and(|f| f == "server.py"))
 }
 
-/// The native `strata --serve` child. It holds the GPU memory but speaks
-/// only to its parent over a pipe, so it is folded into the server.
+/// The native `strata --serve` child (Maya's `maya` / `maya-ds4`). It holds
+/// the GPU memory but speaks only to its parent over a pipe, so it is folded
+/// into the server.
 pub fn is_engine(process_name: &str, cmdline: &str) -> bool {
-    let argv0 = cmdline.split_whitespace().next().unwrap_or(process_name);
-    let base = Path::new(argv0)
-        .file_name()
-        .map(|f| f.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    (base == "strata" || base == "strata.exe") && cmdline.split_whitespace().any(|t| t == "--serve")
+    // Per-model builds carry a suffix (`strata-dsv41`, `maya-ds4`).
+    let base = argv0_base(process_name, cmdline);
+    let named = ["strata", "maya"]
+        .iter()
+        .any(|n| base == *n || base.strip_prefix(n).is_some_and(|r| r.starts_with('-')));
+    named && base != "maya-vision" && cmdline.split_whitespace().any(|t| t == "--serve")
+}
+
+/// Maya's vision encoder, which its server runs beside the engine
+/// (`maya-vision --mmproj … --model …-vocab.gguf`). It loads a GGUF and holds
+/// GPU memory, so it looks like a server, but it serves no API: it is the
+/// server's encoder, folded into it like the engine.
+pub fn is_helper(process_name: &str, cmdline: &str) -> bool {
+    argv0_base(process_name, cmdline) == "maya-vision"
 }
 
 /// What the server's `--config` JSON says about the model.
@@ -352,6 +490,17 @@ pub struct StrataConfig {
     /// First GGUF shard (`--native`), which carries the header.
     pub gguf: Option<PathBuf>,
     pub max_context: Option<usize>,
+    /// First `api_key`: a string (llama.cpp-style `"a,b"` lists allowed,
+    /// the first counts) or a JSON list of keys.
+    pub api_key: Option<String>,
+    /// The engine is Maya's (`exe` named `maya…`; older Maya builds kept
+    /// Strata's name for it, and say so in `/metrics` instead).
+    pub maya: bool,
+    /// Maya's expert pack (`--glm-pack`, or `--pack` for DeepSeek), whose
+    /// `sources.json` names the GGUF shards beside it.
+    pub pack: Option<PathBuf>,
+    /// Maya's `gpu` list: the cards the engine was given.
+    pub gpus: Vec<u32>,
 }
 
 pub fn parse_config(body: &str) -> Option<StrataConfig> {
@@ -361,6 +510,18 @@ pub fn parse_config(body: &str) -> Option<StrataConfig> {
         .and_then(|a| a.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
         .unwrap_or_default();
+    let first = |s: &str| {
+        s.split(',')
+            .next()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(str::to_string)
+    };
+    let api_key = match v.get("api_key") {
+        Some(Value::String(s)) => first(s),
+        Some(Value::Array(list)) => list.first().and_then(|k| k.as_str()).and_then(first),
+        _ => None,
+    };
     let flag = |name: &str| {
         args.iter()
             .position(|a| *a == name)
@@ -374,7 +535,76 @@ pub fn parse_config(body: &str) -> Option<StrataConfig> {
             .map(str::to_string),
         gguf: flag("--native").map(PathBuf::from),
         max_context: flag("--max-context").and_then(|s| s.parse().ok()),
+        api_key,
+        maya: v
+            .get("exe")
+            .and_then(|e| e.as_str())
+            .is_some_and(|e| argv0_base("", e).starts_with("maya")),
+        pack: flag("--glm-pack")
+            .or_else(|| flag("--pack"))
+            .map(PathBuf::from),
+        // A list of cards, or Strata's single index (`"gpu": 1`).
+        gpus: match v.get("gpu") {
+            Some(Value::Array(a)) => a
+                .iter()
+                .filter_map(|x| x.as_u64())
+                .map(|x| x as u32)
+                .collect(),
+            Some(Value::Number(n)) => n.as_u64().map(|x| x as u32).into_iter().collect(),
+            _ => Vec::new(),
+        },
     })
+}
+
+/// The first GGUF shard an expert pack was built from: `sources.json` lists
+/// the files, which sit in the pack's parent folder. A DeepSeek pack
+/// (`ds4.txt`) says instead in `tensors.txt`, beside the `model_dir` they
+/// sit in.
+pub fn pack_gguf(pack: &Path) -> Option<PathBuf> {
+    sources_gguf(pack).or_else(|| ds4_gguf(pack))
+}
+
+fn sources_gguf(pack: &Path) -> Option<PathBuf> {
+    let body = std::fs::read_to_string(pack.join("sources.json")).ok()?;
+    let v: Value = serde_json::from_str(&body).ok()?;
+    let mut names: Vec<&str> = v
+        .get("files")?
+        .as_array()?
+        .iter()
+        .filter_map(|f| f.get("name")?.as_str())
+        .filter(|n| n.ends_with(".gguf"))
+        .collect();
+    // `-00001-of-` sorts first; the header is in that shard.
+    names.sort_unstable();
+    Some(pack.parent()?.join(names.first()?))
+}
+
+/// `tensors.txt` opens with `file <n> <name>` lines (the model's shards, then
+/// extras such as an Engram table or a drafter) before thousands of tensor
+/// lines, so only its head is read.
+fn ds4_gguf(pack: &Path) -> Option<PathBuf> {
+    use std::io::BufRead;
+    let conf = std::fs::read_to_string(pack.join("ds4.txt")).ok()?;
+    let dir = conf
+        .lines()
+        .find_map(|l| l.strip_prefix("model_dir "))
+        .map(|d| PathBuf::from(d.trim()))
+        .or_else(|| pack.parent().map(Path::to_path_buf))?;
+    let f = std::fs::File::open(pack.join("tensors.txt")).ok()?;
+    let name = std::io::BufReader::new(f)
+        .lines()
+        .take(64)
+        .map_while(Result::ok)
+        .filter_map(|l| {
+            let mut t = l.split_whitespace();
+            (t.next() == Some("file")).then_some(())?;
+            let n: u32 = t.next()?.parse().ok()?;
+            let name = t.next()?.to_string();
+            name.ends_with(".gguf").then_some((n, name))
+        })
+        .min()?
+        .1;
+    Some(dir.join(name))
 }
 
 /// The `--config` path on a server command line, resolved against `cwd`.
@@ -801,8 +1031,161 @@ mod tests {
         assert!(!is_server("python serve/server.py --engine mock"));
         assert!(!is_server("vim strata"));
         assert!(is_engine("strata", ENGINE));
+        assert!(is_engine(
+            "strata-dsv41",
+            "/s/build-dsv41-sm6070/strata-dsv41 --serve --pack /p --max-context 98304"
+        ));
+        assert!(!is_engine("stratagem", "/bin/stratagem --serve"));
         assert!(!is_engine("strata", "/opt/strata/engine/strata --bench"));
         assert!(!is_engine("python", SERVER));
+    }
+
+    #[test]
+    fn maya_metrics_carry_the_tiers_and_the_vram_split() {
+        // A real Maya 1.1.25 reply (GLM-5.3-Flash on a V100), histories cut.
+        let body = std::fs::read_to_string("fixtures/maya-metrics.json").unwrap();
+        let m = parse_metrics(&body).unwrap();
+        assert_eq!(m.maya_version.as_deref(), Some("1.1.25"));
+        assert_eq!(m.model.as_deref(), Some("glm-5.3-flash"));
+        assert_eq!(m.state, "generating");
+        let t = m.tiers.as_ref().unwrap();
+        assert!((t.vram_hit.unwrap() - 0.4473).abs() < 1e-4);
+        assert!((t.ram_fetch.unwrap() - 60.82).abs() < 1e-3);
+        assert_eq!(t.disk, Some(0.0));
+        assert_eq!((t.vram_used, t.vram_slots), (Some(973), Some(1058)));
+        assert_eq!((t.ram_used, t.ram_slots), (Some(11070), Some(11784)));
+        assert_eq!(t.cpu, None, "the CPU lane is DeepSeek's");
+        assert_eq!(t.hit_history.len(), 8);
+        // weights 7.36 GB + expert pool 7.53 GB + vision 0.32 GB; KV 0.66 GB.
+        let v = m.vram.unwrap();
+        assert!((v.weights_gb - 14.169).abs() < 0.01, "{}", v.weights_gb);
+        assert!((v.kv_gb - 0.6156).abs() < 0.001, "{}", v.kv_gb);
+        let s = live_stats(&m);
+        assert!(s.processing);
+        assert_eq!(s.weight_gb, Some(v.weights_gb));
+        assert_eq!(s.kv_cache_gb, Some(v.kv_gb));
+        assert_eq!(s.tiers.as_ref(), Some(t));
+        // Strata's own document has neither.
+        let strata = std::fs::read_to_string("fixtures/strata-metrics.json").unwrap();
+        let m = parse_metrics(&strata).unwrap();
+        assert_eq!((m.maya_version, m.tiers, m.vram), (None, None, None));
+    }
+
+    #[test]
+    fn maya_health_is_recognised_by_its_shape() {
+        // serve/server.py's /health in Maya 1.1.25, as served.
+        let h = parse_health(
+            r#"{"status": "ok", "max_context": 32768, "model": "glm-5.3-flash", "images": true, "api_key": false, "defaults": {"temperature": 1.0, "top_p": 0.95, "reasoning_effort": "high"}, "version": "1.1.25", "mcp_tools": false, "unloaded": false}"#,
+        )
+        .unwrap();
+        assert!(h.maya);
+        assert_eq!(h.model.as_deref(), Some("glm-5.3-flash"));
+        assert!(
+            !parse_health(r#"{"service":"strata","model":"q"}"#)
+                .unwrap()
+                .maya
+        );
+        assert!(parse_health(r#"{"status":"ok","version":"b1234"}"#).is_none());
+    }
+
+    #[test]
+    fn recognises_maya_engines_and_its_vision_helper() {
+        let glm = "/opt/project-maya/build/maya --serve --glm-pack /m/pack --max-context 32768";
+        let ds4 = "/opt/project-maya/build/maya-ds4 --serve --pack /m/pack";
+        let vision = "/opt/project-maya/build-vision/bin/maya-vision --mmproj /m/mmproj-F16.gguf \
+                      --model /m/GLM-5.3-Flash-vocab.gguf --max-tokens 2048";
+        assert!(is_engine("maya", glm));
+        assert!(is_engine("maya-ds4", ds4));
+        assert!(is_engine(
+            "maya.exe",
+            "C:\\maya\\maya.exe --serve --glm-pack C:\\m\\pack"
+        ));
+        assert!(!is_engine("maya", "/opt/project-maya/build/maya --bench"));
+        assert!(!is_engine("maya-vision", vision));
+        assert!(is_helper("maya-vision", vision));
+        assert!(!is_helper("maya", glm));
+        assert!(is_family("maya") && is_family("strata") && !is_family("vllm"));
+    }
+
+    #[test]
+    fn maya_config_names_its_engine_pack_and_cards() {
+        let c = parse_config(
+            r#"{"exe": "/opt/project-maya/build/maya",
+                "args": ["--glm-pack", "/m/Maya-S/pack", "--max-context", "32768"],
+                "model_name": "glm-5.3-flash", "gpu": [1], "port": 8080}"#,
+        )
+        .unwrap();
+        assert!(c.maya);
+        assert_eq!(c.pack, Some(PathBuf::from("/m/Maya-S/pack")));
+        assert_eq!(c.gguf, None);
+        assert_eq!(c.gpus, vec![1]);
+        assert_eq!(c.max_context, Some(32768));
+        // Strata's own engine, and a Maya build from before the rename.
+        let c = parse_config(r#"{"exe": "/opt/strata/strata", "args": ["--pack", "/p"]}"#).unwrap();
+        assert!(!c.maya);
+        assert_eq!(c.pack, Some(PathBuf::from("/p")));
+
+        let dir = std::env::temp_dir().join(format!("lv-maya-pack-{}", std::process::id()));
+        let pack = dir.join("pack");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(
+            pack.join("sources.json"),
+            r#"{"files": [{"name": "M-00002-of-00002.gguf"}, {"name": "M-00001-of-00002.gguf"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(pack_gguf(&pack), Some(dir.join("M-00001-of-00002.gguf")));
+        assert_eq!(pack_gguf(&dir), None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn deepseek_pack_names_its_gguf_in_tensors_txt() {
+        // Strata's DeepSeek-V4.1 config: a bare card index, no `--native`.
+        let c = parse_config(
+            r#"{"exe": "/s/build-dsv41-sm6070/strata-dsv41",
+                "args": ["--pack", "/p/ist-das-2.00bpw", "--max-context", "98304"],
+                "model_name": "deepseek-v4.1-flash", "arch": "deepseek41", "gpu": 1}"#,
+        )
+        .unwrap();
+        assert!(!c.maya);
+        assert_eq!(c.gpus, vec![1]);
+        assert_eq!(c.gguf, None);
+        assert_eq!(
+            parse_config(r#"{"gpu": true}"#).unwrap().gpus,
+            Vec::<u32>::new()
+        );
+
+        let dir = std::env::temp_dir().join(format!("lv-ds4-pack-{}", std::process::id()));
+        let pack = dir.join("packs").join("ist-das");
+        std::fs::create_dir_all(&pack).unwrap();
+        let models = dir.join("models");
+        std::fs::write(
+            pack.join("ds4.txt"),
+            format!(
+                "n_routed_experts 384\nformat gguf\nmodel_dir {}\n",
+                models.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            pack.join("tensors.txt"),
+            "file 1 DS-IQ2_XXS-00002-of-00002.gguf\n\
+             file 0 DS-IQ2_XXS-00001-of-00002.gguf\n\
+             file 2 dspark-DS-Q8_0.gguf\n\
+             t layers.0.ffn.experts.0.w1.weight IQ1_M 0 5772864 2580480 2304 5120\n",
+        )
+        .unwrap();
+        assert_eq!(
+            pack_gguf(&pack),
+            Some(models.join("DS-IQ2_XXS-00001-of-00002.gguf"))
+        );
+        // Without `model_dir` the shards sit beside the pack.
+        std::fs::write(pack.join("ds4.txt"), "format gguf\n").unwrap();
+        assert_eq!(
+            pack_gguf(&pack),
+            Some(dir.join("packs").join("DS-IQ2_XXS-00001-of-00002.gguf"))
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -815,6 +1198,16 @@ mod tests {
         assert_eq!(c.model_name.as_deref(), Some("qwen-iq2"));
         assert_eq!(c.gguf, Some(PathBuf::from("/m/a-00001-of-00002.gguf")));
         assert_eq!(c.max_context, Some(32768));
+        assert_eq!(c.api_key, None);
+        let key = |body: &str| parse_config(body).unwrap().api_key;
+        assert_eq!(
+            key(r#"{"api_key": "k1, k2"}"#).as_deref(),
+            Some("k1"),
+            "comma list: the first key counts"
+        );
+        assert_eq!(key(r#"{"api_key": ["a", "b"]}"#).as_deref(), Some("a"));
+        assert_eq!(key(r#"{"api_key": ""}"#), None);
+        assert_eq!(key(r#"{"api_key": 7}"#), None);
         assert_eq!(
             config_path(SERVER, Some(Path::new("/srv/strata"))),
             Some(PathBuf::from("/srv/strata/strata-iq2_xs.json"))

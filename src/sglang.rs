@@ -396,6 +396,8 @@ impl SglangAdapter {
             kv_tokens: Some(used),
             kv_usage_perc: None,
             auth_denied: None,
+            ollama: None,
+            tiers: None,
         };
 
         // (generated_total, steps_total) so the caller can apply
