@@ -20,6 +20,8 @@ pub enum ViewMode {
     Bandwidth,
     /// Side-by-side comparison of every detected model.
     Models,
+    /// Every card in detail: live telemetry, hardware, PCIe, driver, kernel.
+    Gpus,
 }
 
 impl std::fmt::Display for ViewMode {
@@ -33,6 +35,7 @@ impl std::fmt::Display for ViewMode {
             ViewMode::Balance => write!(f, "balance"),
             ViewMode::Bandwidth => write!(f, "bandwidth"),
             ViewMode::Models => write!(f, "models"),
+            ViewMode::Gpus => write!(f, "gpus"),
         }
     }
 }
@@ -113,6 +116,12 @@ pub struct Args {
     /// Force nvidia-smi CLI fallback instead of native in-process NVML driver telemetry
     #[arg(long)]
     pub no_nvml: bool,
+
+    /// Side-by-side legacy NVIDIA driver kit (the directory holding
+    /// shim/nvlegacy_shim.so and nvml-mux/), or "off". Found automatically
+    /// when /dev/nvidia-legacy/nvidiactl exists
+    #[arg(long, value_name = "DIR|off")]
+    pub nvidia_legacy: Option<String>,
 
     /// Number of MoE experts per layer (for demo)
     #[arg(long, default_value_t = 4)]

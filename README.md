@@ -141,7 +141,7 @@ console, pass `--color truecolor` if colours look flat.
 ### What to test
 
 - [ ] `cargo build --release` completes (MSVC linker and SQLite C build found).
-- [ ] `--demo` renders every view (`a` `p` `h` `m` `e` `u` `b` `v`) and `q` restores
+- [ ] `--demo` renders every view (`a` `p` `h` `m` `e` `u` `b` `v` `g`) and `q` restores
       the terminal.
 - [ ] Colours: truecolor is picked automatically in Windows Terminal.
 - [ ] GPU panels show utilisation, VRAM, power and temperature from `nvidia-smi`.
@@ -368,6 +368,27 @@ Below the cards, a system RAM section shows memory in use / page cache / free
 against the machine's total, the focused model's resident size, and a history
 of RAM in use. It is on both the dashboard and the perf view, and is the first
 thing the panel drops on a short terminal.
+
+#### Two NVIDIA drivers side by side
+
+A card the current driver has dropped (a V100 on a Blackwell-era release) can
+run on an older proprietary driver loaded next to the open one as
+`nvidia-legacy.ko`, with its device nodes in `/dev/nvidia-legacy/` and an
+`LD_PRELOAD` shim (`shim/nvlegacy_shim.so`) that points NVIDIA's user space
+at them. When `/dev/nvidia-legacy/nvidiactl` exists the panel shows the GPUs
+of both drivers: the open driver's first, then the legacy driver's, numbered
+on from there the way that kit's `nvidia-smi-all -L` numbers them (5060 Ti
+`G0`, V100 `G1`). `--gpu`, the PCIe stage, the compute-app table that places
+a model on its cards, `CUDA_VISIBLE_DEVICES` of a server started under
+`nvlegacy-run` and the vision-encoder probe all use that numbering.
+
+NVML is loaded a second time for the legacy driver, in its own `dlmopen`
+namespace, from the kit's `nvml-mux/lib/nvml_legacy_loader.so` (`make -C
+nvml-mux`); without it the panel falls back to nvidia-smi, run once per
+driver. The kit is found from `--nvidia-legacy DIR`, else `nvlegacy-run` or
+`nvidia-smi-all` on `PATH`, else the `LD_PRELOAD` of a process already on
+the legacy driver, else a checkout up to two levels below `$HOME` or in
+`/opt`. `--nvidia-legacy off` shows the open driver's GPUs only.
 
 ### Vision encoder
 
@@ -789,6 +810,42 @@ for anything else.
 
 ---
 
+## GPU details
+
+`g` opens a screen per card with everything the driver, CUDA and the kernel
+will say about it, on top of a strip for the box as a whole.
+
+- **System:** driver version per kernel driver (open or proprietary modules,
+  both on a two-driver host), the CUDA version it supports, NVML, the compiler
+  it was built with; kernel release and build, distribution, CPU, IOMMU,
+  transparent hugepages, `nvidia_drm` modeset; the loaded GPU modules with
+  size, reference count and taint; boot parameters that touch GPUs; and the
+  NVIDIA module parameters (GSP firmware, resizable BAR, power management…).
+- **Live**, refreshed with the dashboard and drawn with history: load, memory
+  controller, VRAM, temperature against the slowdown and shutdown points,
+  memory temperature, power against its limit and allowed range, SM /
+  graphics / memory / video clocks against their maxima, fans, P-state and
+  what is holding the clocks, NVENC / NVDEC, PCIe traffic, energy since the
+  driver loaded, and the compute processes on the card.
+- **Compute · memory:** architecture and compute capability, SM count, CUDA
+  cores and tensor cores (with their generation), peak FP32, L2 cache and its
+  persisting share, shared memory and registers per SM, thread and block
+  limits, copy engines, memory size, bus width, data rate and peak bandwidth,
+  BAR1 (and whether resizable BAR is on), ECC, MIG, NVLink, row remapping.
+- **PCIe · firmware · kernel:** bus ID and PCI IDs, the link now (and whether
+  it has only downshifted at idle) against the card's and the slot's
+  ceilings, replay count, NUMA node and local CPUs, IOMMU group, IRQ, ASPM,
+  power state, the kernel driver bound and its device node, GSP firmware,
+  VBIOS and InfoROM, persistence / compute / display modes, the driver's own
+  `/proc` entry, UUID and serial.
+
+CUDA core counts come from NVML (R520 drivers and later) or from the SM count
+and the per-SM figures of the compute capability; the SM count, caches and
+per-SM limits come from the CUDA driver, asked once in a child process with
+device queries only (no context, no VRAM). Everything else is collected once
+a second, and only while the screen is open. Without NVML the screen still
+shows the live figures and the kernel strip.
+
 ## Keys
 
 | Key | Action |
@@ -801,6 +858,7 @@ for anything else.
 | `u` | expert balance: per-layer router load balance — effective experts, top-k share, ranked hits (needs the server patch) |
 | `b` | memory pipeline: disk → RAM → PCIe → VRAM → prefill → decode VU meters and the bottleneck verdict |
 | `v` | compare every model side by side |
+| `g` | GPU details: live telemetry with history, SMs / CUDA / tensor cores, caches, PCIe link, firmware, driver and kernel (`←` `→` switch card when they do not all fit, `↑` `↓` scroll) |
 | `Tab` / `Shift-Tab` | focus the next / previous model |
 | `1`–`9` | focus that model directly |
 | `t` | cycle theme (panel frames, backgrounds and heat maps): defrag, neon, fire, ocean, monochrome, braille (btop-style braille graphs) |
@@ -1113,6 +1171,8 @@ acceptance is not available for its models.
 --pid A,B            only watch these PIDs (default: every model found)
 --gpu 0,1            GPU indices to show (default: all)
 --no-nvml            use nvidia-smi subprocesses instead of native NVML telemetry
+--nvidia-legacy DIR|off  side-by-side legacy NVIDIA driver kit (default: found
+                     automatically when /dev/nvidia-legacy/nvidiactl exists)
 --poll-ms 200        sampling interval for the server and GPU telemetry
 --api-key-file PATH  bearer token file for inference-server HTTP requests
 --color auto|truecolor|256
@@ -1467,6 +1527,7 @@ src/
 ├── observe.rs       /slots, /metrics, /experts parsers
 ├── gpu.rs           NVIDIA/AMD/Intel collectors, demo GPUs
 ├── nvml.rs          in-process NVML driver bindings & PCIe throughput
+├── nvdriver.rs      second NVIDIA driver side by side (legacy kit, index offsets)
 ├── model_detect.rs  finds the servers, parses their command lines
 ├── gguf.rs          GGUF header reader, layer → GPU mapping
 ├── demo.rs          synthetic servers for --demo

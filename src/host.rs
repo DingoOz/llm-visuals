@@ -252,22 +252,29 @@ fn read_proc(pid: u32, s: &mut HostSample, sys: &mut sysinfo::System) {
     }
 }
 
-/// `nvidia-smi dmon -s t -c 1` prints one row per GPU with rx/tx MB/s.
+/// `nvidia-smi dmon -s t -c 1` prints one row per GPU with rx/tx MB/s. Run
+/// once per NVIDIA driver; a legacy driver's GPUs follow the open one's.
 fn pcie_throughput() -> Option<Vec<(u32, f32, f32)>> {
-    let out = std::process::Command::new("nvidia-smi")
-        .args(["dmon", "-s", "t", "-c", "1"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
+    let mut rows = Vec::new();
+    let mut open_rows = None;
+    for n in 0..crate::nvdriver::driver_count() {
+        let got = crate::nvdriver::command(n, "nvidia-smi")
+            .args(["dmon", "-s", "t", "-c", "1"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| parse_dmon_pcie(&String::from_utf8_lossy(&o.stdout)));
+        if n == 0 {
+            open_rows = got.as_ref().map(|r| r.len() as u32);
+        }
+        let offset = crate::nvdriver::offset_for(n, open_rows);
+        rows.extend(
+            got.into_iter()
+                .flatten()
+                .map(|(i, rx, tx)| (i + offset, rx, tx)),
+        );
     }
-    let txt = String::from_utf8_lossy(&out.stdout);
-    let rows = parse_dmon_pcie(&txt);
-    if rows.is_empty() {
-        None
-    } else {
-        Some(rows)
-    }
+    (!rows.is_empty()).then_some(rows)
 }
 
 pub fn parse_dmon_pcie(txt: &str) -> Vec<(u32, f32, f32)> {

@@ -345,10 +345,47 @@ impl GpuMonitor {
     /// until the driver is shown not to know a field: an older nvidia-smi
     /// rejects the whole query over it, and an error here would drop the GPU
     /// panel entirely.
+    ///
+    /// On a host with a side-by-side legacy driver (see `nvdriver`) the
+    /// query runs once per driver, each with its own column ladder since the
+    /// older driver may know fewer fields, and the legacy GPUs are renumbered
+    /// after the open driver's. One driver failing keeps the other's GPUs.
     pub fn collect_nvidia() -> Result<Vec<GpuStats>, String> {
-        static RUNG: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        nvidia_csv(&RUNG, |query| run_smi("nvidia-smi", query))
-            .map(|(out, extras)| parse_csv(&out, extras))
+        use std::sync::atomic::AtomicUsize;
+        static RUNGS: [AtomicUsize; 2] = [AtomicUsize::new(0), AtomicUsize::new(0)];
+        let mut all = Vec::new();
+        let mut first_err = None;
+        let mut open_rows = None;
+        for n in 0..crate::nvdriver::driver_count() {
+            let run = |query: &str| {
+                run_smi_cmd(
+                    &mut crate::nvdriver::command(n, "nvidia-smi"),
+                    "nvidia-smi",
+                    query,
+                )
+            };
+            let got =
+                nvidia_csv(&RUNGS[n.min(1)], run).map(|(out, extras)| parse_csv(&out, extras));
+            if n == 0 {
+                open_rows = got.as_ref().ok().map(|g| g.len() as u32);
+            }
+            match got {
+                Ok(stats) => {
+                    let offset = crate::nvdriver::offset_for(n, open_rows);
+                    all.extend(stats.into_iter().map(|mut g| {
+                        g.index += offset;
+                        g
+                    }));
+                }
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        match first_err {
+            Some(e) if all.is_empty() => Err(e),
+            _ => Ok(all),
+        }
     }
 
     /// Intel GPUs via xpu-smi, same field order as NVIDIA_QUERY.
@@ -365,7 +402,12 @@ impl GpuMonitor {
 /// Run an nvidia-smi-compatible CLI with a `--query-gpu` field list and
 /// return its CSV, or the tool's own error line.
 fn run_smi(bin: &str, query: &str) -> Result<String, String> {
-    let output = std::process::Command::new(bin)
+    run_smi_cmd(&mut std::process::Command::new(bin), bin, query)
+}
+
+/// `run_smi` on a prepared command (one carrying a driver's environment).
+fn run_smi_cmd(cmd: &mut std::process::Command, bin: &str, query: &str) -> Result<String, String> {
+    let output = cmd
         .args([query, "--format=csv,noheader,nounits"])
         .output()
         .map_err(|e| format!("Failed to run {bin}: {e}"))?;
@@ -490,7 +532,12 @@ fn parse_xpu_csv(text: &str) -> Vec<GpuStats> {
 impl GpuBackend {
     pub fn detect(nvml: Option<Arc<NvmlSession>>) -> Self {
         if let Some(session) = nvml {
-            if session.collect_stats().is_ok_and(|gpus| !gpus.is_empty()) {
+            // A session that cannot reach a side-by-side legacy driver (its
+            // NVML loader was never built) would hide those GPUs; nvidia-smi
+            // reaches both through the shim.
+            if session.covers_all_drivers()
+                && session.collect_stats().is_ok_and(|gpus| !gpus.is_empty())
+            {
                 return Self::Nvml(session);
             }
         }
