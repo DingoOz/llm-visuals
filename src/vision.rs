@@ -298,23 +298,36 @@ fn host_index_for_bus(bus: &str, smi: &[(u32, String)]) -> Option<u32> {
         .map(|(i, _)| *i)
 }
 
+/// Host index and PCI bus ID of every NVIDIA GPU, on every driver: a
+/// side-by-side legacy driver's GPUs follow the open driver's (`nvdriver`).
 fn nvidia_bus_ids() -> Vec<(u32, String)> {
-    let Ok(out) = std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=index,pci.bus_id",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-    else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| {
-            let (i, id) = l.split_once(',')?;
-            Some((i.trim().parse().ok()?, id.trim().to_string()))
-        })
-        .collect()
+    let mut all = Vec::new();
+    let mut open_rows = None;
+    for n in 0..crate::nvdriver::driver_count() {
+        let rows: Option<Vec<(u32, String)>> = crate::nvdriver::command(n, "nvidia-smi")
+            .args([
+                "--query-gpu=index,pci.bus_id",
+                "--format=csv,noheader,nounits",
+            ])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .filter_map(|l| {
+                        let (i, id) = l.split_once(',')?;
+                        Some((i.trim().parse().ok()?, id.trim().to_string()))
+                    })
+                    .collect()
+            });
+        if n == 0 {
+            open_rows = rows.as_ref().map(|r| r.len() as u32);
+        }
+        let offset = crate::nvdriver::offset_for(n, open_rows);
+        all.extend(rows.into_iter().flatten().map(|(i, id)| (i + offset, id)));
+    }
+    all
 }
 
 /// PCI bus IDs of the CUDA devices, in the ordinal order a process with
@@ -335,6 +348,17 @@ fn cuda_bus_ids(env: &HashMap<String, String>) -> Option<Vec<String>> {
             None => cmd.env_remove(k),
         };
     }
+    // A server on a side-by-side legacy driver sees only that driver's
+    // GPUs, through the shim in its LD_PRELOAD; the probe must too, or its
+    // ordinals would name the open driver's cards. Nothing else from the
+    // server's preload list is carried over.
+    match env
+        .get("LD_PRELOAD")
+        .and_then(|v| crate::nvdriver::preload_shim(v))
+    {
+        Some(shim) => cmd.env("LD_PRELOAD", shim),
+        None => cmd.env_remove("LD_PRELOAD"),
+    };
     let mut child = cmd.spawn().ok()?;
     // cuInit can take a second or two on cards without persistence mode;
     // don't let a wedged driver stall detection.
@@ -369,7 +393,15 @@ pub fn print_cuda_bus_ids() -> bool {
     #[cfg(windows)]
     let names: &[&[u8]] = &[b"nvcuda.dll\0"];
     #[cfg(not(windows))]
-    let names: &[&[u8]] = &[b"libcuda.so.1\0", b"libcuda.so\0"];
+    let names: &[&[u8]] = &[
+        b"libcuda.so.1\0",
+        b"libcuda.so\0",
+        // A binary built against another libc (Nix) skips the system dirs.
+        b"/usr/lib/x86_64-linux-gnu/libcuda.so.1\0",
+        b"/usr/lib/aarch64-linux-gnu/libcuda.so.1\0",
+        b"/usr/lib64/libcuda.so.1\0",
+        b"/usr/lib/libcuda.so.1\0",
+    ];
     let Some(lib) = names.iter().find_map(|n| Library::load(n)) else {
         return false;
     };

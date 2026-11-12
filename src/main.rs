@@ -17,6 +17,7 @@ mod layers_view;
 mod llm;
 mod model_detect;
 mod ninfer;
+pub mod nvdriver;
 pub mod nvml;
 mod observe;
 mod offload;
@@ -854,6 +855,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let launch = settings::launch();
     let mut args = launch.args.clone();
+    // Before anything asks nvidia-smi or NVML which GPUs exist.
+    nvdriver::configure(args.nvidia_legacy.as_deref());
     if let Some(model) = args.layers.clone() {
         colors::init_color_mode(&args.color);
         colors::set_chrome(colors::get_theme(&args.theme).chrome);

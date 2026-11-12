@@ -369,6 +369,27 @@ against the machine's total, the focused model's resident size, and a history
 of RAM in use. It is on both the dashboard and the perf view, and is the first
 thing the panel drops on a short terminal.
 
+#### Two NVIDIA drivers side by side
+
+A card the current driver has dropped (a V100 on a Blackwell-era release) can
+run on an older proprietary driver loaded next to the open one as
+`nvidia-legacy.ko`, with its device nodes in `/dev/nvidia-legacy/` and an
+`LD_PRELOAD` shim (`shim/nvlegacy_shim.so`) that points NVIDIA's user space
+at them. When `/dev/nvidia-legacy/nvidiactl` exists the panel shows the GPUs
+of both drivers: the open driver's first, then the legacy driver's, numbered
+on from there the way that kit's `nvidia-smi-all -L` numbers them (5060 Ti
+`G0`, V100 `G1`). `--gpu`, the PCIe stage, the compute-app table that places
+a model on its cards, `CUDA_VISIBLE_DEVICES` of a server started under
+`nvlegacy-run` and the vision-encoder probe all use that numbering.
+
+NVML is loaded a second time for the legacy driver, in its own `dlmopen`
+namespace, from the kit's `nvml-mux/lib/nvml_legacy_loader.so` (`make -C
+nvml-mux`); without it the panel falls back to nvidia-smi, run once per
+driver. The kit is found from `--nvidia-legacy DIR`, else `nvlegacy-run` or
+`nvidia-smi-all` on `PATH`, else the `LD_PRELOAD` of a process already on
+the legacy driver, else a checkout up to two levels below `$HOME` or in
+`/opt`. `--nvidia-legacy off` shows the open driver's GPUs only.
+
 ### Vision encoder
 
 When the model has a vision encoder loaded, the header says where it runs:
@@ -1113,6 +1134,8 @@ acceptance is not available for its models.
 --pid A,B            only watch these PIDs (default: every model found)
 --gpu 0,1            GPU indices to show (default: all)
 --no-nvml            use nvidia-smi subprocesses instead of native NVML telemetry
+--nvidia-legacy DIR|off  side-by-side legacy NVIDIA driver kit (default: found
+                     automatically when /dev/nvidia-legacy/nvidiactl exists)
 --poll-ms 200        sampling interval for the server and GPU telemetry
 --api-key-file PATH  bearer token file for inference-server HTTP requests
 --color auto|truecolor|256
@@ -1467,6 +1490,7 @@ src/
 ├── observe.rs       /slots, /metrics, /experts parsers
 ├── gpu.rs           NVIDIA/AMD/Intel collectors, demo GPUs
 ├── nvml.rs          in-process NVML driver bindings & PCIe throughput
+├── nvdriver.rs      second NVIDIA driver side by side (legacy kit, index offsets)
 ├── model_detect.rs  finds the servers, parses their command lines
 ├── gguf.rs          GGUF header reader, layer → GPU mapping
 ├── demo.rs          synthetic servers for --demo

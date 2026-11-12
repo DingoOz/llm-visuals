@@ -1440,10 +1440,20 @@ fn walk_proc_llms() -> Vec<(u32, String, String)> {
 /// (`CUDA_VISIBLE_DEVICES`, or `ZE_AFFINITY_MASK` for Intel Level Zero).
 /// Empty when neither is set or /proc/<pid>/environ is unreadable (needs
 /// the same uid or root).
+///
+/// A process on a side-by-side legacy driver (its `LD_PRELOAD` holds the
+/// `nvdriver` shim) counts devices on that driver alone; its indices are
+/// moved past the open driver's GPUs to make them host indices.
 fn env_gpu_affinity(pid: u32) -> Vec<u32> {
-    std::fs::read_to_string(format!("/proc/{pid}/environ"))
-        .map(|env| parse_gpu_affinity(&env))
-        .unwrap_or_default()
+    let Ok(env) = std::fs::read_to_string(format!("/proc/{pid}/environ")) else {
+        return Vec::new();
+    };
+    let mut out = parse_gpu_affinity(&env);
+    if crate::nvdriver::legacy().is_some() && crate::nvdriver::environ_shim(&env).is_some() {
+        let offset = crate::nvdriver::open_driver_gpu_count();
+        out.iter_mut().for_each(|i| *i += offset);
+    }
+    out
 }
 
 /// Device indices from a NUL-separated environ block. Both variables are
@@ -1492,42 +1502,58 @@ struct ComputeApp {
     mem_used_mb: u64,
 }
 
+/// UUID → host index for every NVIDIA GPU, across drivers: a side-by-side
+/// legacy driver's GPUs are numbered after the open driver's (`nvdriver`).
 fn gpu_uuid_index_map() -> std::collections::HashMap<String, u32> {
-    let output = match std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=index,uuid", "--format=csv,noheader,nounits"])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return std::collections::HashMap::new(),
-    };
     let mut map = std::collections::HashMap::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let parts: Vec<&str> = line.split(',').collect();
-        if parts.len() < 2 {
-            continue;
+    let mut open_rows = None;
+    for n in 0..crate::nvdriver::driver_count() {
+        let rows: Option<Vec<(u32, String)>> = crate::nvdriver::command(n, "nvidia-smi")
+            .args(["--query-gpu=index,uuid", "--format=csv,noheader,nounits"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| parse_index_uuid(&String::from_utf8_lossy(&o.stdout)));
+        if n == 0 {
+            open_rows = rows.as_ref().map(|r| r.len() as u32);
         }
-        if let Ok(idx) = parts[0].trim().parse::<u32>() {
-            map.insert(parts[1].trim().to_string(), idx);
+        let offset = crate::nvdriver::offset_for(n, open_rows);
+        for (idx, uuid) in rows.into_iter().flatten() {
+            map.insert(uuid, idx + offset);
         }
     }
     map
 }
 
+fn parse_index_uuid(csv: &str) -> Vec<(u32, String)> {
+    csv.lines()
+        .filter_map(|line| {
+            let (idx, uuid) = line.split_once(',')?;
+            let uuid = uuid.split(',').next()?.trim();
+            Some((idx.trim().parse().ok()?, uuid.to_string()))
+        })
+        .collect()
+}
+
 fn nvidia_compute_apps() -> Vec<ComputeApp> {
     let uuid_map = gpu_uuid_index_map();
-    let output = match std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
+    // GPU UUIDs are unique across drivers, so the tables simply concatenate.
+    let stdout: String = (0..crate::nvdriver::driver_count())
+        .filter_map(|n| {
+            crate::nvdriver::command(n, "nvidia-smi")
+                .args([
+                    "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
+                    "--format=csv,noheader,nounits",
+                ])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+        })
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned() + "\n")
+        .collect();
 
     let mut apps = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+    for line in stdout.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -2430,6 +2456,15 @@ mod tests {
         std::fs::write(repo.join("refs").join("main"), "dead").unwrap();
         assert!(hub_snapshot(&repo).is_some());
         let _ = std::fs::remove_dir_all(&hub);
+    }
+
+    #[test]
+    fn index_uuid_rows_parse() {
+        let csv = "0, GPU-b42a\n1, GPU-941a\nbad\n, GPU-x\n";
+        assert_eq!(
+            parse_index_uuid(csv),
+            vec![(0, "GPU-b42a".to_string()), (1, "GPU-941a".to_string())]
+        );
     }
 
     #[test]

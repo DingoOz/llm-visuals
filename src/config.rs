@@ -114,6 +114,12 @@ pub struct Args {
     #[arg(long)]
     pub no_nvml: bool,
 
+    /// Side-by-side legacy NVIDIA driver kit (the directory holding
+    /// shim/nvlegacy_shim.so and nvml-mux/), or "off". Found automatically
+    /// when /dev/nvidia-legacy/nvidiactl exists
+    #[arg(long, value_name = "DIR|off")]
+    pub nvidia_legacy: Option<String>,
+
     /// Number of MoE experts per layer (for demo)
     #[arg(long, default_value_t = 4)]
     pub moe_experts: usize,

@@ -161,6 +161,11 @@ pub(crate) mod os {
         fn dlclose(handle: *mut c_void) -> i32;
     }
 
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    extern "C" {
+        fn dlmopen(lmid: std::ffi::c_long, filename: *const u8, flags: i32) -> *mut c_void;
+    }
+
     const RTLD_NOW: i32 = 2;
 
     pub struct Library(*mut c_void);
@@ -175,6 +180,24 @@ pub(crate) mod os {
             } else {
                 Some(Self(handle))
             }
+        }
+
+        /// Load into a fresh link-map namespace, so a second copy of a library
+        /// (and whatever it was linked or preloaded with) stays apart from the
+        /// first. `dlsym` on the handle also finds its dependencies' symbols.
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        pub fn load_isolated(path: &std::path::Path) -> Option<Self> {
+            use std::os::unix::ffi::OsStrExt;
+            const LM_ID_NEWLM: std::ffi::c_long = -1;
+            let mut name = path.as_os_str().as_bytes().to_vec();
+            name.push(0);
+            let handle = unsafe { dlmopen(LM_ID_NEWLM, name.as_ptr(), RTLD_NOW) };
+            (!handle.is_null()).then_some(Self(handle))
+        }
+
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        pub fn load_isolated(_path: &std::path::Path) -> Option<Self> {
+            None
         }
 
         pub unsafe fn get_symbol(&self, name: &[u8]) -> *mut c_void {
@@ -200,13 +223,27 @@ pub(crate) mod os {
         pub fn load(_name: &[u8]) -> Option<Self> {
             None
         }
+        pub fn load_isolated(_path: &std::path::Path) -> Option<Self> {
+            None
+        }
         pub unsafe fn get_symbol(&self, _name: &[u8]) -> *mut c_void {
             std::ptr::null_mut()
         }
     }
 }
 
+/// NVML for every NVIDIA driver on the host: normally one library, plus a
+/// second copy for a side-by-side legacy driver (see `nvdriver`). GPU
+/// indices are host indices, the open driver's GPUs first.
 pub struct NvmlSession {
+    libs: Vec<NvmlLib>,
+    /// `libs[0]` is the system NVML (the open driver), not the legacy one.
+    primary: bool,
+    has_legacy: bool,
+}
+
+/// One loaded copy of NVML, which sees the GPUs of one kernel driver.
+struct NvmlLib {
     _lib: os::Library,
     init_fn: FnNvmlInit,
     shutdown_fn: FnNvmlShutdown,
@@ -237,8 +274,8 @@ pub struct NvmlSession {
 
 // SAFETY: All NVML C API functions are thread-safe per NVIDIA NVML documentation,
 // and all struct fields are read-only function pointers or thread-safe atomic primitives.
-unsafe impl Send for NvmlSession {}
-unsafe impl Sync for NvmlSession {}
+unsafe impl Send for NvmlLib {}
+unsafe impl Sync for NvmlLib {}
 
 impl NvmlSession {
     pub fn new() -> Option<Arc<Self>> {
@@ -249,20 +286,120 @@ impl NvmlSession {
             b"C:\\Program Files\\NVIDIA Corporation\\NVSMI\\nvml.dll\0",
         ];
         #[cfg(target_os = "linux")]
-        let lib_names: &[&[u8]] = &[b"libnvidia-ml.so.1\0", b"libnvidia-ml.so\0"];
+        // The distro paths too: a binary built against another libc (a Nix
+        // toolchain) does not search the system library directories.
+        let lib_names: &[&[u8]] = &[
+            b"libnvidia-ml.so.1\0",
+            b"libnvidia-ml.so\0",
+            b"/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1\0",
+            b"/usr/lib/aarch64-linux-gnu/libnvidia-ml.so.1\0",
+            b"/usr/lib64/libnvidia-ml.so.1\0",
+            b"/usr/lib/libnvidia-ml.so.1\0",
+        ];
         #[cfg(not(any(windows, target_os = "linux")))]
         let lib_names: &[&[u8]] = &[];
 
-        let mut loaded_lib = None;
-        for name in lib_names {
-            if let Some(lib) = os::Library::load(name) {
-                loaded_lib = Some(lib);
-                break;
+        let mut libs: Vec<NvmlLib> = lib_names
+            .iter()
+            .find_map(|name| os::Library::load(name))
+            .and_then(NvmlLib::open)
+            .into_iter()
+            .collect();
+        // The side-by-side legacy driver's NVML, in a namespace of its own
+        // (see nvdriver). Its GPUs follow the open driver's.
+        #[cfg(target_os = "linux")]
+        let legacy = crate::nvdriver::legacy()
+            .and_then(|l| l.loader.as_deref())
+            .and_then(os::Library::load_isolated)
+            .and_then(NvmlLib::open);
+        #[cfg(not(target_os = "linux"))]
+        let legacy: Option<NvmlLib> = None;
+        let has_legacy = legacy.is_some();
+        libs.extend(legacy);
+        if libs.is_empty() {
+            return None;
+        }
+        Some(Arc::new(Self {
+            primary: !has_legacy || libs.len() == 2,
+            has_legacy,
+            libs,
+        }))
+    }
+
+    /// Whether this session reaches every driver's GPUs: the open driver's,
+    /// and the legacy driver's when that is present. False sends the GPU
+    /// panel to nvidia-smi, which reaches both.
+    pub fn covers_all_drivers(&self) -> bool {
+        self.primary && (crate::nvdriver::legacy().is_none() || self.has_legacy)
+    }
+
+    /// Host-index offset of each library's GPUs: the legacy driver's follow
+    /// the open driver's, counted live so a GPU that drops off the open
+    /// driver does not leave the legacy ones misnumbered.
+    fn offsets(&self) -> Vec<(u32, &NvmlLib, Result<u32, String>)> {
+        let mut out = Vec::with_capacity(self.libs.len());
+        let mut open_rows = None;
+        for (i, lib) in self.libs.iter().enumerate() {
+            let count = lib.device_count();
+            let driver = if i == 0 && self.primary { 0 } else { 1 };
+            if driver == 0 {
+                open_rows = count.as_ref().ok().copied();
+            }
+            out.push((crate::nvdriver::offset_for(driver, open_rows), lib, count));
+        }
+        out
+    }
+
+    /// Query stats for all NVIDIA GPUs currently online, on every driver.
+    /// One driver failing leaves the other's GPUs on the panel.
+    pub fn collect_stats(&self) -> Result<Vec<GpuStats>, String> {
+        let mut all = Vec::new();
+        let mut first_err = None;
+        let mut any_ok = false;
+        for (offset, lib, count) in self.offsets() {
+            match count.and_then(|n| lib.collect_stats(n)) {
+                Ok(stats) => {
+                    any_ok = true;
+                    all.extend(stats.into_iter().map(|mut g| {
+                        g.index += offset;
+                        g
+                    }));
+                }
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
             }
         }
+        match (any_ok, first_err) {
+            (false, Some(e)) => Err(e),
+            _ => Ok(all),
+        }
+    }
 
-        let lib = loaded_lib?;
+    /// Query PCIe throughput (rx_mb_s, tx_mb_s) per GPU. `filter` empty means all;
+    /// otherwise only those host `index` values.
+    pub fn collect_pcie_throughput(&self, filter: &[usize]) -> Option<Vec<(u32, f32, f32)>> {
+        let mut rows = Vec::new();
+        for (offset, lib, count) in self.offsets() {
+            let Ok(count) = count else { continue };
+            let local: Vec<usize> = filter
+                .iter()
+                .filter_map(|&i| i.checked_sub(offset as usize))
+                .filter(|&i| i < count as usize)
+                .collect();
+            if !filter.is_empty() && local.is_empty() {
+                continue;
+            }
+            if let Some(r) = lib.collect_pcie_throughput(count, &local) {
+                rows.extend(r.into_iter().map(|(i, rx, tx)| (i + offset, rx, tx)));
+            }
+        }
+        (!rows.is_empty()).then_some(rows)
+    }
+}
 
+impl NvmlLib {
+    fn open(lib: os::Library) -> Option<Self> {
         macro_rules! sym {
             ($lib:expr, $name:expr, $typ:ty) => {{
                 let p = unsafe { $lib.get_symbol($name) };
@@ -398,7 +535,7 @@ impl NvmlSession {
             return None;
         }
 
-        Some(Arc::new(Self {
+        Some(Self {
             _lib: lib,
             init_fn,
             shutdown_fn,
@@ -423,7 +560,7 @@ impl NvmlSession {
             device_get_clocks_event_reasons_fn,
             mem_peak_cache: Mutex::new(HashMap::new()),
             initialized: AtomicBool::new(true),
-        }))
+        })
     }
 
     /// Re-establish the driver session. A driver reload, package upgrade or GPU reset
@@ -505,10 +642,8 @@ impl NvmlSession {
         Some(peak)
     }
 
-    /// Query stats for all NVIDIA GPUs currently online.
-    pub fn collect_stats(&self) -> Result<Vec<GpuStats>, String> {
-        let count = self.device_count()?;
-
+    /// Stats for this driver's GPUs, indexed from 0, given its device count.
+    fn collect_stats(&self, count: u32) -> Result<Vec<GpuStats>, String> {
         let mut stats_list = Vec::with_capacity(count as usize);
 
         for index in 0..count {
@@ -710,9 +845,12 @@ impl NvmlSession {
     /// otherwise only those `index` values. The driver samples the counter over ~20ms
     /// per call and there are two calls per device, so on a many-GPU host polling the
     /// ones the panel never shows would eat most of the host-poll interval.
-    pub fn collect_pcie_throughput(&self, filter: &[usize]) -> Option<Vec<(u32, f32, f32)>> {
+    fn collect_pcie_throughput(
+        &self,
+        count: u32,
+        filter: &[usize],
+    ) -> Option<Vec<(u32, f32, f32)>> {
         let throughput_fn = self.device_get_pcie_throughput_fn?;
-        let count = self.device_count().ok()?;
         if count == 0 {
             return None;
         }
@@ -743,7 +881,7 @@ impl NvmlSession {
     }
 }
 
-impl Drop for NvmlSession {
+impl Drop for NvmlLib {
     fn drop(&mut self) {
         if self.initialized.swap(false, Ordering::SeqCst) {
             unsafe {
