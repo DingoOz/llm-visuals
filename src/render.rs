@@ -32,6 +32,9 @@ use crate::settings::{Kind, SettingsForm};
 use crate::strata::ExpertTiers;
 use crate::vision::{Place, Vision};
 
+#[path = "render_gpu.rs"]
+mod gpu_view;
+
 const HEATMAP_TOKEN_WIDTH: usize = 40;
 /// Most model rows the strip under the header will show before it scrolls.
 const MODEL_BAR_MAX: usize = 6;
@@ -104,6 +107,14 @@ pub struct Dashboard<'a> {
     pub bench: Option<&'a BenchSession>,
     /// A benchmark ran or is running this session, so `B` has a table.
     pub bench_running: bool,
+    /// The GPU details screen's latest snapshot, while it has one.
+    pub gpu_info: Option<&'a crate::gpuinfo::GpuInfo>,
+    /// Per-card history for its sparklines.
+    pub gpu_hist: &'a crate::gpuinfo::GpuHistory,
+    /// The card it shows when they do not all fit.
+    pub gpu_sel: usize,
+    /// Rows scrolled within a card taller than the screen.
+    pub gpu_scroll: u16,
 }
 
 pub struct Renderer {
@@ -115,6 +126,9 @@ pub struct Renderer {
     /// must fall to be flagged; 0 never flags.
     pub regress_pct: f64,
     epoch: Instant,
+    /// Rows the GPU details card could scroll on the last frame, so the
+    /// frame loop can keep its scroll position within them.
+    pub gpu_overflow: std::cell::Cell<u16>,
 }
 
 impl Renderer {
@@ -126,6 +140,7 @@ impl Renderer {
             moe_experts,
             regress_pct: 0.0,
             epoch: Instant::now(),
+            gpu_overflow: std::cell::Cell::new(0),
         }
     }
 
@@ -201,6 +216,7 @@ impl Renderer {
         match d.view {
             ViewMode::Models => self.render_compare(frame, rows[2], d),
             ViewMode::Bandwidth => self.render_bandwidth(frame, rows[2], d),
+            ViewMode::Gpus => self.render_gpu_info(frame, rows[2], d),
             _ => self.render_panels(frame, rows[2], d),
         }
         // A fresh alert has the key row to itself for a while: the panels
@@ -322,6 +338,7 @@ impl Renderer {
             | ViewMode::Landscape
             | ViewMode::Balance
             | ViewMode::Bandwidth
+            | ViewMode::Gpus
             | ViewMode::Models => vec![
                 Constraint::Length(0),
                 Constraint::Length(ctx_h),
@@ -3008,6 +3025,7 @@ impl Renderer {
             ("e", "3d".into(), d.view == ViewMode::Landscape),
             ("u", "balance".into(), d.view == ViewMode::Balance),
             ("b", "bandwidth".into(), d.view == ViewMode::Bandwidth),
+            ("g", "gpus".into(), d.view == ViewMode::Gpus),
         ];
         if multi {
             items.push(("v", "compare".into(), d.view == ViewMode::Models));
@@ -6127,6 +6145,10 @@ mod tests {
             replay: None,
             bench: None,
             bench_running: false,
+            gpu_info: None,
+            gpu_hist: &GPU_HIST_NONE,
+            gpu_sel: 0,
+            gpu_scroll: 0,
         };
         let renderer = Renderer::new(pal::get_theme("defrag"), 0, 0, 1);
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -6180,6 +6202,10 @@ mod tests {
             replay: None,
             bench: None,
             bench_running: false,
+            gpu_info: None,
+            gpu_hist: &GPU_HIST_NONE,
+            gpu_sel: 0,
+            gpu_scroll: 0,
         };
         let renderer = Renderer::new(pal::get_theme("defrag"), 0, 0, 1);
         let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
@@ -6340,6 +6366,131 @@ mod tests {
         }
     }
 
+    /// The GPU details screen for two demo cards, one of them described
+    /// by `info`, as text.
+    fn gpu_view_text(
+        w: u16,
+        h: u16,
+        info: Option<&crate::gpuinfo::GpuInfo>,
+        scroll: u16,
+    ) -> String {
+        use ratatui::backend::TestBackend;
+        let gpus: Vec<GpuStats> = (0..2)
+            .map(|i| crate::gpu::DemoGpu::new(i).step(0.6))
+            .collect();
+        let mut hist = crate::gpuinfo::GpuHistory::default();
+        for _ in 0..50 {
+            hist.observe_gpus(&gpus);
+            hist.observe_pcie(&[(0, 900.0, 20.0)]);
+        }
+        let (perf, live, fade) = (PerfTracker::new(), LiveStats::default(), FadeState::new());
+        let (attention, generated) = (TokenBuffer::new(8), GeneratedText::new());
+        let camera = Camera::new();
+        let dash = Dashboard {
+            models: &[],
+            focus: 0,
+            detected: None,
+            gpus: &gpus,
+            gpu_error: None,
+            fade: &fade,
+            perf: &perf,
+            live: &live,
+            attention: &attention,
+            generated: &generated,
+            num_layers: 0,
+            num_heads: 0,
+            view: ViewMode::Gpus,
+            camera: &camera,
+            status: "",
+            theme_name: "defrag",
+            demo: false,
+            experts: None,
+            gpu_backend: Some("nvml"),
+            settings: None,
+            log: None,
+            ctx_speed: None,
+            energy: &GpuEnergy::default(),
+            alerts: &[],
+            alert_banner: None,
+            regress_off: None,
+            replay: None,
+            bench: None,
+            bench_running: false,
+            gpu_info: info,
+            gpu_hist: &hist,
+            gpu_sel: 1,
+            gpu_scroll: scroll,
+        };
+        let renderer = Renderer::new(pal::get_theme("defrag"), 0, 0, 1);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|frame| renderer.render_view(frame, frame.area(), &dash))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn gpu_details_show_derived_counts_and_fit_any_terminal() {
+        use crate::gpuinfo::{CardInfo, CudaProps, DriverInfo, GpuInfo, KernelInfo};
+        let info = GpuInfo {
+            drivers: vec![DriverInfo {
+                version: Some("580.178.04".into()),
+                cuda: Some("13.0".into()),
+                open_module: Some(true),
+                gpus: 2,
+                ..Default::default()
+            }],
+            kernel: KernelInfo {
+                release: Some("7.0.0-43-generic".into()),
+                ..Default::default()
+            },
+            cards: vec![CardInfo {
+                index: 1,
+                name: "Tesla V100-PCIE-16GB".into(),
+                bus_id: Some("00000000:04:00.0".into()),
+                cc: Some((7, 0)),
+                clocks_max: [Some(1380), Some(1380), Some(877), Some(1237)],
+                pcie_gen: Some(3),
+                pcie_width: Some(16),
+                cuda: Some(CudaProps {
+                    sms: 80,
+                    l2_bytes: 6 << 20,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+            cuda_pending: false,
+            cuda_error: None,
+        };
+        let text = gpu_view_text(200, 70, Some(&info), 0);
+        assert!(text.contains("580.178.04"), "{text}");
+        assert!(text.contains("CUDA 13.0"), "{text}");
+        // CUDA cores and tensor cores from the SM count alone.
+        assert!(text.contains("5,120"), "{text}");
+        assert!(text.contains("640"), "{text}");
+        assert!(text.contains("Volta"), "{text}");
+        assert!(text.contains("0000:04:00.0"), "{text}");
+        // The card without details says why rather than inventing them.
+        assert!(text.contains("this card did not answer NVML"), "{text}");
+        for (w, h) in [(60, 20), (100, 30), (140, 45), (30, 8), (10, 4)] {
+            for scroll in [0, 5, 500] {
+                gpu_view_text(w, h, Some(&info), scroll);
+                gpu_view_text(w, h, None, scroll);
+            }
+        }
+        // Too short for both cards: the selected one, and a way to the other.
+        let short = gpu_view_text(140, 40, Some(&info), 0);
+        assert!(short.contains("2/2"), "{short}");
+    }
+
     #[test]
     fn a_terminal_one_or_two_rows_high_draws_nothing_and_does_not_panic() {
         for h in 1..=4 {
@@ -6460,6 +6611,10 @@ mod tests {
             replay: None,
             bench: None,
             bench_running: false,
+            gpu_info: None,
+            gpu_hist: &GPU_HIST_NONE,
+            gpu_sel: 0,
+            gpu_scroll: 0,
         };
         energy_line(&dash, w)
             .spans
@@ -6548,3 +6703,8 @@ fn fmt_count(n: u64) -> String {
         n.to_string()
     }
 }
+
+#[cfg(test)]
+static GPU_HIST_NONE: crate::gpuinfo::GpuHistory = crate::gpuinfo::GpuHistory {
+    cards: std::collections::BTreeMap::new(),
+};

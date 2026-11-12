@@ -20,6 +20,8 @@ pub enum ViewMode {
     Bandwidth,
     /// Side-by-side comparison of every detected model.
     Models,
+    /// Every card in detail: live telemetry, hardware, PCIe, driver, kernel.
+    Gpus,
 }
 
 impl std::fmt::Display for ViewMode {
@@ -33,6 +35,7 @@ impl std::fmt::Display for ViewMode {
             ViewMode::Balance => write!(f, "balance"),
             ViewMode::Bandwidth => write!(f, "bandwidth"),
             ViewMode::Models => write!(f, "models"),
+            ViewMode::Gpus => write!(f, "gpus"),
         }
     }
 }

@@ -281,7 +281,7 @@ pub fn cuda_host_indices(env: &HashMap<String, String>) -> Option<Vec<Option<u32
 
 /// `dddd:bb:dd.f` with the domain in either the CUDA (4 digit) or NVML
 /// (8 digit) width, as numbers.
-fn parse_bus_id(s: &str) -> Option<(u32, u32, u32, u32)> {
+pub(crate) fn parse_bus_id(s: &str) -> Option<(u32, u32, u32, u32)> {
     let mut parts = s.trim().rsplitn(3, ':');
     let dev_fn = parts.next()?;
     let bus = parts.next()?;

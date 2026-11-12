@@ -141,7 +141,7 @@ console, pass `--color truecolor` if colours look flat.
 ### What to test
 
 - [ ] `cargo build --release` completes (MSVC linker and SQLite C build found).
-- [ ] `--demo` renders every view (`a` `p` `h` `m` `e` `u` `b` `v`) and `q` restores
+- [ ] `--demo` renders every view (`a` `p` `h` `m` `e` `u` `b` `v` `g`) and `q` restores
       the terminal.
 - [ ] Colours: truecolor is picked automatically in Windows Terminal.
 - [ ] GPU panels show utilisation, VRAM, power and temperature from `nvidia-smi`.
@@ -810,6 +810,42 @@ for anything else.
 
 ---
 
+## GPU details
+
+`g` opens a screen per card with everything the driver, CUDA and the kernel
+will say about it, on top of a strip for the box as a whole.
+
+- **System:** driver version per kernel driver (open or proprietary modules,
+  both on a two-driver host), the CUDA version it supports, NVML, the compiler
+  it was built with; kernel release and build, distribution, CPU, IOMMU,
+  transparent hugepages, `nvidia_drm` modeset; the loaded GPU modules with
+  size, reference count and taint; boot parameters that touch GPUs; and the
+  NVIDIA module parameters (GSP firmware, resizable BAR, power management…).
+- **Live**, refreshed with the dashboard and drawn with history: load, memory
+  controller, VRAM, temperature against the slowdown and shutdown points,
+  memory temperature, power against its limit and allowed range, SM /
+  graphics / memory / video clocks against their maxima, fans, P-state and
+  what is holding the clocks, NVENC / NVDEC, PCIe traffic, energy since the
+  driver loaded, and the compute processes on the card.
+- **Compute · memory:** architecture and compute capability, SM count, CUDA
+  cores and tensor cores (with their generation), peak FP32, L2 cache and its
+  persisting share, shared memory and registers per SM, thread and block
+  limits, copy engines, memory size, bus width, data rate and peak bandwidth,
+  BAR1 (and whether resizable BAR is on), ECC, MIG, NVLink, row remapping.
+- **PCIe · firmware · kernel:** bus ID and PCI IDs, the link now (and whether
+  it has only downshifted at idle) against the card's and the slot's
+  ceilings, replay count, NUMA node and local CPUs, IOMMU group, IRQ, ASPM,
+  power state, the kernel driver bound and its device node, GSP firmware,
+  VBIOS and InfoROM, persistence / compute / display modes, the driver's own
+  `/proc` entry, UUID and serial.
+
+CUDA core counts come from NVML (R520 drivers and later) or from the SM count
+and the per-SM figures of the compute capability; the SM count, caches and
+per-SM limits come from the CUDA driver, asked once in a child process with
+device queries only (no context, no VRAM). Everything else is collected once
+a second, and only while the screen is open. Without NVML the screen still
+shows the live figures and the kernel strip.
+
 ## Keys
 
 | Key | Action |
@@ -822,6 +858,7 @@ for anything else.
 | `u` | expert balance: per-layer router load balance — effective experts, top-k share, ranked hits (needs the server patch) |
 | `b` | memory pipeline: disk → RAM → PCIe → VRAM → prefill → decode VU meters and the bottleneck verdict |
 | `v` | compare every model side by side |
+| `g` | GPU details: live telemetry with history, SMs / CUDA / tensor cores, caches, PCIe link, firmware, driver and kernel (`←` `→` switch card when they do not all fit, `↑` `↓` scroll) |
 | `Tab` / `Shift-Tab` | focus the next / previous model |
 | `1`–`9` | focus that model directly |
 | `t` | cycle theme (panel frames, backgrounds and heat maps): defrag, neon, fire, ocean, monochrome, braille (btop-style braille graphs) |

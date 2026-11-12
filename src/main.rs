@@ -10,6 +10,7 @@ mod energy;
 mod fade;
 mod gguf;
 mod gpu;
+mod gpuinfo;
 mod host;
 mod landscape;
 mod layers;
@@ -846,6 +847,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args().nth(1).as_deref() == Some(vision::CUDA_PROBE_ARG) {
         std::process::exit(if vision::print_cuda_bus_ids() { 0 } else { 1 });
     }
+    // Child of gpuinfo's probe: the CUDA device properties, as JSON lines.
+    if std::env::args().nth(1).as_deref() == Some(gpuinfo::CUDA_PROPS_ARG) {
+        std::process::exit(if gpuinfo::print_cuda_props() { 0 } else { 1 });
+    }
     // `--print-gpu` (optionally `--print-gpu --json`): one poll, print what
     // the backend sees, exit. Under sudo this is the reviewable proof the
     // powermetrics path ran on this Mac; before any terminal/DB side effects.
@@ -1032,6 +1037,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let name = backend.name();
         (Some(backend), nvml_host, name)
     };
+
+    // The GPU details screen (`g`): collected only while it is open.
+    let (gpu_info_open, gpu_info_open_rx) = tokio::sync::watch::channel(false);
+    let (gpu_info_tx, mut gpu_info_rx) = mpsc::channel::<gpuinfo::GpuInfo>(4);
+    if !args.demo && replay.is_none() {
+        gpuinfo::spawn(nvml_host.clone(), gpu_info_open_rx, gpu_info_tx);
+    }
+    let mut gpu_info: Option<gpuinfo::GpuInfo> = None;
+    let mut gpu_hist = gpuinfo::GpuHistory::default();
+    let mut gpu_sel = 0usize;
+    let mut gpu_scroll = 0u16;
 
     if args.demo {
         let n = if gpu_filter.is_empty() {
@@ -1308,6 +1324,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('u') => view_mode = ViewMode::Balance,
                         KeyCode::Char('b') => view_mode = ViewMode::Bandwidth,
                         KeyCode::Char('v') => view_mode = ViewMode::Models,
+                        KeyCode::Char('g') => view_mode = ViewMode::Gpus,
+                        // The details screen shows one card at a time when
+                        // they do not all fit.
+                        KeyCode::Right if view_mode == ViewMode::Gpus => {
+                            gpu_sel = (gpu_sel + 1) % latest_gpu.len().max(1);
+                            gpu_scroll = 0;
+                        }
+                        KeyCode::Left if view_mode == ViewMode::Gpus => {
+                            let n = latest_gpu.len().max(1);
+                            gpu_sel = (gpu_sel + n - 1) % n;
+                            gpu_scroll = 0;
+                        }
+                        // The renderer clamps it to what overflows.
+                        KeyCode::Down if view_mode == ViewMode::Gpus => {
+                            gpu_scroll = gpu_scroll.saturating_add(1)
+                        }
+                        KeyCode::Up if view_mode == ViewMode::Gpus => {
+                            gpu_scroll = gpu_scroll.saturating_sub(1)
+                        }
                         KeyCode::Tab => focus = (focus + 1) % n,
                         KeyCode::BackTab => focus = (focus + n - 1) % n,
                         // Digits jump straight to a model in the strip.
@@ -1462,6 +1497,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         last_replay_step = now;
+        if *gpu_info_open.borrow() != (view_mode == ViewMode::Gpus) {
+            let _ = gpu_info_open.send(view_mode == ViewMode::Gpus);
+        }
+        while let Ok(info) = gpu_info_rx.try_recv() {
+            ui_changed = true;
+            gpu_info = Some(info);
+        }
         while let Ok(sample) = gpu_rx.try_recv() {
             ui_changed = true;
             match sample {
@@ -1493,6 +1535,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             for slot in &mut slots {
                 slot.perf.observe_gpu(&latest_gpu, now);
             }
+            gpu_hist.observe_gpus(&latest_gpu);
             gpu_energy.observe(now, &latest_gpu, slots.iter_mut().map(|s| &mut s.perf));
         }
         for slot in &mut slots {
@@ -1525,6 +1568,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         while let Ok(batch) = host_rx.try_recv() {
             ui_changed = true;
+            // PCIe traffic is box-wide: every sample in a batch carries it.
+            if let Some((_, h)) = batch.first() {
+                gpu_hist.observe_pcie(&h.pcie_mb_s);
+            }
             for (pid, h) in batch {
                 sys_ram_total_mb =
                     sys_ram_total_mb.or(h.mem_total_bytes.map(|b| b / (1024 * 1024)));
@@ -1903,8 +1950,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             replay: replay.as_ref().map(replay::Replay::hud),
             bench: bench_run.as_ref().filter(|_| bench_open),
             bench_running: bench_run.is_some(),
+            gpu_info: gpu_info.as_ref(),
+            gpu_hist: &gpu_hist,
+            gpu_sel,
+            gpu_scroll,
         };
         renderer.render_frame(&mut terminal, &dash);
+        gpu_scroll = gpu_scroll.min(renderer.gpu_overflow.get());
 
         if !running && !done {
             break;
