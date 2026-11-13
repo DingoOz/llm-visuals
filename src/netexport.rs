@@ -53,32 +53,38 @@ fn host_part(s: &str) -> Option<&str> {
     }
 }
 
-/// The `Host` names a request may carry when there is no token.
+/// The `Host` names a request may carry when there is no token. Exact
+/// names only: a suffix or wildcard would let a name the attacker controls
+/// (`gpubox1.evil.com`) through.
 #[derive(Debug, Clone, Default)]
 pub struct HostPolicy {
     /// The host part of `--export-listen` (empty for an address).
     listen_host: String,
-    /// First DNS label of this machine's hostname, lower case.
-    own_label: Option<String>,
+    /// This machine's hostname as the system gives it, and its first DNS
+    /// label, lower case.
+    own: Vec<String>,
     /// `--export-allow-host`, lower case.
     extra: Vec<String>,
 }
 
-fn first_label(name: &str) -> &str {
-    name.trim_end_matches('.').split('.').next().unwrap_or("")
+fn normalized(name: &str) -> String {
+    name.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
 impl HostPolicy {
     pub fn new(listen_host: &str, hostname: Option<&str>, extra: &[String]) -> Self {
+        let mut own = Vec::new();
+        if let Some(full) = hostname.map(normalized).filter(|h| !h.is_empty()) {
+            let label = full.split('.').next().unwrap_or("").to_string();
+            own.push(full);
+            if !label.is_empty() && !own.contains(&label) {
+                own.push(label);
+            }
+        }
         Self {
-            listen_host: listen_host.to_string(),
-            own_label: hostname
-                .map(|h| first_label(h.trim()).to_ascii_lowercase())
-                .filter(|l| !l.is_empty()),
-            extra: extra
-                .iter()
-                .map(|e| e.trim().trim_end_matches('.').to_ascii_lowercase())
-                .collect(),
+            listen_host: normalized(listen_host),
+            own,
+            extra: extra.iter().map(|e| normalized(e)).collect(),
         }
     }
 
@@ -88,19 +94,17 @@ impl HostPolicy {
         if !self.listen_host.is_empty() && self.listen_host.parse::<IpAddr>().is_err() {
             v.push(self.listen_host.clone());
         }
-        if let Some(l) = &self.own_label {
-            v.push(format!("{l}[.*]"));
-        }
+        v.extend(self.own.iter().cloned());
         v.extend(self.extra.iter().cloned());
+        v.dedup();
         v.join(", ")
     }
 
     /// Whether a request for `Host: header` may be answered when there is no
     /// token: an IP literal, `localhost`, the host `--export-listen` names,
-    /// a name whose first DNS label is this machine's (`gpubox1`,
-    /// `gpubox1.example.lan`: any domain suffix), or a name given with
-    /// `--export-allow-host`. A name that points at this address from
-    /// someone else's page (DNS rebinding) is none of these.
+    /// this machine's hostname or its first label, or a name given with
+    /// `--export-allow-host`; all exact. A name that points at this address
+    /// from someone else's page (DNS rebinding) is none of these.
     fn allows(&self, header: &str) -> bool {
         let Some(h) = host_part(header) else {
             return false;
@@ -108,13 +112,9 @@ impl HostPolicy {
         if h.parse::<IpAddr>().is_ok() || h.eq_ignore_ascii_case("localhost") {
             return true;
         }
-        let name = h.trim_end_matches('.').to_ascii_lowercase();
-        (!self.listen_host.is_empty() && name.eq_ignore_ascii_case(&self.listen_host))
-            || self
-                .own_label
-                .as_deref()
-                .is_some_and(|l| first_label(&name) == l)
-            || self.extra.contains(&name)
+        let name = normalized(h);
+        !name.is_empty()
+            && (name == self.listen_host || self.own.contains(&name) || self.extra.contains(&name))
     }
 }
 
@@ -609,20 +609,25 @@ mod tests {
 
     #[test]
     fn own_hostname_and_allowed_names() {
+        // policy(): hostname "gpubox1.example.lan", --export-allow-host NAS.lan.
         for ok in [
-            "gpubox1",
-            "gpubox1",
-            "GPUBOX1:9464",
             "gpubox1.example.lan",
             "gpubox1.example.lan:9464",
-            "gpubox1.example.org",
             "gpubox1.example.lan.",
+            "gpubox1",
+            "GPUBOX1:9464",
             "nas.lan",
             "NAS.LAN:80",
+            "box.lan",
         ] {
             assert!(policy().allows(ok), "{ok}");
         }
         for bad in [
+            // A suffix on the machine's name is a name someone else may own.
+            "gpubox1.evil.com",
+            "gpubox1.example.org",
+            "gpubox1.example.lan.evil.com",
+            "gpubox1.example.lan.example",
             "gpubox",
             "gpubox10",
             "gpubox1x.example.lan",
@@ -637,24 +642,32 @@ mod tests {
         ] {
             assert!(!policy().allows(bad), "{bad}");
         }
-        // The trade-off: any suffix on the first label is accepted.
-        assert!(policy().allows("gpubox1.evil.com"));
-        // A hostname that is a fully qualified name counts by its first label.
-        let p = HostPolicy::new("", Some("Box9.corp.example\n"), &[]);
-        assert!(p.allows("box9") && p.allows("BOX9.other.net") && !p.allows("box.corp.example"));
+        // A name added with --export-allow-host is exact, not a suffix.
+        let p = HostPolicy::new(
+            "",
+            Some("rack7-gpubox2.example.lan"),
+            &["gpubox1.example.org".into()],
+        );
+        assert!(p.allows("rack7-gpubox2.example.lan") && p.allows("rack7-gpubox2"));
+        assert!(p.allows("gpubox1.example.org"));
+        assert!(!p.allows("gpubox1.example.org.evil.com") && !p.allows("gpubox1"));
+        // A hostname without a domain is its own label.
+        let p = HostPolicy::new("", Some("Box9\n"), &[]);
+        assert!(p.allows("box9") && p.allows("BOX9:80") && !p.allows("box9.evil.com"));
         // No hostname known, none given: only literals and localhost.
         let p = HostPolicy::new("", None, &[]);
         assert!(p.allows("127.0.0.1") && p.allows("localhost") && !p.allows("gpubox1"));
         assert!(!HostPolicy::new("", Some(""), &[]).allows(""));
         assert_eq!(
             policy().describe(),
-            "IP addresses, localhost, box.lan, gpubox1[.*], nas.lan"
+            "IP addresses, localhost, box.lan, gpubox1.example.lan, gpubox1, nas.lan"
         );
         // No Host check at all with a token.
         let mut q = r("GET", "/stats", Some("t"));
-        q.host = Some("evil.example".into());
+        q.host = Some("gpubox1.evil.com".into());
         assert_eq!(route(&q, Some("t")), Reply::Stats);
         q.bearer = None;
+        assert_eq!(route(&q, None), Reply::Status(403));
         q.host = Some("gpubox1.example.lan:9464".into());
         assert_eq!(route(&q, None), Reply::Stats);
     }

@@ -105,21 +105,25 @@ be, with or without a port:
 
 - an IP address, or `localhost`;
 - the host part of `--export-listen`;
-- a name whose first DNS label is this machine's hostname (from
-  `/etc/hostname`, else `$HOSTNAME`), in any case: on a host named `gpubox1`,
-  `gpubox1`, `gpubox1`, `gpubox1.example.lan` and `gpubox1.example.org` pass;
+- this machine's hostname exactly as the system gives it (`/etc/hostname`,
+  else `$HOSTNAME`), and the first label of it: on a host named
+  `rack7-gpubox2.example.lan`, `rack7-gpubox2.example.lan` and `rack7-gpubox2` pass (any case);
 - a name given with `--export-allow-host NAME` (repeatable; exact match, any
-  case): an alias, or the name of a reverse proxy.
+  case): the DNS names clients really use, aliases, a reverse proxy.
+
+All matches are exact: there is no suffix or wildcard, so `rack7-gpubox2.evil.com`
+and `rack7-gpubox2.example.org` get `403`. If clients reach the daemon by a
+name that is not the hostname (a name from another domain, a CNAME), add it
+with `--export-allow-host`. For the systemd unit in `contrib/systemd`, put it
+in `~/.config/llm-visuals/export.env`:
+
+```text
+LLMV_EXPORT_ARGS=--export-allow-host gpubox2.example.org --export-allow-host gpubox2.lan
+```
 
 Any other name gets `403`, and a missing `Host` on HTTP/1.1 gets `400`. The
 start line lists the accepted names when there is no token. With a token, the
 `Host` header is not checked.
-
-The first-label rule accepts any domain suffix, so `gpubox1.evil.com` passes
-too. A DNS-rebinding attack needs a name the attacker controls whose first
-label is this host's name, which is hard to arrange on a LAN. If that is
-not enough (a host name that is easy to guess on a network others can
-reach), use a token.
 
 **No TLS.** The token and the data cross the network in clear text. Use a
 LAN you trust or a VPN, or keep the listener on loopback and use an SSH

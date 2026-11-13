@@ -181,8 +181,8 @@ pub struct Args {
     pub export_token_file: Option<String>,
 
     /// Another `Host` name --export-listen answers without a token (an alias,
-    /// a reverse proxy's name); repeatable. The machine's own hostname, in
-    /// any domain, is always accepted
+    /// a reverse proxy's name); repeatable, exact match. The machine's own
+    /// hostname and its first label are always accepted
     #[arg(long, value_name = "NAME")]
     pub export_allow_host: Vec<String>,
 

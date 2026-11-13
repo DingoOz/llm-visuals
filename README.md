@@ -1260,8 +1260,8 @@ the dashboard while exporting. `--export-listen HOST:PORT` also serves the
 export over HTTP (`/stats`, `/stream` as NDJSON, `/health`), with a bearer
 token from `--export-token-file`; there is no TLS, so use a trusted network,
 a VPN or an SSH tunnel. Without a token the `Host` header must be an IP
-address, `localhost`, this machine's hostname (any domain) or a name from
-`--export-allow-host`. The export also carries the machine's CPU load
+address, `localhost`, this machine's hostname (exact, or its first label) or a name from
+`--export-allow-host` (exact; no wildcard). The export also carries the machine's CPU load
 (`system`), the server process's CPU use, and the weight path of the
 Bandwidth view (disk, RAM, PCIe, VRAM and the bottleneck verdict per model),
 so a remote panel can draw where the tokens wait; see
