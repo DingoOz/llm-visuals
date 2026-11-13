@@ -198,6 +198,111 @@ while the prompt is read. Some engines (for example Maya, where
 `fan_pct`, `fan_rpm`, `unified`.
 When `unified` is `true` the memory fields describe system RAM, not a card.
 
+## Added fields: CPU and the data path
+
+These fields were added to `llm-visuals.stats/1` after its first release.
+They are additive: a client that does not know them ignores them. A value
+that is not known is `null`, never `0`.
+
+### `system`
+
+The machine as a whole, one object per export. It is present even with no
+model attached.
+
+| Field | Unit | Meaning |
+|-------|------|---------|
+| `cpu_pct` | % | Busy share of all logical CPUs since the last host sample (user, nice, system, irq, softirq, steal). Time waiting for I/O (`iowait`) is not busy. |
+| `iowait_pct` | % | Share of CPU time spent idle with I/O in flight. A saturated SSD shows here. |
+| `cpu_logical` | count | Logical CPUs (lines `cpuN` of `/proc/stat`). |
+| `cpu_physical` | count | Physical cores: distinct (`physical id`, `core id`) pairs of `/proc/cpuinfo`, else of `/sys/devices/system/cpu/cpuN/topology`. |
+| `ram_used_mb`, `ram_total_mb` | MiB | `MemTotal - MemAvailable`, and `MemTotal`. |
+
+Sources: `/proc/stat` and `/proc/meminfo`, read every 0.4 s (`--poll-ms` if
+longer). `cpu_pct` and `iowait_pct` are `null` until the second sample and
+wherever there is no `/proc/stat` (macOS, Windows); `ram_*` come from the OS
+on those systems. The figures are the host's, so llm-visuals must run on the
+machine that runs the server.
+
+### Per model: process CPU
+
+| Field | Meaning |
+|-------|---------|
+| `label` | The engine's own display name for the model, when it gives one (Maya: `engine.model_label`, such as `DeepSeek V4.1 · EXL3 2.9 bpw`). Else `null`. |
+| `process_cpu_cores` | CPU the server process used, in cores: the change of `utime + stime` in `/proc/<pid>/stat` over the host interval, divided by `CLK_TCK`. `CLK_TCK` is the constant 100 (the kernel's `USER_HZ`). `null` before the second sample and without `/proc`. |
+| `engine_threads` | The threads the engine computes with. |
+| `engine_threads_source` | Where that number comes from, first match wins: `"engine"` (the engine says: Maya `engine.cpu_threads`), `"cmdline"` (llama.cpp `-t N`, `--threads N` or `--threads=N`; not read for vLLM and SGLang), `"physical_cores"` (llama.cpp's own default), `"logical_cpus"`. |
+| `process_cpu_pct` | `process_cpu_cores / engine_threads x 100`. It can pass 100 (a process may use more cores than it names, and a thread count can be a guess). `null` if either is `null`. |
+
+### Per model: `bandwidth`
+
+The weight path SSD -> RAM/CPU -> PCIe -> GPUs that the dashboard's
+Bandwidth view draws. One object per model; the machine counters are the
+same for every model, the weight streams are the model's.
+
+| Field | Unit | Meaning |
+|-------|------|---------|
+| `disk_mb_s` | MB/s | Reads of every block device (`/proc/diskstats`). `null` without a sample or without `/proc`. |
+| `proc_disk_mb_s` | MB/s | Reads the server process made from storage (`/proc/<pid>/io`). |
+| `majflt_per_s` | 1/s | Major page faults of the process: weights paged in from disk. |
+| `ram_gb_s` | GB/s (10^9 B) | Weights read out of system RAM by the CPU side, per second. `0` while idle where the stream is known. |
+| `ram_source` | | `"estimated"`: the tensor table says how many bytes are CPU-side, times the step rate. `"maya"`: derived from Maya's expert tiers (below). `null`: unknown, and then `ram_gb_s` is `null` too. |
+| `pcie` | | One entry per GPU with a PCIe counter (NVIDIA only; empty elsewhere): `gpu` (index), `rx_mb_s` (host to device), `tx_mb_s`, `cap_mb_s` (link capacity from its generation and width, `null` if unknown). |
+| `vram` | | One entry per GPU: `gpu`, `busy_pct` (memory-controller busy; `null` on a unified-memory part, which has no such counter), `peak_gb_s` (datasheet memory bandwidth, `null` if unknown). |
+| `vram_gb_s` | GB/s | Estimated weight stream out of VRAM across the cards (bytes per step x steps per second); `null` without a tensor table. |
+| `vram_peak_gb_s` | GB/s | The ceiling of that stream for this model's split; `null` unless every card holding weights has a known peak. |
+| `steps_per_s` | 1/s | Weight reads per second: decode steps (verification steps under speculative decoding), prefill batches while prefilling. |
+| `bottleneck` | | The dashboard's verdict, below. |
+
+**`bottleneck`.** The same rules as the Bandwidth view's verdict line.
+
+| Field | Meaning |
+|-------|---------|
+| `stage` | `"disk"`, `"ram"`, `"pcie"`, `"vram"`, `"compute"` or `null` (no stage stands out). |
+| `gpu` | The GPU the stage is about: for `"pcie"` the busiest link, for `"vram"` the busiest memory controller, for `"compute"` the busiest GPU. `null` for `"disk"`, `"ram"` and `null`. |
+| `bound` | `true` when a real bound is named. `false` for an idle model, for the plain "prefill" label, and when nothing is saturated: do not draw those as a problem. |
+| `headline`, `detail` | The verdict as text. |
+
+Rules, in order, for decode: the disk is read heavily (system reads over
+50 MB/s, the process over 20 MB/s, or over 50 major faults/s): `disk`; a
+PCIe link over 35 % of its capacity: `pcie`; a memory controller over 75 %,
+or the weight stream over 60 % of the cards' peak: `vram`; CPU-side weights
+(over 2 % of the model) with every GPU under 60 % busy: `ram`; a GPU over
+85 % busy: `compute`; else none. For prefill the PCIe threshold is 50 % and
+a GPU over 60 % busy is `compute`. When idle only a disk being read counts.
+`ram` needs a known tensor table, so an engine without one reports it only
+where it can say so itself. Maya can: while a DeepSeek engine decodes, with
+its CPU lane computing experts from RAM (`tiers.now.cpu` above 0), at least
+85 % of `engine_threads` busy (`process_cpu_pct`) and no GPU over 85 % busy,
+the stage is `ram` with `bound: true` (`gpu: null`).
+
+### Maya: RAM stream from the expert tiers
+
+Maya keeps most experts in system RAM. With no tensor table the dashboard
+cannot estimate the stream, so for `engine: "maya"` it derives it from
+`/metrics` `tiers.now`, while the model decodes:
+
+```text
+ram_gb_s = experts_per_token x bytes_per_expert x tok_s / 10^9
+
+experts_per_token = tiers.now.cpu         (DeepSeek: experts the CPU lane computed from RAM)
+                    else tiers.now.ram_fetch  (GLM: experts read from RAM to move to a card)
+bytes_per_expert  = tiers.now.ram_gb x 2^30 / experts the pool holds
+                    (tiers.now.ram_slots, else cpu_n, else ram_used)
+tok_s             = tiers.now.tok_s       (the window the per-token counts cover)
+```
+
+`ram_gb` is in GiB: Maya's `expert_cache_mib` of 7180 MiB is `vram_gb` 7.0, and
+the pool of 78.1 GiB over 11784 slots is 7.116 MB, the size of one VRAM slot
+(`gpu_map` pool over `slots`). On a real DeepSeek V4.1 server (two RTX 3090,
+14133 CPU experts, 181.4 GiB) the formula gave 19 to 22 GB/s over a 120-token answer,
+steady while `tok_s` (10 to 23) and the per-token count (152 down to 63)
+moved opposite ways, as a memory-bound stream does. It is an upper bound under speculative decoding,
+where one verification step may read an expert once for several tokens. While
+idle the figure is `0` (the tiers keep their last reading, nothing is
+streaming); during prefill it is `null`. Maya's own `hardware` block (CPU, PCIe
+and disk of its host) is not read: llm-visuals measures the same on the
+host itself.
+
 ## Example
 
 ```json

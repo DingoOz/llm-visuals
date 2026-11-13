@@ -728,6 +728,32 @@ fn announce(mode: alerts::Mode, alert: &alerts::Alert, notify_ok: &mut bool, sta
     }
 }
 
+/// Re-derives every model's RAM and VRAM weight streams from its step rate
+/// and weight layout. The dashboard does it once per drawn frame; a headless
+/// run does it before each export, since the verdict and the streams the
+/// export carries are made from it.
+fn tick_bandwidth(
+    slots: &mut [ModelSlot],
+    gpus: &[GpuStats],
+    replay: Option<&replay::Replay>,
+    now: Instant,
+    dt: f32,
+) {
+    for slot in slots {
+        let mut layout = bandwidth::weight_layout(Some(&slot.model), gpus);
+        // Ollama measures what it left in system RAM from llama-server's
+        // own buffer report; that beats a guess from the tensor split,
+        // which Ollama's servers are not started with.
+        if let Some(p) = slot.live.ollama.as_ref().and_then(|o| o.loaded.as_ref()) {
+            if layout.known {
+                layout.cpu_bytes = p.cpu_bytes().min(layout.total_bytes);
+            }
+        }
+        let clock = replay.map_or(now, |r| r.hud().now);
+        slot.perf.tick_bandwidth(&layout, clock, dt);
+    }
+}
+
 /// Opens the log database `args` asks for; `Ok(None)` when logging is off.
 fn open_db(args: &Args) -> Result<Option<dblog::DbLog>, String> {
     let Some(path) = args.log_db_path() else {
@@ -1148,6 +1174,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // without device memory (GB10 / DGX Spark). The host monitor learns it
     // on its first sample.
     let mut sys_ram_total_mb: Option<u64> = None;
+    // The machine's CPU and RAM, for the export.
+    let mut sys_stats = host::SystemStats::default();
     if let Some(backend) = &gpu_backend {
         match GpuMonitor::collect_once(backend) {
             Ok(stats) => latest_gpu = gpu::filter_gpus(stats, &args.gpu_indices()),
@@ -1243,6 +1271,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut client_watch = headless::ClientWatch::default();
     let mut last_scan = Instant::now();
     let mut last_alive_check = Instant::now();
+    let mut last_bw_tick = Instant::now();
     type Scan = (Vec<DetectedModel>, Option<String>);
     let mut scan: Option<JoinHandle<Scan>> = None;
     let mut scanned: Option<Scan> = None;
@@ -1718,6 +1747,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             // PCIe traffic is box-wide: every sample in a batch carries it.
             if let Some((_, h)) = batch.first() {
                 gpu_hist.observe_pcie(&h.pcie_mb_s);
+                sys_stats.observe(h);
             }
             for (pid, h) in batch {
                 sys_ram_total_mb =
@@ -1994,9 +2024,24 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         // nothing to draw must still refresh the file and keep the heartbeat,
         // or a consumer reads the silence as a dead dashboard.
         if let Some(ex) = exporter.as_mut() {
-            let rows = slots
-                .iter()
-                .map(|s| (&s.model, s.quant(), &s.perf, s.live.ctx_used(), s.ctx_max));
+            if headless {
+                // No frame draws, so nothing else keeps the weight streams
+                // and the verdict current.
+                let dt = (now - last_bw_tick).as_secs_f32().clamp(0.0, 1.0);
+                last_bw_tick = now;
+                tick_bandwidth(&mut slots, &latest_gpu, replay.as_ref(), now, dt);
+            }
+            ex.set_system(&sys_stats);
+            let rows = slots.iter().map(|s| {
+                (
+                    &s.model,
+                    s.quant(),
+                    &s.perf,
+                    &s.live,
+                    s.live.ctx_used(),
+                    s.ctx_max,
+                )
+            });
             if let Some(note) = ex.tick(rows, &latest_gpu, now) {
                 if headless {
                     headless::log(&note);
@@ -2078,21 +2123,11 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         if view_mode == ViewMode::Landscape {
             camera.tick(frame_dt);
         }
+        tick_bandwidth(&mut slots, &latest_gpu, replay.as_ref(), now, frame_dt);
         for slot in &mut slots {
             if slot.live.ctx_max == 0 {
                 slot.live.ctx_max = slot.ctx_max;
             }
-            let mut layout = bandwidth::weight_layout(Some(&slot.model), &latest_gpu);
-            // Ollama measures what it left in system RAM from llama-server's
-            // own buffer report; that beats a guess from the tensor split,
-            // which Ollama's servers are not started with.
-            if let Some(p) = slot.live.ollama.as_ref().and_then(|o| o.loaded.as_ref()) {
-                if layout.known {
-                    layout.cpu_bytes = p.cpu_bytes().min(layout.total_bytes);
-                }
-            }
-            let clock = replay.as_ref().map_or(now, |r| r.hud().now);
-            slot.perf.tick_bandwidth(&layout, clock, frame_dt);
             let mut sample =
                 fade_sample_from_live(Some(&slot.model), &latest_gpu, &slot.live, fade::KV_BUCKETS);
             sample.routing = slot.routing.take();

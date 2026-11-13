@@ -1259,7 +1259,13 @@ code 0); with `--replay` it exits at the end of the log. Add `--tui` to keep
 the dashboard while exporting. `--export-listen HOST:PORT` also serves the
 export over HTTP (`/stats`, `/stream` as NDJSON, `/health`), with a bearer
 token from `--export-token-file`; there is no TLS, so use a trusted network,
-a VPN or an SSH tunnel. `--bench` and `--model` need `--tui`. A
+a VPN or an SSH tunnel. The export also carries the machine's CPU load
+(`system`), the server process's CPU use, and the weight path of the
+Bandwidth view (disk, RAM, PCIe, VRAM and the bottleneck verdict per model),
+so a remote panel can draw where the tokens wait; see
+[docs/export-schema.md](docs/export-schema.md). In `--demo` the bottleneck
+moves through every stage once a minute. `--bench` and `--model` need
+`--tui`. A
 `systemd --user` unit (`llm-visuals-export@.service`) is in
 [docs/export-schema.md](docs/export-schema.md).
 

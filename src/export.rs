@@ -9,6 +9,7 @@
 use crate::gpu::GpuStats;
 use crate::model_detect::DetectedModel;
 use crate::netexport::HttpServer;
+use crate::observe::LiveStats;
 use crate::perf::{PerfTracker, Phase};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -48,6 +49,7 @@ struct Snapshot<'a> {
     host: Option<&'a str>,
     source: &'static str,
     exporter_pid: u32,
+    system: &'a SystemOut,
     models: Vec<ModelOut<'a>>,
     gpus: Vec<GpuOut<'a>>,
 }
@@ -71,6 +73,246 @@ struct ModelOut<'a> {
     gpu_indices: &'a [u32],
     current_request: Option<CurrentOut>,
     last_request: Option<LastOut>,
+    label: Option<&'a str>,
+    process_cpu_pct: Option<f64>,
+    process_cpu_cores: Option<f64>,
+    engine_threads: Option<u32>,
+    engine_threads_source: Option<&'static str>,
+    bandwidth: BandwidthOut,
+}
+
+/// `system`: the machine's CPU and RAM. Set by `Exporter::set_system`.
+#[derive(Serialize, Default, Clone)]
+pub struct SystemOut {
+    cpu_pct: Option<f64>,
+    iowait_pct: Option<f64>,
+    cpu_logical: Option<u32>,
+    cpu_physical: Option<u32>,
+    ram_used_mb: Option<u64>,
+    ram_total_mb: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct BandwidthOut {
+    disk_mb_s: Option<f64>,
+    proc_disk_mb_s: Option<f64>,
+    majflt_per_s: Option<f64>,
+    ram_gb_s: Option<f64>,
+    ram_source: Option<&'static str>,
+    pcie: Vec<PcieOut>,
+    vram: Vec<VramOut>,
+    vram_gb_s: Option<f64>,
+    vram_peak_gb_s: Option<f64>,
+    steps_per_s: Option<f64>,
+    bottleneck: BottleneckOut,
+}
+
+#[derive(Serialize)]
+struct PcieOut {
+    gpu: u32,
+    rx_mb_s: Option<f64>,
+    tx_mb_s: Option<f64>,
+    cap_mb_s: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct VramOut {
+    gpu: u32,
+    busy_pct: Option<f64>,
+    peak_gb_s: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct BottleneckOut {
+    stage: Option<&'static str>,
+    gpu: Option<u32>,
+    bound: bool,
+    headline: String,
+    detail: String,
+}
+
+/// What one model contributes to a snapshot.
+pub type Row<'a> = (
+    &'a DetectedModel,
+    Option<String>,
+    &'a PerfTracker,
+    &'a LiveStats,
+    usize,
+    usize,
+);
+
+/// `-t N`, `--threads N` or `--threads=N` of a llama.cpp command line
+/// (`-tb` / `--threads-batch` is another setting and is left alone).
+fn threads_from_cmdline(cmdline: &str) -> Option<u32> {
+    let mut it = cmdline.split_whitespace();
+    while let Some(tok) = it.next() {
+        let val = match tok {
+            "-t" | "--threads" => it.next(),
+            _ => tok.strip_prefix("--threads="),
+        };
+        if let Some(n) = val.and_then(|v| v.parse::<u32>().ok()).filter(|n| *n > 0) {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// How many threads the engine computes with, and how we know: what the
+/// engine says, else llama.cpp's command line, else the machine's physical
+/// cores (llama.cpp's own default), else its logical CPUs.
+fn engine_threads(
+    m: &DetectedModel,
+    live: &LiveStats,
+    sys: &SystemOut,
+) -> (Option<u32>, Option<&'static str>) {
+    if let Some(n) = live.engine_threads {
+        return (Some(n), Some("engine"));
+    }
+    if m.engine == "llama.cpp" {
+        if let Some(n) = threads_from_cmdline(&m.cmdline) {
+            return (Some(n), Some("cmdline"));
+        }
+    }
+    if let Some(n) = sys.cpu_physical {
+        return (Some(n), Some("physical_cores"));
+    }
+    match sys.cpu_logical {
+        Some(n) => (Some(n), Some("logical_cpus")),
+        None => (None, None),
+    }
+}
+
+/// Weights read out of system RAM, GB/s, and where the figure comes from:
+/// the tensor table's estimate when the layout is known, else Maya's expert
+/// tiers (`ExpertTiers::ram_stream_gb_s`), else nothing.
+fn ram_stream(perf: &PerfTracker, live: &LiveStats) -> (Option<f64>, Option<&'static str>) {
+    if perf.bw.layout.known {
+        return (f(perf.bw.ram.value), Some("estimated"));
+    }
+    let Some(tiers) = live.tiers.as_ref() else {
+        return (None, None);
+    };
+    match perf.phase {
+        // The tiers keep their last reading while idle: nothing is streaming.
+        Phase::Idle => (Some(0.0), Some("maya")),
+        Phase::Decode => match tiers.ram_stream_gb_s() {
+            Some(v) => (f(v), Some("maya")),
+            None => (None, None),
+        },
+        // Prefill reads experts differently from the per-token counts.
+        Phase::Prefill => (None, None),
+    }
+}
+
+/// Maya's CPU lane as the bound. Without a tensor table the verdict cannot
+/// see CPU-side weights, but Maya says it itself: a DeepSeek engine computes
+/// part of every token's experts on the CPU from RAM (`tiers.now.cpu`). When
+/// that lane has every engine thread busy and no card is saturated, the lane
+/// is what the token waits for.
+fn maya_cpu_lane_bound(
+    perf: &PerfTracker,
+    live: &LiveStats,
+    gpus: &[GpuStats],
+    cpu_pct: Option<f64>,
+    ram_gb_s: Option<f64>,
+) -> Option<BottleneckOut> {
+    let lane = live.tiers.as_ref()?.cpu?;
+    let (pct, gb_s) = (cpu_pct?, ram_gb_s?);
+    let util = gpus
+        .iter()
+        .map(|g| g.utilization_gpu)
+        .fold(0.0f32, f32::max);
+    if perf.phase != Phase::Decode || lane <= 0.0 || pct < 85.0 || util >= 85.0 {
+        return None;
+    }
+    Some(BottleneckOut {
+        stage: Some("ram"),
+        gpu: None,
+        bound: true,
+        headline: "RAM bound: the CPU lane gates every token".into(),
+        detail: format!(
+            "{lane:.0} experts per token computed on the CPU, its threads {pct:.0}% busy, \
+             ~{gb_s:.1} GB/s from RAM; GPU only {util:.0}% busy"
+        ),
+    })
+}
+
+fn bandwidth_out(
+    perf: &PerfTracker,
+    live: &LiveStats,
+    gpus: &[GpuStats],
+    cpu_pct: Option<f64>,
+) -> BandwidthOut {
+    use crate::bandwidth::StageId;
+    let bw = &perf.bw;
+    let rates = bw.host_seen;
+    let (ram_gb_s, ram_source) = ram_stream(perf, live);
+    let v = crate::bandwidth::assess(perf, gpus);
+    let lane = v
+        .stage
+        .is_none()
+        .then(|| maya_cpu_lane_bound(perf, live, gpus, cpu_pct, ram_gb_s))
+        .flatten();
+    let pcie = bw
+        .pcie_rx
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| !m.hist.is_empty())
+        .map(|(i, m)| PcieOut {
+            gpu: i as u32,
+            rx_mb_s: f(m.value),
+            tx_mb_s: bw.pcie_tx.get(i).copied().and_then(f),
+            cap_mb_s: fo(m.full_scale),
+        })
+        .collect();
+    let vram = bw
+        .vram_busy
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| {
+            let g = gpus.iter().find(|g| g.index as usize == i)?;
+            // A unified part has no memory-controller counter: its 0 is absent.
+            let busy = (!g.unified && !m.hist.is_empty())
+                .then(|| f(m.value))
+                .flatten();
+            Some(VramOut {
+                gpu: i as u32,
+                busy_pct: busy,
+                peak_gb_s: bw.vram_peak.get(i).copied().flatten().and_then(f),
+            })
+        })
+        .collect();
+    BandwidthOut {
+        disk_mb_s: (rates && !bw.disk.hist.is_empty() && bw.host.disk_read_bytes.is_some())
+            .then(|| f(bw.disk.value))
+            .flatten(),
+        proc_disk_mb_s: (rates && bw.host.proc_read_bytes.is_some())
+            .then(|| f(bw.proc_disk_mb_s))
+            .flatten(),
+        majflt_per_s: (rates && bw.host.proc_majflt.is_some())
+            .then(|| f(bw.majflt_per_s))
+            .flatten(),
+        ram_gb_s,
+        ram_source,
+        pcie,
+        vram,
+        vram_gb_s: bw.layout.known.then(|| f(bw.vram_gb_s)).flatten(),
+        vram_peak_gb_s: fo(bw.vram_peak_gb_s),
+        steps_per_s: f(bw.steps_per_s),
+        bottleneck: lane.unwrap_or_else(|| BottleneckOut {
+            stage: v.stage.map(|s| match s {
+                StageId::Disk => "disk",
+                StageId::Ram => "ram",
+                StageId::Pcie => "pcie",
+                StageId::Vram => "vram",
+                StageId::Prefill | StageId::Decode => "compute",
+            }),
+            gpu: v.gpu.map(|g| g as u32),
+            bound: v.bound,
+            headline: v.headline,
+            detail: v.detail,
+        }),
+    }
 }
 
 #[derive(Serialize)]
@@ -113,14 +355,14 @@ struct GpuOut<'a> {
     unified: bool,
 }
 
-fn model_out<'a>(
-    m: &'a DetectedModel,
-    quant: Option<String>,
-    perf: &PerfTracker,
-    ctx_used: usize,
-    ctx_max: usize,
-    now: Instant,
-) -> ModelOut<'a> {
+fn model_out<'a>(row: Row<'a>, gpus: &[GpuStats], sys: &SystemOut, now: Instant) -> ModelOut<'a> {
+    let (m, quant, perf, live, ctx_used, ctx_max) = row;
+    let (threads, threads_source) = engine_threads(m, live, sys);
+    let cores = perf
+        .bw
+        .proc_cpu_cores
+        .map(f64::from)
+        .and_then(|c| f(c as f32));
     ModelOut {
         pid: m.pid,
         name: &m.name,
@@ -159,6 +401,23 @@ fn model_out<'a>(
             avg_decode_tps: f(r.avg_decode_tps()),
             peak_decode_tps: f(r.peak_decode_tps),
         }),
+        label: live.engine_label.as_deref(),
+        // Cores used over the threads the engine runs; may pass 100.
+        process_cpu_pct: cores
+            .zip(threads)
+            .map(|(c, t)| c / f64::from(t.max(1)) * 100.0)
+            .and_then(|p| f(p as f32)),
+        process_cpu_cores: cores,
+        engine_threads: threads,
+        engine_threads_source: threads_source,
+        bandwidth: bandwidth_out(
+            perf,
+            live,
+            gpus,
+            cores
+                .zip(threads)
+                .map(|(c, t)| c / f64::from(t.max(1)) * 100.0),
+        ),
     }
 }
 
@@ -335,6 +594,7 @@ pub struct Exporter {
     #[cfg(unix)]
     sock: Option<sock::Server>,
     http: Option<HttpServer>,
+    system: SystemOut,
     every: Duration,
     last: Option<Instant>,
     seq: u64,
@@ -374,6 +634,18 @@ impl Exporter {
             ex = ex.with_http(listen, token)?;
         }
         Ok(Some(ex))
+    }
+
+    /// The machine's CPU and RAM figures for the next exports.
+    pub fn set_system(&mut self, s: &crate::host::SystemStats) {
+        self.system = SystemOut {
+            cpu_pct: fo(s.cpu_pct),
+            iowait_pct: fo(s.iowait_pct),
+            cpu_logical: s.cpu_logical,
+            cpu_physical: s.cpu_physical,
+            ram_used_mb: s.ram_used_mb,
+            ram_total_mb: s.ram_total_mb,
+        };
     }
 
     /// Adds the HTTP server; needs the tokio runtime.
@@ -421,6 +693,7 @@ impl Exporter {
                 .map_err(|e| format!("--export-sock: {e}"))?,
             // One export per poll, and never less than the heartbeat.
             http: None,
+            system: SystemOut::default(),
             every: poll.min(HEARTBEAT),
             last: None,
             seq: 0,
@@ -434,15 +707,7 @@ impl Exporter {
     /// The JSON text of one snapshot, without its trailing newline.
     fn snapshot<'a>(
         &self,
-        models: impl Iterator<
-            Item = (
-                &'a DetectedModel,
-                Option<String>,
-                &'a PerfTracker,
-                usize,
-                usize,
-            ),
-        >,
+        models: impl Iterator<Item = Row<'a>>,
         gpus: &[GpuStats],
         now: Instant,
     ) -> String {
@@ -453,8 +718,9 @@ impl Exporter {
             host: self.host.as_deref(),
             source: self.source,
             exporter_pid: std::process::id(),
+            system: &self.system,
             models: models
-                .map(|(m, q, p, used, max)| model_out(m, q, p, used, max, now))
+                .map(|row| model_out(row, gpus, &self.system, now))
                 .collect(),
             gpus: gpus.iter().map(gpu_out).collect(),
         };
@@ -466,15 +732,7 @@ impl Exporter {
     /// message the first time an output fails.
     pub fn tick<'a>(
         &mut self,
-        models: impl Iterator<
-            Item = (
-                &'a DetectedModel,
-                Option<String>,
-                &'a PerfTracker,
-                usize,
-                usize,
-            ),
-        >,
+        models: impl Iterator<Item = Row<'a>>,
         gpus: &[GpuStats],
         now: Instant,
     ) -> Option<String> {
@@ -568,8 +826,9 @@ mod tests {
     fn json_of(ex: &Exporter) -> serde_json::Value {
         let model = crate::demo::demo_models(8192, 1).remove(0);
         let perf = PerfTracker::new();
+        let live = LiveStats::default();
         let s = ex.snapshot(
-            std::iter::once((&model, Some("Q4_K_M".into()), &perf, 100, 0)),
+            std::iter::once((&model, Some("Q4_K_M".into()), &perf, &live, 100, 0)),
             &[gpu()],
             Instant::now(),
         );
@@ -636,10 +895,11 @@ mod tests {
         let mut ex = Exporter::open(Some(&path), None, Duration::ZERO, "live").unwrap();
         let model = crate::demo::demo_models(8192, 1).remove(0);
         let perf = PerfTracker::new();
+        let live = LiveStats::default();
         let gpus = [gpu()];
         for want in 0..3u64 {
             let note = ex.tick(
-                std::iter::once((&model, None, &perf, 0, 8192)),
+                std::iter::once((&model, None, &perf, &live, 0, 8192)),
                 &gpus,
                 Instant::now(),
             );
@@ -729,8 +989,9 @@ mod tests {
         let mut ex = Exporter::open(None, Some(&path), Duration::ZERO, "live").unwrap();
         let model = crate::demo::demo_models(8192, 1).remove(0);
         let perf = PerfTracker::new();
+        let live = LiveStats::default();
         let gpus = [gpu()];
-        let rows = || std::iter::once((&model, None, &perf, 0, 8192));
+        let rows = || std::iter::once((&model, None, &perf, &live, 0, 8192));
 
         let good = UnixStream::connect(&path).unwrap();
         let slow = UnixStream::connect(&path).unwrap(); // never reads
@@ -771,5 +1032,234 @@ mod tests {
         assert!(r.is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"data");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn threads_from_the_command_line() {
+        assert_eq!(
+            threads_from_cmdline("llama-server -m x.gguf -t 12"),
+            Some(12)
+        );
+        assert_eq!(
+            threads_from_cmdline("llama-server --threads 8 -c 4096"),
+            Some(8)
+        );
+        assert_eq!(threads_from_cmdline("llama-server --threads=6"), Some(6));
+        // Batch threads are another setting.
+        assert_eq!(
+            threads_from_cmdline("llama-server -tb 16 --threads-batch 16"),
+            None
+        );
+        assert_eq!(threads_from_cmdline("llama-server -t"), None);
+        assert_eq!(threads_from_cmdline("llama-server -t abc"), None);
+        assert_eq!(threads_from_cmdline("llama-server -t 0"), None);
+        assert_eq!(threads_from_cmdline(""), None);
+    }
+
+    #[test]
+    fn threads_come_from_the_engine_then_the_command_line_then_the_cpus() {
+        let mut m = crate::demo::demo_models(8192, 1).remove(0);
+        m.engine = "llama.cpp".into();
+        m.cmdline = "llama-server -t 10".into();
+        let mut live = LiveStats::default();
+        let mut sys = SystemOut {
+            cpu_physical: Some(8),
+            cpu_logical: Some(16),
+            ..Default::default()
+        };
+        live.engine_threads = Some(14);
+        assert_eq!(engine_threads(&m, &live, &sys), (Some(14), Some("engine")));
+        live.engine_threads = None;
+        assert_eq!(engine_threads(&m, &live, &sys), (Some(10), Some("cmdline")));
+        m.cmdline = "llama-server".into();
+        assert_eq!(
+            engine_threads(&m, &live, &sys),
+            (Some(8), Some("physical_cores"))
+        );
+        // vLLM and SGLang threads are not on a command line that counts.
+        m.engine = "vllm".into();
+        m.cmdline = "vllm serve -t 4".into();
+        assert_eq!(
+            engine_threads(&m, &live, &sys),
+            (Some(8), Some("physical_cores"))
+        );
+        sys.cpu_physical = None;
+        assert_eq!(
+            engine_threads(&m, &live, &sys),
+            (Some(16), Some("logical_cpus"))
+        );
+        sys.cpu_logical = None;
+        assert_eq!(engine_threads(&m, &live, &sys), (None, None));
+    }
+
+    fn model_json(
+        ex: &Exporter,
+        model: &DetectedModel,
+        perf: &PerfTracker,
+        live: &LiveStats,
+        gpus: &[GpuStats],
+    ) -> serde_json::Value {
+        let rows = std::iter::once((model, None, perf, live, 0, 8192));
+        serde_json::from_str(&ex.snapshot(rows, gpus, Instant::now())).unwrap()
+    }
+
+    #[test]
+    fn v2_fields_are_present_and_null_when_unknown() {
+        let mut ex = Exporter::open(None, None, Duration::ZERO, "demo").unwrap();
+        let model = crate::demo::demo_models(8192, 1).remove(0);
+        let perf = PerfTracker::new();
+        let live = LiveStats::default();
+        let v = model_json(&ex, &model, &perf, &live, &[gpu()]);
+        let s = &v["system"];
+        for k in [
+            "cpu_pct",
+            "iowait_pct",
+            "cpu_logical",
+            "cpu_physical",
+            "ram_used_mb",
+            "ram_total_mb",
+        ] {
+            assert!(s.get(k).is_some_and(|x| x.is_null()), "system.{k}");
+        }
+        let m = &v["models"][0];
+        assert!(m["label"].is_null());
+        assert!(m["process_cpu_pct"].is_null() && m["process_cpu_cores"].is_null());
+        assert!(m["engine_threads"].is_null() && m["engine_threads_source"].is_null());
+        let b = &m["bandwidth"];
+        for k in [
+            "disk_mb_s",
+            "proc_disk_mb_s",
+            "majflt_per_s",
+            "ram_source",
+            "vram_gb_s",
+            "vram_peak_gb_s",
+        ] {
+            assert!(b.get(k).is_some_and(|x| x.is_null()), "bandwidth.{k}");
+        }
+        assert_eq!(b["pcie"], serde_json::json!([]));
+        assert_eq!(b["steps_per_s"], 0.0);
+        assert!(b["ram_gb_s"].is_null(), "no layout, no tiers: no stream");
+        assert_eq!(b["bottleneck"]["bound"], false);
+        assert!(b["bottleneck"]["stage"].is_null());
+        assert!(b["bottleneck"]["gpu"].is_null());
+        assert_eq!(b["bottleneck"]["headline"], "idle");
+
+        // With samples: the process, the machine and the links.
+        let mut perf = PerfTracker::new();
+        let t0 = Instant::now();
+        let mut host = crate::host::HostSample {
+            disk_read_bytes: Some(0),
+            proc_read_bytes: Some(0),
+            proc_majflt: Some(0),
+            proc_cpu_jiffies: Some(0),
+            pcie_mb_s: vec![(0, 100.0, 10.0)],
+            ..Default::default()
+        };
+        perf.observe_host(&host, t0);
+        host.disk_read_bytes = Some(50_000_000);
+        host.proc_cpu_jiffies = Some(400);
+        perf.observe_host(&host, t0 + Duration::from_secs(1));
+        let mut gpus = [gpu()];
+        gpus[0].pcie_gen = 3;
+        gpus[0].pcie_width = 16;
+        perf.observe_gpu(&gpus, t0 + Duration::from_secs(1));
+        let mut sys = crate::host::SystemStats::default();
+        sys.observe(&crate::host::HostSample {
+            cpu_logical: Some(16),
+            mem_total_bytes: Some(32 << 30),
+            mem_available_bytes: Some(16 << 30),
+            ..Default::default()
+        });
+        ex.set_system(&sys);
+        let mut m2 = model.clone();
+        m2.engine = "llama.cpp".into();
+        m2.cmdline = "llama-server -t 8".into();
+        let v = model_json(&ex, &m2, &perf, &live, &gpus);
+        assert_eq!(v["system"]["cpu_logical"], 16);
+        assert_eq!(v["system"]["ram_total_mb"], 32768);
+        assert_eq!(v["system"]["ram_used_mb"], 16384);
+        let m = &v["models"][0];
+        // 400 jiffies in a second: 4 cores, of 8 threads.
+        assert_eq!(m["process_cpu_cores"], 4.0);
+        assert_eq!(m["engine_threads"], 8);
+        assert_eq!(m["engine_threads_source"], "cmdline");
+        assert_eq!(m["process_cpu_pct"], 50.0);
+        let b = &m["bandwidth"];
+        assert_eq!(b["disk_mb_s"], 50.0);
+        assert_eq!(b["proc_disk_mb_s"], 0.0);
+        assert_eq!(b["pcie"][0]["gpu"], 0);
+        assert_eq!(b["pcie"][0]["rx_mb_s"], 100.0);
+        assert_eq!(b["pcie"][0]["cap_mb_s"], 15760.0);
+        assert_eq!(b["vram"][0]["gpu"], 0);
+        assert!(b["vram"][0]["peak_gb_s"].is_null());
+    }
+
+    #[test]
+    fn maya_ram_stream_follows_the_phase() {
+        let ex = Exporter::open(None, None, Duration::ZERO, "live").unwrap();
+        let mut model = crate::demo::demo_models(8192, 1).remove(0);
+        model.engine = "maya".into();
+        model.cmdline = String::new();
+        let body = std::fs::read_to_string("fixtures/maya-metrics-ds4.json").unwrap();
+        let live = crate::strata::live_stats(&crate::strata::parse_metrics(&body).unwrap());
+        let mut perf = PerfTracker::new();
+
+        perf.phase = crate::perf::Phase::Decode;
+        let v = model_json(&ex, &model, &perf, &live, &[]);
+        let m = &v["models"][0];
+        assert_eq!(m["label"], "DeepSeek V4.1 \u{b7} EXL3 2.9 bpw");
+        assert_eq!(m["engine_threads"], 14);
+        assert_eq!(m["engine_threads_source"], "engine");
+        let b = &m["bandwidth"];
+        assert_eq!(b["ram_source"], "maya");
+        let gb_s = b["ram_gb_s"].as_f64().unwrap();
+        assert!((gb_s - 19.6).abs() < 0.2, "{gb_s}");
+        assert!(b["vram_gb_s"].is_null(), "VRAM stream needs a tensor table");
+
+        // The tiers keep their last reading at idle; nothing is streaming.
+        perf.phase = crate::perf::Phase::Idle;
+        let v = model_json(&ex, &model, &perf, &live, &[]);
+        assert_eq!(v["models"][0]["bandwidth"]["ram_gb_s"], 0.0);
+        assert_eq!(v["models"][0]["bandwidth"]["ram_source"], "maya");
+        // Prefill reads experts another way: no figure.
+        perf.phase = crate::perf::Phase::Prefill;
+        let v = model_json(&ex, &model, &perf, &live, &[]);
+        assert!(v["models"][0]["bandwidth"]["ram_gb_s"].is_null());
+        assert!(v["models"][0]["bandwidth"]["ram_source"].is_null());
+
+        // The CPU lane with every thread busy and the cards not: the bound.
+        perf.phase = crate::perf::Phase::Decode;
+        perf.bw.proc_cpu_cores = Some(14.0);
+        let mut g = gpu();
+        g.utilization_gpu = 60.0;
+        let v = model_json(&ex, &model, &perf, &live, &[g.clone()]);
+        let bn = &v["models"][0]["bandwidth"]["bottleneck"];
+        assert_eq!(bn["stage"], "ram");
+        assert_eq!(bn["bound"], true);
+        assert!(bn["gpu"].is_null());
+        assert!(bn["detail"].as_str().unwrap().contains("experts per token"));
+        // A saturated card is the story instead.
+        g.utilization_gpu = 95.0;
+        let v = model_json(&ex, &model, &perf, &live, &[g.clone()]);
+        assert_eq!(
+            v["models"][0]["bandwidth"]["bottleneck"]["stage"],
+            "compute"
+        );
+        // Threads idle, or not decoding: no bound.
+        g.utilization_gpu = 60.0;
+        perf.bw.proc_cpu_cores = Some(2.0);
+        let v = model_json(&ex, &model, &perf, &live, &[g.clone()]);
+        assert_eq!(v["models"][0]["bandwidth"]["bottleneck"]["bound"], false);
+        perf.bw.proc_cpu_cores = Some(14.0);
+        perf.phase = crate::perf::Phase::Idle;
+        let v = model_json(&ex, &model, &perf, &live, &[g]);
+        assert_eq!(v["models"][0]["bandwidth"]["bottleneck"]["bound"], false);
+
+        // A known weight layout wins: the tensor table's estimate.
+        let mut perf = PerfTracker::new();
+        perf.bw.layout.known = true;
+        let v = model_json(&ex, &model, &perf, &live, &[]);
+        assert_eq!(v["models"][0]["bandwidth"]["ram_source"], "estimated");
+        assert_eq!(v["models"][0]["bandwidth"]["ram_gb_s"], 0.0);
     }
 }

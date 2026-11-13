@@ -712,7 +712,8 @@ mod tests {
     fn tick(ex: &mut Exporter) {
         let model = crate::demo::demo_models(8192, 1).remove(0);
         let perf = PerfTracker::new();
-        let rows = std::iter::once((&model, None, &perf, 0, 8192));
+        let live = crate::observe::LiveStats::default();
+        let rows = std::iter::once((&model, None, &perf, &live, 0, 8192));
         ex.tick(rows, &[], Instant::now());
     }
 

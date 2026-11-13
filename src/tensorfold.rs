@@ -222,6 +222,8 @@ impl Tracker {
             maya_version: None,
             tiers: None,
             vram: None,
+            label: None,
+            cpu_threads: None,
         }
     }
 }

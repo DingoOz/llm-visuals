@@ -161,6 +161,10 @@ pub struct LiveStats {
     /// Maya's expert tiers: where this model's tokens found their experts.
     /// `None` for other engines.
     pub tiers: Option<crate::strata::ExpertTiers>,
+    /// The engine's own display label for the model (Maya `model_label`).
+    pub engine_label: Option<String>,
+    /// Threads the engine says it computes on the CPU with (Maya `cpu_threads`).
+    pub engine_threads: Option<u32>,
 }
 
 /// Per-request decode count when `/slots` does not carry `n_decoded`.
@@ -486,6 +490,8 @@ pub fn parse_slots(body: &str) -> Option<LiveStats> {
         auth_denied: None,
         ollama: None,
         tiers: None,
+        engine_label: None,
+        engine_threads: None,
     })
 }
 
