@@ -180,6 +180,12 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     pub export_token_file: Option<String>,
 
+    /// Another `Host` name --export-listen answers without a token (an alias,
+    /// a reverse proxy's name); repeatable. The machine's own hostname, in
+    /// any domain, is always accepted
+    #[arg(long, value_name = "NAME")]
+    pub export_allow_host: Vec<String>,
+
     /// Keep the dashboard on screen while exporting; without it,
     /// --export-json / --export-sock run headless (no terminal, logs on stderr)
     #[arg(long)]

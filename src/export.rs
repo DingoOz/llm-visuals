@@ -441,7 +441,7 @@ fn gpu_out(g: &GpuStats) -> GpuOut<'_> {
     }
 }
 
-fn hostname() -> Option<String> {
+pub(crate) fn hostname() -> Option<String> {
     let clean = |s: String| {
         let s = s.trim().to_string();
         (!s.is_empty()).then_some(s)
@@ -629,9 +629,15 @@ impl Exporter {
                 Some(token)
             }
         };
+        if listen.is_none() && !args.export_allow_host.is_empty() {
+            return Err("--export-allow-host needs --export-listen".into());
+        }
+        if args.export_allow_host.iter().any(|h| h.trim().is_empty()) {
+            return Err("--export-allow-host: the name is empty".into());
+        }
         let mut ex = Self::open(json, sock, Duration::from_millis(args.poll_ms), source)?;
         if let Some(listen) = listen {
-            ex = ex.with_http(listen, token)?;
+            ex = ex.with_http(listen, token, &args.export_allow_host)?;
         }
         Ok(Some(ex))
     }
@@ -649,10 +655,22 @@ impl Exporter {
     }
 
     /// Adds the HTTP server; needs the tokio runtime.
-    pub fn with_http(mut self, listen: &str, token: Option<String>) -> Result<Self, String> {
-        self.http =
-            Some(HttpServer::bind(listen, token).map_err(|e| format!("--export-listen: {e}"))?);
+    pub fn with_http(
+        mut self,
+        listen: &str,
+        token: Option<String>,
+        allow_hosts: &[String],
+    ) -> Result<Self, String> {
+        self.http = Some(
+            HttpServer::bind(listen, token, allow_hosts)
+                .map_err(|e| format!("--export-listen: {e}"))?,
+        );
         Ok(self)
+    }
+
+    /// The `Host` names the HTTP server answers when there is no token.
+    pub fn accepted_hosts(&self) -> Option<String> {
+        self.http.as_ref().and_then(|h| h.accepted_hosts())
     }
 
     /// Where the HTTP server listens, and whether it asks for a token.

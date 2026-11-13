@@ -53,17 +53,69 @@ fn host_part(s: &str) -> Option<&str> {
     }
 }
 
-/// Whether a request for `Host: header` may be answered when there is no
-/// token: an IP literal, `localhost`, or the host `--export-listen` names. A
-/// name that points at this address from someone else's page (DNS
-/// rebinding) is none of these.
-fn host_allowed(header: &str, listen_host: &str) -> bool {
-    let Some(h) = host_part(header) else {
-        return false;
-    };
-    h.parse::<IpAddr>().is_ok()
-        || h.eq_ignore_ascii_case("localhost")
-        || (!listen_host.is_empty() && h.eq_ignore_ascii_case(listen_host))
+/// The `Host` names a request may carry when there is no token.
+#[derive(Debug, Clone, Default)]
+pub struct HostPolicy {
+    /// The host part of `--export-listen` (empty for an address).
+    listen_host: String,
+    /// First DNS label of this machine's hostname, lower case.
+    own_label: Option<String>,
+    /// `--export-allow-host`, lower case.
+    extra: Vec<String>,
+}
+
+fn first_label(name: &str) -> &str {
+    name.trim_end_matches('.').split('.').next().unwrap_or("")
+}
+
+impl HostPolicy {
+    pub fn new(listen_host: &str, hostname: Option<&str>, extra: &[String]) -> Self {
+        Self {
+            listen_host: listen_host.to_string(),
+            own_label: hostname
+                .map(|h| first_label(h.trim()).to_ascii_lowercase())
+                .filter(|l| !l.is_empty()),
+            extra: extra
+                .iter()
+                .map(|e| e.trim().trim_end_matches('.').to_ascii_lowercase())
+                .collect(),
+        }
+    }
+
+    /// For the startup log.
+    pub fn describe(&self) -> String {
+        let mut v = vec!["IP addresses".to_string(), "localhost".to_string()];
+        if !self.listen_host.is_empty() && self.listen_host.parse::<IpAddr>().is_err() {
+            v.push(self.listen_host.clone());
+        }
+        if let Some(l) = &self.own_label {
+            v.push(format!("{l}[.*]"));
+        }
+        v.extend(self.extra.iter().cloned());
+        v.join(", ")
+    }
+
+    /// Whether a request for `Host: header` may be answered when there is no
+    /// token: an IP literal, `localhost`, the host `--export-listen` names,
+    /// a name whose first DNS label is this machine's (`gpubox1`,
+    /// `gpubox1.example.lan`: any domain suffix), or a name given with
+    /// `--export-allow-host`. A name that points at this address from
+    /// someone else's page (DNS rebinding) is none of these.
+    fn allows(&self, header: &str) -> bool {
+        let Some(h) = host_part(header) else {
+            return false;
+        };
+        if h.parse::<IpAddr>().is_ok() || h.eq_ignore_ascii_case("localhost") {
+            return true;
+        }
+        let name = h.trim_end_matches('.').to_ascii_lowercase();
+        (!self.listen_host.is_empty() && name.eq_ignore_ascii_case(&self.listen_host))
+            || self
+                .own_label
+                .as_deref()
+                .is_some_and(|l| first_label(&name) == l)
+            || self.extra.contains(&name)
+    }
 }
 
 /// Reads a request head (everything before the blank line). `Err` means a
@@ -131,7 +183,7 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-pub fn route(req: &Request, token: Option<&str>, listen_host: &str) -> Reply {
+pub fn route(req: &Request, token: Option<&str>, hosts: &HostPolicy) -> Reply {
     if req.method != "GET" {
         return Reply::Status(405);
     }
@@ -140,7 +192,7 @@ pub fn route(req: &Request, token: Option<&str>, listen_host: &str) -> Reply {
     if token.is_none() {
         match &req.host {
             None if req.http11 => return Reply::Status(400),
-            Some(h) if !host_allowed(h, listen_host) => return Reply::Status(403),
+            Some(h) if !hosts.allows(h) => return Reply::Status(403),
             _ => {}
         }
     }
@@ -177,7 +229,7 @@ fn reason(status: u16) -> &'static str {
 struct Ctx {
     token: Option<String>,
     /// The host part of `--export-listen`, for the `Host` check.
-    listen_host: String,
+    hosts: HostPolicy,
     latest: watch::Receiver<Option<Arc<str>>>,
     bcast: broadcast::Sender<Arc<str>>,
     events: mpsc::Sender<String>,
@@ -282,7 +334,7 @@ async fn handle(mut s: TcpStream, peer: SocketAddr, ctx: Arc<Ctx>) {
         write(&mut s, &ctx.error(400)).await;
         return;
     };
-    match route(&req, ctx.token.as_deref(), &ctx.listen_host) {
+    match route(&req, ctx.token.as_deref(), &ctx.hosts) {
         Reply::Health => {
             write(&mut s, &ctx.response(200, "text/plain", "ok\n")).await;
         }
@@ -410,7 +462,11 @@ pub struct HttpServer {
 impl HttpServer {
     /// Binds now, so a bad address is a startup error; serves from a task.
     /// Call from inside the tokio runtime.
-    pub fn bind(listen: &str, token: Option<String>) -> Result<Self, String> {
+    pub fn bind(
+        listen: &str,
+        token: Option<String>,
+        allow_hosts: &[String],
+    ) -> Result<Self, String> {
         let err = |e: std::io::Error| format!("{listen}: {e}");
         let std_listener = std::net::TcpListener::bind(listen).map_err(err)?;
         std_listener.set_nonblocking(true).map_err(err)?;
@@ -421,9 +477,13 @@ impl HttpServer {
         let (events_tx, events) = mpsc::channel(256);
         let (stop, stop_rx) = watch::channel(false);
         let auth = token.is_some();
-        let listen_host = host_part(listen).unwrap_or_default().to_string();
+        let hosts = HostPolicy::new(
+            host_part(listen).unwrap_or_default(),
+            crate::export::hostname().as_deref(),
+            allow_hosts,
+        );
         let ctx = Arc::new(Ctx {
-            listen_host,
+            hosts,
             token,
             latest: latest_rx,
             bcast: bcast.clone(),
@@ -444,6 +504,11 @@ impl HttpServer {
             ctx,
             accept: Some(accept),
         })
+    }
+
+    /// The `Host` names answered without a token; `None` with one.
+    pub fn accepted_hosts(&self) -> Option<String> {
+        self.ctx.token.is_none().then(|| self.ctx.hosts.describe())
     }
 
     pub fn addr(&self) -> SocketAddr {
@@ -534,8 +599,64 @@ mod tests {
         }
     }
 
+    fn policy() -> HostPolicy {
+        HostPolicy::new("box.lan", Some("gpubox1.example.lan"), &["NAS.lan".to_string()])
+    }
+
     fn route(req: &Request, token: Option<&str>) -> Reply {
-        super::route(req, token, "box.lan")
+        super::route(req, token, &policy())
+    }
+
+    #[test]
+    fn own_hostname_and_allowed_names() {
+        for ok in [
+            "gpubox1",
+            "gpubox1",
+            "GPUBOX1:9464",
+            "gpubox1.example.lan",
+            "gpubox1.example.lan:9464",
+            "gpubox1.example.org",
+            "gpubox1.example.lan.",
+            "nas.lan",
+            "NAS.LAN:80",
+        ] {
+            assert!(policy().allows(ok), "{ok}");
+        }
+        for bad in [
+            "gpubox",
+            "gpubox10",
+            "gpubox1x.example.lan",
+            "xgpubox1.example.lan",
+            "evil.gpubox1.example.lan",
+            "gpu-box1.example.lan",
+            "nas",
+            "nas.lan.evil.com",
+            "x.nas.lan",
+            ".example.lan",
+            "..",
+        ] {
+            assert!(!policy().allows(bad), "{bad}");
+        }
+        // The trade-off: any suffix on the first label is accepted.
+        assert!(policy().allows("gpubox1.evil.com"));
+        // A hostname that is a fully qualified name counts by its first label.
+        let p = HostPolicy::new("", Some("Box9.corp.example\n"), &[]);
+        assert!(p.allows("box9") && p.allows("BOX9.other.net") && !p.allows("box.corp.example"));
+        // No hostname known, none given: only literals and localhost.
+        let p = HostPolicy::new("", None, &[]);
+        assert!(p.allows("127.0.0.1") && p.allows("localhost") && !p.allows("gpubox1"));
+        assert!(!HostPolicy::new("", Some(""), &[]).allows(""));
+        assert_eq!(
+            policy().describe(),
+            "IP addresses, localhost, box.lan, gpubox1[.*], nas.lan"
+        );
+        // No Host check at all with a token.
+        let mut q = r("GET", "/stats", Some("t"));
+        q.host = Some("evil.example".into());
+        assert_eq!(route(&q, Some("t")), Reply::Stats);
+        q.bearer = None;
+        q.host = Some("gpubox1.example.lan:9464".into());
+        assert_eq!(route(&q, None), Reply::Stats);
     }
 
     #[test]
@@ -553,7 +674,7 @@ mod tests {
             "box.lan",
             "BOX.lan:9464",
         ] {
-            assert!(host_allowed(ok, "box.lan"), "{ok}");
+            assert!(policy().allows(ok), "{ok}");
         }
         for bad in [
             "evil.example",
@@ -568,10 +689,10 @@ mod tests {
             "",
             "\u{e9}",
         ] {
-            assert!(!host_allowed(bad, "box.lan"), "{bad}");
+            assert!(!policy().allows(bad), "{bad}");
         }
         // With no listen host named (a bare IP listen), only literals and localhost.
-        assert!(!host_allowed("box.lan", ""));
+        assert!(!HostPolicy::default().allows("box.lan"));
         assert_eq!(host_part("[::]:9464"), Some("::"));
         assert_eq!(host_part("0.0.0.0:9464"), Some("0.0.0.0"));
         let mut q = r("GET", "/stats", None);
@@ -720,7 +841,7 @@ mod tests {
     fn server() -> (Exporter, SocketAddr) {
         let ex = Exporter::open(None, None, Duration::ZERO, "live")
             .unwrap()
-            .with_http("127.0.0.1:0", Some("tok".into()))
+            .with_http("127.0.0.1:0", Some("tok".into()), &[])
             .unwrap();
         let addr = ex.listen_info().unwrap().0;
         (ex, addr)
@@ -765,7 +886,7 @@ mod tests {
     async fn no_cors_and_host_check_without_a_token() {
         let mut ex = Exporter::open(None, None, Duration::ZERO, "live")
             .unwrap()
-            .with_http("127.0.0.1:0", None)
+            .with_http("127.0.0.1:0", None, &[])
             .unwrap();
         tick(&mut ex);
         let addr = ex.listen_info().unwrap().0;
@@ -909,8 +1030,8 @@ mod tests {
 
     #[tokio::test]
     async fn bind_error_is_reported() {
-        let first = HttpServer::bind("127.0.0.1:0", None).unwrap();
+        let first = HttpServer::bind("127.0.0.1:0", None, &[]).unwrap();
         let taken = first.addr().to_string();
-        assert!(HttpServer::bind(&taken, None).is_err());
+        assert!(HttpServer::bind(&taken, None, &[]).is_err());
     }
 }

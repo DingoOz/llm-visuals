@@ -1295,6 +1295,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         if let Some((addr, auth)) = listen {
             let auth = if auth { "on" } else { "off" };
             outs.push(format!("listen={addr} auth={auth}"));
+            if let Some(hosts) = exporter.as_ref().and_then(|e| e.accepted_hosts()) {
+                outs.push(format!("hosts=[{hosts}]"));
+            }
         }
         headless::log(&format!(
             "v{} headless, source={source}, {}, poll={}ms",
