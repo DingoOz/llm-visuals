@@ -600,7 +600,11 @@ mod tests {
     }
 
     fn policy() -> HostPolicy {
-        HostPolicy::new("box.lan", Some("gpubox1.example.lan"), &["NAS.lan".to_string()])
+        HostPolicy::new(
+            "box.lan",
+            Some("gpubox1.example.lan"),
+            &["NAS.lan".to_string()],
+        )
     }
 
     fn route(req: &Request, token: Option<&str>) -> Reply {
@@ -612,7 +616,7 @@ mod tests {
         // policy(): hostname "gpubox1.example.lan", --export-allow-host NAS.lan.
         for ok in [
             "gpubox1.example.lan",
-            "gpubox1.example.lan:9464",
+            "Gpubox1.EXAMPLE.LAN:9464",
             "gpubox1.example.lan.",
             "gpubox1",
             "GPUBOX1:9464",
