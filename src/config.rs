@@ -160,6 +160,31 @@ pub struct Args {
     #[arg(long, default_value_t = 1024)]
     pub log_db_max_mb: u64,
 
+    /// Write the live numbers as JSON (schema llm-visuals.stats/1) to this
+    /// file, replaced atomically on every poll; see docs/export-schema.md
+    #[arg(long, value_name = "PATH")]
+    pub export_json: Option<String>,
+
+    /// Serve the same JSON, one object per line, on this Unix socket
+    /// (Linux and macOS only)
+    #[arg(long, value_name = "PATH")]
+    pub export_sock: Option<String>,
+
+    /// Serve the export over HTTP on HOST:PORT (GET /stats, /stream, /health);
+    /// see --export-token-file
+    #[arg(long, value_name = "HOST:PORT")]
+    pub export_listen: Option<String>,
+
+    /// File holding the bearer token --export-listen requires on /stats and
+    /// /stream (without one, anyone who can connect can read)
+    #[arg(long, value_name = "PATH")]
+    pub export_token_file: Option<String>,
+
+    /// Keep the dashboard on screen while exporting; without it,
+    /// --export-json / --export-sock run headless (no terminal, logs on stderr)
+    #[arg(long)]
+    pub tui: bool,
+
     /// Electricity price per kWh, for the cost of the GPU energy drawn
     /// (0 = no price; costs are hidden)
     #[arg(long, default_value_t = 0.0, value_parser = parse_price)]

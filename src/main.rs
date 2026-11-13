@@ -7,16 +7,19 @@ mod config;
 mod dblog;
 mod demo;
 mod energy;
+mod export;
 mod fade;
 mod gguf;
 mod gpu;
 mod gpuinfo;
+mod headless;
 mod host;
 mod landscape;
 mod layers;
 mod layers_view;
 mod llm;
 mod model_detect;
+mod netexport;
 mod ninfer;
 pub mod nvdriver;
 pub mod nvml;
@@ -841,8 +844,21 @@ fn offload_note(slots: &[ModelSlot]) -> String {
     }
 }
 
+/// Set once the run is headless, so a startup error reads as a log line.
+static HEADLESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    match run().await {
+        Err(e) if HEADLESS.load(std::sync::atomic::Ordering::Relaxed) => {
+            headless::log(&e.to_string());
+            std::process::exit(1);
+        }
+        r => r,
+    }
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Child of vision::cuda_bus_ids, run under a server's CUDA environment.
     if std::env::args().nth(1).as_deref() == Some(vision::CUDA_PROBE_ARG) {
         std::process::exit(if vision::print_cuda_bus_ids() { 0 } else { 1 });
@@ -878,6 +894,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("bench report — {}\n", path.display());
         print!("{}", bench::format_report(&picked));
         return Ok(());
+    }
+    // Exporting without --tui is a daemon: no terminal, logs on stderr.
+    let headless =
+        (args.export_json.is_some() || args.export_sock.is_some() || args.export_listen.is_some())
+            && !args.tui;
+    HEADLESS.store(headless, std::sync::atomic::Ordering::Relaxed);
+    if headless && args.bench {
+        return Err("--bench needs the dashboard: add --tui".into());
+    }
+    if headless && !args.demo && !args.auto_detect() {
+        return Err("--model (the Python bridge) needs the dashboard: add --tui".into());
     }
     // Checked before the terminal is taken over, so a mistake reads plainly.
     let bench_config = if args.bench {
@@ -954,10 +981,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => return Err(e.into()),
     };
 
-    crossterm::terminal::enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(io::stdout());
-    let mut terminal = Terminal::new(backend)?;
+    // Bound before raw mode too: a bad --export-sock path is a startup error.
+    let mut exporter = export::Exporter::new(
+        &args,
+        if args.demo {
+            "demo"
+        } else if replay.is_some() {
+            "replay"
+        } else {
+            "live"
+        },
+    )?;
+
+    let mut terminal = if headless {
+        None
+    } else {
+        crossterm::terminal::enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen)?;
+        Some(Terminal::new(CrosstermBackend::new(io::stdout()))?)
+    };
 
     struct TerminalGuard {
         restored: bool,
@@ -970,7 +1012,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    let mut _guard = TerminalGuard { restored: false };
+    let mut _guard = TerminalGuard { restored: headless };
 
     // Python bridge path (explicit --model): streams real attention weights.
     let bridge_mode = !args.demo && !args.auto_detect();
@@ -1137,6 +1179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         status_for(&slots, false)
     };
+    let mut status_log = headless::StatusLog::new(&status);
     if let Some(note) = startup_note {
         status = note;
     }
@@ -1194,11 +1237,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut bench_pending: Vec<(bench::BenchResult, u64, Instant)> = Vec::new();
     let mut bench_open = false;
 
+    // Headless: nothing to draw, so the loop only polls and exports, and
+    // needs a way to stop and its own rescans (the `r` key does them in the TUI).
+    let mut model_watch = headless::ModelWatch::default();
+    let mut client_watch = headless::ClientWatch::default();
+    let mut last_scan = Instant::now();
+    let mut last_alive_check = Instant::now();
+    type Scan = (Vec<DetectedModel>, Option<String>);
+    let mut scan: Option<JoinHandle<Scan>> = None;
+    let mut scanned: Option<Scan> = None;
+    let mut replay_end: Option<Instant> = None;
+    let stop = if headless {
+        let source = if args.demo {
+            "demo"
+        } else if replay.is_some() {
+            "replay"
+        } else {
+            "live"
+        };
+        let mut outs = Vec::new();
+        if let Some(p) = &args.export_json {
+            outs.push(format!("json={p}"));
+        }
+        if let Some(p) = &args.export_sock {
+            outs.push(format!("sock={p}"));
+        }
+        let listen = exporter.as_ref().and_then(|e| e.listen_info());
+        if let Some((addr, auth)) = listen {
+            let auth = if auth { "on" } else { "off" };
+            outs.push(format!("listen={addr} auth={auth}"));
+        }
+        headless::log(&format!(
+            "v{} headless, source={source}, {}, poll={}ms",
+            env!("CARGO_PKG_VERSION"),
+            outs.join(" "),
+            poll.as_millis()
+        ));
+        if let Some((addr, false)) = listen {
+            if !addr.ip().is_loopback() {
+                headless::log(&format!(
+                    "warning: --export-listen {addr} is reachable from the network \
+                     without a token (no TLS either)"
+                ));
+            }
+        }
+        // The replay and demo slots are known; a live scan may find none.
+        for line in model_watch.update(slots.iter().map(|s| &s.model), source == "live") {
+            headless::log(&line);
+        }
+        alert_mode = alerts::Mode::Off; // a bell on stdout, a popup nobody sees
+        Some(headless::watch_signals()?)
+    } else {
+        None
+    };
+
     loop {
         tokio::task::yield_now().await;
         let mut rescan = false;
         let mut ui_changed = false;
-        if event::poll(Duration::from_millis(0))? {
+        if !headless && event::poll(Duration::from_millis(0))? {
             ui_changed = true;
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press && settings_form.is_some() {
@@ -1387,13 +1484,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        if headless && !args.demo && replay.is_none() {
+            // Discovery runs on its own task and touches nothing; the pollers
+            // and slots are rebuilt only when it finds a different set.
+            if scan.as_ref().is_some_and(|h| h.is_finished()) {
+                if let Some(Ok((found, err))) = match scan.take() {
+                    Some(h) => Some(h.await),
+                    None => None,
+                } {
+                    let have: Vec<_> = slots
+                        .iter()
+                        .map(|s| (s.model.key(), s.model.port))
+                        .collect();
+                    let seen: Vec<_> = found.iter().map(|m| (m.key(), m.port)).collect();
+                    if headless::set_differs(&have, &seen) {
+                        scanned = Some((found, err));
+                        rescan = true;
+                    } else if let Some(e) = err {
+                        status = e;
+                    }
+                }
+            }
+            if scan.is_none() {
+                // A server that died is noticed within ~2 s on Linux; elsewhere
+                // by the periodic scan.
+                let gone = last_alive_check.elapsed() >= Duration::from_secs(2) && {
+                    last_alive_check = Instant::now();
+                    slots.iter().any(|s| headless::pid_gone(s.model.pid))
+                };
+                let every = Duration::from_secs(if slots.is_empty() { 5 } else { 30 });
+                if gone || last_scan.elapsed() >= every {
+                    last_scan = Instant::now();
+                    let (a, au) = (args.clone(), auth.clone());
+                    // detect_models() reads /proc and blocks: keep it off the
+                    // async workers.
+                    let rt = tokio::runtime::Handle::current();
+                    scan = Some(tokio::task::spawn_blocking(move || {
+                        rt.block_on(discover(&a, &au))
+                    }));
+                }
+            }
+        }
         if rescan {
+            last_scan = Instant::now();
             ui_changed = true;
             for h in pollers.drain(..) {
                 h.abort();
             }
             // Keep the counters of models that are still up.
-            let (found, rescan_err) = discover(&args, &auth).await;
+            let (found, rescan_err) = match scanned.take() {
+                Some(done) => done,
+                None => discover(&args, &auth).await,
+            };
             let mut kept: Vec<ModelSlot> = Vec::with_capacity(found.len());
             for m in found {
                 match slots.iter().position(|s| s.model.key() == m.key()) {
@@ -1441,8 +1583,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             if let Some(err) = rescan_err {
                 status = err;
-            } else {
+            } else if !headless {
                 status = status_for(&slots, true);
+            }
+            if headless {
+                for line in model_watch.update(slots.iter().map(|s| &s.model), true) {
+                    headless::log(&line);
+                }
             }
         }
 
@@ -1843,6 +1990,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
+        // Exports run before the idle `continue` below: a dashboard with
+        // nothing to draw must still refresh the file and keep the heartbeat,
+        // or a consumer reads the silence as a dead dashboard.
+        if let Some(ex) = exporter.as_mut() {
+            let rows = slots
+                .iter()
+                .map(|s| (&s.model, s.quant(), &s.perf, s.live.ctx_used(), s.ctx_max));
+            if let Some(note) = ex.tick(rows, &latest_gpu, now) {
+                if headless {
+                    headless::log(&note);
+                } else {
+                    status = note;
+                }
+            }
+            if let Some(line) = headless
+                .then(|| client_watch.update(ex.clients(), now))
+                .flatten()
+            {
+                headless::log(&line);
+            }
+            if headless {
+                for line in ex.take_events() {
+                    headless::log(&line);
+                }
+            }
+        }
+
+        if let Some(stop) = &stop {
+            // Headless tail of the loop, in place of the idle check and the
+            // frame below: the data work that must not wait for a redraw.
+            if let Some(db_log) = db.as_mut() {
+                let rows = slots
+                    .iter()
+                    .map(|s| (&s.model, s.quant(), &s.perf, s.live.ctx_used(), s.ctx_max));
+                if let Err(e) = db_log.tick(rows, &latest_gpu, now) {
+                    status = format!("--log-db stopped: {e}");
+                    db = None;
+                }
+            }
+            if let Some(line) = status_log.changed(&status) {
+                headless::log(&line);
+            }
+            if let Some(sig) = headless::stop_signal(stop) {
+                headless::log(&format!("{sig}: shutting down"));
+                break;
+            }
+            if let Some(r) = replay.as_ref().filter(|r| r.finished()) {
+                // One more export round first, so the last state is out.
+                let since = *replay_end.get_or_insert(now);
+                let grace = poll.min(Duration::from_secs(1)) + Duration::from_millis(100);
+                if now.duration_since(since) >= grace {
+                    headless::log(&format!("replay of {} finished", r.path.display()));
+                    break;
+                }
+            }
+            let nap = (poll / 4).clamp(Duration::from_millis(10), Duration::from_millis(100));
+            tokio::time::sleep(nap).await;
+            continue;
+        }
+
         // Preserve the 30 FPS animation cadence while a request is active and
         // while its heat/fade effects settle. Once fully idle, fresh telemetry
         // or input drives rendering at the 200 ms sample cadence. The loop
@@ -1955,7 +2162,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             gpu_sel,
             gpu_scroll,
         };
-        renderer.render_frame(&mut terminal, &dash);
+        if let Some(terminal) = terminal.as_mut() {
+            renderer.render_frame(terminal, &dash);
+        }
         gpu_scroll = gpu_scroll.min(renderer.gpu_overflow.get());
 
         if !running && !done {
@@ -1964,8 +2173,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(Duration::from_millis(33)).await;
     }
 
-    crossterm::terminal::disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    if let Some(ex) = exporter.as_mut() {
+        ex.close().await;
+        if headless {
+            for line in ex.take_events() {
+                headless::log(&line);
+            }
+        }
+    }
+    if !headless {
+        crossterm::terminal::disable_raw_mode()?;
+        execute!(io::stdout(), LeaveAlternateScreen)?;
+    }
     _guard.restored = true;
     // The results outlive the screen, logged or not.
     if let Some(run) = bench_run.filter(|r| !r.results.is_empty()) {
