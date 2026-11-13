@@ -95,8 +95,17 @@ A `/stream` client that falls 32 exports behind, or does not take data for
 space around it is removed; an empty file is a startup error). With it,
 `/stats` and `/stream` need `Authorization: Bearer <token>`. Without it,
 they get `401` with `WWW-Authenticate: Bearer`. Without a token file, anyone
-who can connect can read, and replies carry `Access-Control-Allow-Origin: *`.
-With a token file they do not.
+who can connect can read.
+
+**No CORS, and a Host check.** Replies never carry `Access-Control-Allow-*`
+headers: a web page cannot read the export, the client is meant to be a
+native program. Without a token, the `Host` header is also checked, against
+DNS rebinding (a web page reaching this address under another name): it must
+be an IP address, `localhost`, or the host part of `--export-listen`, with or
+without a port. Another name gets `403`, and a missing `Host` on HTTP/1.1
+gets `400`. So when you reach a daemon without a token by a name, that name
+must be the one given to `--export-listen`; an IP address always works. With
+a token, the `Host` header is not checked.
 
 **No TLS.** The token and the data cross the network in clear text. Use a
 LAN you trust or a VPN, or keep the listener on loopback and use an SSH
@@ -124,8 +133,9 @@ curl -N -H "Authorization: Bearer $(cat token)" http://host:9464/stream
 
 ## Atomicity and failures
 
-- The file is written to `PATH.tmp` in the same directory, then renamed to
-  `PATH`. A reader sees the old file or the new file, never a part of one.
+- The file is written to a new temporary file in the same directory
+  (`.NAME.PID.N.tmp`, created so that it never follows a link or reuses an
+  existing file), then renamed to `PATH`. A reader sees the old file or the new file, never a part of one.
 - The socket never blocks the dashboard. Clients get non-blocking writes and
   a pending buffer of 256 KiB each. A client that does not read, or that
   fails, is dropped; it can connect again. A client that connects late gets

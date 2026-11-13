@@ -198,16 +198,31 @@ fn hostname() -> Option<String> {
         })
 }
 
-/// `<path>.tmp`, beside the target so the rename never crosses a filesystem.
-fn tmp_path(path: &Path) -> PathBuf {
-    let mut s = path.as_os_str().to_owned();
-    s.push(".tmp");
-    PathBuf::from(s)
-}
+/// Gives each temporary file of this process its own name.
+static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Writes `data` to a new file beside `path` and renames it over `path`. The
+/// temporary name is `.<name>.<pid>.<n>.tmp`, opened with `create_new` (so
+/// an existing file or a symlink at that name is refused, never followed);
+/// the rename stays on one filesystem.
 fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let tmp = tmp_path(path);
-    let r = std::fs::write(&tmp, data).and_then(|()| std::fs::rename(&tmp, path));
+    use std::io::Write;
+    let name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no file name"))?;
+    let n = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut tmp_name = std::ffi::OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(format!(".{}.{n}.tmp", std::process::id()));
+    let tmp = path.with_file_name(tmp_name);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o644);
+    let r = opts
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(data))
+        .and_then(|()| std::fs::rename(&tmp, path));
     if r.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -639,6 +654,30 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(left, vec![std::ffi::OsString::from("stats.json")]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn temp_file_is_not_written_through_a_symlink() {
+        let dir = tmpdir("symlink");
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"keep").unwrap();
+        let path = dir.join("stats.json");
+        // The name the old code used for its temporary file.
+        std::os::unix::fs::symlink(&victim, dir.join("stats.json.tmp")).unwrap();
+        write_atomic(&path, b"{}").unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+        // A symlink at the target itself is replaced, not written through.
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+        write_atomic(&path, b"{}").unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+        assert!(!std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

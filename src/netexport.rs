@@ -26,6 +26,44 @@ pub struct Request {
     /// The path, without its query string.
     pub path: String,
     pub bearer: Option<String>,
+    /// The `Host` header, as sent.
+    pub host: Option<String>,
+    pub http11: bool,
+}
+
+/// The host of `host[:port]`, `[v6][:port]` or a bare IPv6 address, without
+/// brackets or port. `None` if the text is not shaped like one of those.
+fn host_part(s: &str) -> Option<&str> {
+    let s = s.trim();
+    if let Some(rest) = s.strip_prefix('[') {
+        let (inner, tail) = rest.split_once(']')?;
+        let port_ok = tail.is_empty()
+            || tail
+                .strip_prefix(':')
+                .is_some_and(|p| p.bytes().all(|b| b.is_ascii_digit()));
+        return port_ok.then_some(inner);
+    }
+    if s.parse::<IpAddr>().is_ok() {
+        return Some(s); // a bare IPv6 address
+    }
+    match s.rsplit_once(':') {
+        Some((h, p)) if !h.contains(':') && p.bytes().all(|b| b.is_ascii_digit()) => Some(h),
+        Some(_) => None,
+        None => Some(s),
+    }
+}
+
+/// Whether a request for `Host: header` may be answered when there is no
+/// token: an IP literal, `localhost`, or the host `--export-listen` names. A
+/// name that points at this address from someone else's page (DNS
+/// rebinding) is none of these.
+fn host_allowed(header: &str, listen_host: &str) -> bool {
+    let Some(h) = host_part(header) else {
+        return false;
+    };
+    h.parse::<IpAddr>().is_ok()
+        || h.eq_ignore_ascii_case("localhost")
+        || (!listen_host.is_empty() && h.eq_ignore_ascii_case(listen_host))
 }
 
 /// Reads a request head (everything before the blank line). `Err` means a
@@ -46,19 +84,32 @@ pub fn parse_request(head: &[u8]) -> Result<Request, ()> {
         return Err(());
     }
     let mut bearer = None;
+    let mut host = None;
     for line in lines.take_while(|l| !l.is_empty()) {
         let (name, value) = line.split_once(':').ok_or(())?;
         if name.eq_ignore_ascii_case("authorization") {
             let v = value.trim();
-            if v.len() > 7 && v[..7].eq_ignore_ascii_case("bearer ") && v.is_char_boundary(7) {
-                bearer = Some(v[7..].trim().to_string());
+            // Bytes, not str slicing: a multibyte character may straddle 7.
+            if v.as_bytes()
+                .get(..7)
+                .is_some_and(|p| p.eq_ignore_ascii_case(b"bearer "))
+            {
+                bearer = Some(
+                    String::from_utf8_lossy(&v.as_bytes()[7..])
+                        .trim()
+                        .to_string(),
+                );
             }
+        } else if name.eq_ignore_ascii_case("host") && host.is_none() {
+            host = Some(value.trim().to_string());
         }
     }
     Ok(Request {
         method: method.to_string(),
         path: target.split('?').next().unwrap_or("/").to_string(),
         bearer,
+        host,
+        http11: version == "HTTP/1.1",
     })
 }
 
@@ -67,7 +118,7 @@ pub enum Reply {
     Health,
     Stats,
     Stream,
-    /// An error status: 401, 404 or 405.
+    /// An error status: 400, 401, 403, 404 or 405.
     Status(u16),
 }
 
@@ -80,9 +131,18 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-pub fn route(req: &Request, token: Option<&str>) -> Reply {
+pub fn route(req: &Request, token: Option<&str>, listen_host: &str) -> Reply {
     if req.method != "GET" {
         return Reply::Status(405);
+    }
+    // With a token, the token is the protection. Without one, only a request
+    // that names this machine by an address, `localhost` or the listen host.
+    if token.is_none() {
+        match &req.host {
+            None if req.http11 => return Reply::Status(400),
+            Some(h) if !host_allowed(h, listen_host) => return Reply::Status(403),
+            _ => {}
+        }
     }
     if req.path == "/health" {
         return Reply::Health;
@@ -105,6 +165,7 @@ fn reason(status: u16) -> &'static str {
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         408 => "Request Timeout",
@@ -115,6 +176,8 @@ fn reason(status: u16) -> &'static str {
 
 struct Ctx {
     token: Option<String>,
+    /// The host part of `--export-listen`, for the `Host` check.
+    listen_host: String,
     latest: watch::Receiver<Option<Arc<str>>>,
     bcast: broadcast::Sender<Arc<str>>,
     events: mpsc::Sender<String>,
@@ -141,9 +204,6 @@ impl Ctx {
             None => h.push_str("Transfer-Encoding: chunked\r\n"),
         }
         h.push_str("Cache-Control: no-store\r\nConnection: close\r\n");
-        if self.token.is_none() {
-            h.push_str("Access-Control-Allow-Origin: *\r\n");
-        }
         match status {
             401 => h.push_str("WWW-Authenticate: Bearer\r\n"),
             405 => h.push_str("Allow: GET\r\n"),
@@ -222,7 +282,7 @@ async fn handle(mut s: TcpStream, peer: SocketAddr, ctx: Arc<Ctx>) {
         write(&mut s, &ctx.error(400)).await;
         return;
     };
-    match route(&req, ctx.token.as_deref()) {
+    match route(&req, ctx.token.as_deref(), &ctx.listen_host) {
         Reply::Health => {
             write(&mut s, &ctx.response(200, "text/plain", "ok\n")).await;
         }
@@ -361,7 +421,9 @@ impl HttpServer {
         let (events_tx, events) = mpsc::channel(256);
         let (stop, stop_rx) = watch::channel(false);
         let auth = token.is_some();
+        let listen_host = host_part(listen).unwrap_or_default().to_string();
         let ctx = Arc::new(Ctx {
+            listen_host,
             token,
             latest: latest_rx,
             bcast: bcast.clone(),
@@ -467,7 +529,92 @@ mod tests {
             method: method.into(),
             path: path.into(),
             bearer: bearer.map(String::from),
+            host: Some("localhost:9464".into()),
+            http11: true,
         }
+    }
+
+    fn route(req: &Request, token: Option<&str>) -> Reply {
+        super::route(req, token, "box.lan")
+    }
+
+    #[test]
+    fn host_header_rules_without_a_token() {
+        for ok in [
+            "127.0.0.1",
+            "127.0.0.1:9464",
+            "10.1.2.3:80",
+            "[::1]:9464",
+            "[::1]",
+            "::1",
+            "[fe80::1]",
+            "localhost",
+            "LocalHost:9464",
+            "box.lan",
+            "BOX.lan:9464",
+        ] {
+            assert!(host_allowed(ok, "box.lan"), "{ok}");
+        }
+        for bad in [
+            "evil.example",
+            "evil.example:9464",
+            "127.0.0.1.evil.example",
+            "localhost.evil.example",
+            "box.lan.evil.example",
+            "[::1",
+            "[::1]x",
+            "[::1]:port",
+            "box.lan:abc",
+            "",
+            "\u{e9}",
+        ] {
+            assert!(!host_allowed(bad, "box.lan"), "{bad}");
+        }
+        // With no listen host named (a bare IP listen), only literals and localhost.
+        assert!(!host_allowed("box.lan", ""));
+        assert_eq!(host_part("[::]:9464"), Some("::"));
+        assert_eq!(host_part("0.0.0.0:9464"), Some("0.0.0.0"));
+        let mut q = r("GET", "/stats", None);
+        q.host = Some("evil.example".into());
+        assert_eq!(route(&q, None), Reply::Status(403));
+        assert_eq!(
+            route(&q, Some("t")),
+            Reply::Status(401),
+            "a token replaces the Host check"
+        );
+        let mut q = r("GET", "/health", None);
+        q.host = None;
+        assert_eq!(route(&q, None), Reply::Status(400), "HTTP/1.1 needs Host");
+        q.http11 = false;
+        assert_eq!(route(&q, None), Reply::Health, "HTTP/1.0 may omit it");
+        q.http11 = true;
+        assert_eq!(route(&q, Some("t")), Reply::Health);
+    }
+
+    #[test]
+    fn non_ascii_headers_do_not_panic() {
+        // The 7th byte falls inside a multibyte character.
+        for v in [
+            "b\u{e9}arer x",
+            "Bear\u{e9}r",
+            "Bearer\u{e9}x",
+            "Beare\u{e9}",
+            "\u{e9}",
+            "bearer \u{e9}\u{e9}",
+        ] {
+            let text = format!("GET / HTTP/1.1\r\nHost: h\r\nAuthorization: {v}\r\n");
+            assert!(parse_request(text.as_bytes()).is_ok(), "{v}");
+        }
+        let r = req("GET / HTTP/1.1\r\nAuthorization: Bearer t\u{f6}k\u{e9}n").unwrap();
+        assert_eq!(r.bearer.as_deref(), Some("t\u{f6}k\u{e9}n"));
+        let r = req("GET / HTTP/1.1\r\nAuthorization: b\u{e9}arer x").unwrap();
+        assert!(r.bearer.is_none());
+        // Raw bytes that are not UTF-8 are a bad request, not a panic.
+        assert!(parse_request(b"GET / HTTP/1.1\r\nAuthorization: Bearer \xc3").is_err());
+        assert!(parse_request(b"GET /\xe9 HTTP/1.1\r\n").is_err());
+        assert!(parse_request(b"\xff").is_err());
+        let r = req("GET /\u{e9}?q=\u{e9} HTTP/1.1\r\nHost: \u{e9}").unwrap();
+        assert_eq!(r.path, "/\u{e9}");
     }
 
     #[test]
@@ -510,7 +657,7 @@ mod tests {
     async fn get(addr: SocketAddr, path: &str, token: Option<&str>) -> (String, String) {
         let mut s = TcpStream::connect(addr).await.unwrap();
         let auth = token.map_or(String::new(), |t| format!("Authorization: Bearer {t}\r\n"));
-        s.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\n{auth}\r\n").as_bytes())
+        s.write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}\r\n").as_bytes())
             .await
             .unwrap();
         let mut out = Vec::new();
@@ -599,10 +746,7 @@ mod tests {
         assert!(head.starts_with("HTTP/1.1 200"));
         assert!(head.contains("application/json"));
         assert!(head.contains("Cache-Control: no-store"));
-        assert!(
-            !head.contains("Access-Control-Allow-Origin"),
-            "no CORS with a token"
-        );
+        assert!(!head.to_ascii_lowercase().contains("access-control"));
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(v["schema"], "llm-visuals.stats/1");
         let (head, _) = get(addr, "/nope", Some("tok")).await;
@@ -617,7 +761,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cors_only_without_token() {
+    async fn no_cors_and_host_check_without_a_token() {
         let mut ex = Exporter::open(None, None, Duration::ZERO, "live")
             .unwrap()
             .with_http("127.0.0.1:0", None)
@@ -625,7 +769,30 @@ mod tests {
         tick(&mut ex);
         let addr = ex.listen_info().unwrap().0;
         let (head, _) = get(addr, "/stats", None).await;
-        assert!(head.contains("Access-Control-Allow-Origin: *"));
+        assert!(head.starts_with("HTTP/1.1 200"));
+        assert!(!head.to_ascii_lowercase().contains("access-control"));
+        let raw = |host: &'static str| async move {
+            let mut s = TcpStream::connect(addr).await.unwrap();
+            s.write_all(format!("GET /stats HTTP/1.1\r\n{host}\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut out = Vec::new();
+            timeout(Duration::from_secs(5), s.read_to_end(&mut out))
+                .await
+                .unwrap()
+                .unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let evil = raw("Host: evil.example\r\n").await;
+        assert!(evil.starts_with("HTTP/1.1 403"), "{evil}");
+        assert!(!evil.to_ascii_lowercase().contains("access-control"));
+        assert!(raw("Host: localhost:9464\r\n")
+            .await
+            .starts_with("HTTP/1.1 200"));
+        assert!(raw("Host: [::1]:9464\r\n")
+            .await
+            .starts_with("HTTP/1.1 200"));
+        assert!(raw("").await.starts_with("HTTP/1.1 400"));
         ex.close().await;
     }
 
