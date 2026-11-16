@@ -1,0 +1,8 @@
+# Rust 1.100 stopped linking an unwinder for the *-windows-gnullvm targets, so
+# `cargo zigbuild` (zig cc bundles LLVM libunwind) fails with undefined
+# `_Unwind_*` / `_GCC_specific_handler` symbols. Ask the linker for it.
+[target.x86_64-pc-windows-gnullvm]
+rustflags = ["-C", "link-arg=-lunwind"]
+
+[target.aarch64-pc-windows-gnullvm]
+rustflags = ["-C", "link-arg=-lunwind"]

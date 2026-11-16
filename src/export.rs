@@ -601,6 +601,7 @@ pub struct Exporter {
     source: &'static str,
     host: Option<String>,
     json_failed: bool,
+    #[cfg(unix)]
     sock_failed: bool,
 }
 
@@ -718,6 +719,7 @@ impl Exporter {
             source,
             host: hostname(),
             json_failed: false,
+            #[cfg(unix)]
             sock_failed: false,
         })
     }

@@ -284,6 +284,33 @@ async fn write(s: &mut TcpStream, data: &[u8]) -> bool {
     matches!(timeout(IO_TIMEOUT, s.write_all(data)).await, Ok(Ok(())))
 }
 
+/// How long a closing connection may keep draining what the client still
+/// sends, and how much of it we read.
+const DRAIN_TIME: Duration = Duration::from_secs(1);
+const DRAIN_MAX: usize = 64 * 1024;
+
+/// Writes a final reply, then closes the connection gracefully: FIN first,
+/// then discard what the client still sends. Dropping a socket that has unread
+/// bytes sends a RST on Windows, which can destroy the reply before the
+/// client reads it.
+async fn write_and_close(s: &mut TcpStream, data: &[u8], drain: Duration) {
+    if !write(s, data).await {
+        return;
+    }
+    let _ = s.shutdown().await;
+    let mut left = DRAIN_MAX;
+    let mut buf = [0u8; 4096];
+    let _ = timeout(drain, async {
+        while left > 0 {
+            match s.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => left = left.saturating_sub(n),
+            }
+        }
+    })
+    .await;
+}
+
 enum HeadErr {
     TooLarge,
     Closed,
@@ -320,23 +347,23 @@ async fn handle(mut s: TcpStream, peer: SocketAddr, ctx: Arc<Ctx>) {
     let _ = s.set_nodelay(true);
     let head = match timeout(IO_TIMEOUT, read_head(&mut s)).await {
         Err(_) => {
-            write(&mut s, &ctx.error(408)).await;
+            write_and_close(&mut s, &ctx.error(408), DRAIN_TIME).await;
             return;
         }
         Ok(Err(HeadErr::TooLarge)) => {
-            write(&mut s, &ctx.error(431)).await;
+            write_and_close(&mut s, &ctx.error(431), DRAIN_TIME).await;
             return;
         }
         Ok(Err(HeadErr::Closed)) => return,
         Ok(Ok(h)) => h,
     };
     let Ok(req) = parse_request(&head) else {
-        write(&mut s, &ctx.error(400)).await;
+        write_and_close(&mut s, &ctx.error(400), DRAIN_TIME).await;
         return;
     };
     match route(&req, ctx.token.as_deref(), &ctx.hosts) {
         Reply::Health => {
-            write(&mut s, &ctx.response(200, "text/plain", "ok\n")).await;
+            write_and_close(&mut s, &ctx.response(200, "text/plain", "ok\n"), DRAIN_TIME).await;
         }
         Reply::Stats => {
             let latest = ctx.latest.borrow().clone();
@@ -344,7 +371,7 @@ async fn handle(mut s: TcpStream, peer: SocketAddr, ctx: Arc<Ctx>) {
                 Some(l) => ctx.response(200, "application/json", &l),
                 None => ctx.error(503),
             };
-            write(&mut s, &out).await;
+            write_and_close(&mut s, &out, DRAIN_TIME).await;
         }
         Reply::Status(status) => {
             if status == 401 {
@@ -358,7 +385,7 @@ async fn handle(mut s: TcpStream, peer: SocketAddr, ctx: Arc<Ctx>) {
                     ctx.event(format!("401 from {peer}"));
                 }
             }
-            write(&mut s, &ctx.error(status)).await;
+            write_and_close(&mut s, &ctx.error(status), DRAIN_TIME).await;
         }
         Reply::Stream => stream(s, peer, &ctx).await,
     }
@@ -434,7 +461,7 @@ async fn accept_loop(listener: TcpListener, ctx: Arc<Ctx>) {
                         let ctx = Arc::clone(&ctx);
                         tokio::spawn(async move {
                             let mut s = s;
-                            write(&mut s, &ctx.error(503)).await;
+                            write_and_close(&mut s, &ctx.error(503), Duration::from_millis(250)).await;
                         });
                     } else {
                         tokio::spawn(handle(s, peer, Arc::clone(&ctx)));
@@ -1003,7 +1030,7 @@ mod tests {
         timeout(Duration::from_secs(5), s.read_to_end(&mut out))
             .await
             .unwrap()
-            .ok();
+            .unwrap();
         assert!(String::from_utf8_lossy(&out).starts_with("HTTP/1.1 431"));
         let mut s = TcpStream::connect(addr).await.unwrap();
         s.write_all(b"GARBAGE\r\n\r\n").await.unwrap();
