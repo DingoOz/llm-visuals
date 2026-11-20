@@ -1302,7 +1302,11 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
 
     if parsed.engine == "rapid_mlx" {
         if let Some(name) = crate::rapid_mlx::serve_model_name(cmdline) {
-            parsed.name = name;
+            parsed.name = name.clone();
+            // `-m rapid_mlx` is the module, not the weights. A repo id
+            // stays a name so the hub cache can resolve it. A local
+            // directory is the path the tensor table is read from.
+            parsed.path = local_weights_path(&name);
         }
     }
     if parsed.name.is_empty() {
@@ -1786,6 +1790,17 @@ pub fn parse_v1_models_json(body: &str) -> Option<(String, Option<String>, Optio
     Some((id, root, max_len, owned_by))
 }
 
+/// A `serve` argument that names a directory of weights. A hub repo id
+/// (`org/name`) is not one: that stays a name and is resolved in the cache.
+fn local_weights_path(name: &str) -> Option<PathBuf> {
+    let path_shaped = name.starts_with('/')
+        || name.starts_with('.')
+        || name.starts_with('~')
+        || name.ends_with(".gguf")
+        || name.ends_with(".safetensors");
+    path_shaped.then(|| PathBuf::from(name))
+}
+
 /// The cached snapshot for a repo id or a server alias, searching every hub root.
 fn cached_snapshot(name: &str) -> Option<PathBuf> {
     if name.is_empty() {
@@ -2213,6 +2228,9 @@ pub async fn probe_endpoint(
     let final_name = match model_name {
         Some(n) => n,
         None if saw_vllm_metrics => format!("vllm-{port}"),
+        // `/metrics` named the engine and `/v1/models` did not. The
+        // aggregate counters are still worth polling.
+        None if engine == "rapid_mlx" => format!("rapid-mlx-{port}"),
         None => return None,
     };
 
@@ -2389,11 +2407,25 @@ mod tests {
         assert_eq!(model.name, "qwen3.5-4b-4bit");
         assert_eq!(model.port, Some(8000));
 
-        // `python -m` must not become the model name.
+        // `python -m` must not become the model name, and the module
+        // token must not stay behind as the weights path.
         let py = super::parse_cmdline("python", "python -m rapid_mlx serve qwen3.5-4b-4bit");
         assert_eq!(py.engine, "rapid_mlx");
         assert_eq!(py.name, "qwen3.5-4b-4bit");
         assert_eq!(py.port, Some(8000));
+        assert!(py.path.is_none());
+
+        let local = super::parse_cmdline("rmlx", "rmlx serve /models/qwen");
+        assert_eq!(
+            local.path.as_deref(),
+            Some(std::path::Path::new("/models/qwen"))
+        );
+        let repo = super::parse_cmdline(
+            "rapid-mlx",
+            "rapid-mlx serve mlx-community/Qwen3.5-4B-MLX-4bit",
+        );
+        assert!(repo.path.is_none());
+        assert_eq!(repo.name, "mlx-community/Qwen3.5-4B-MLX-4bit");
     }
 
     #[test]

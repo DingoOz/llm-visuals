@@ -520,13 +520,21 @@ async fn poll_server(
     }
     if model.engine == "rapid_mlx" {
         let mut tracker = rapid_mlx::Tracker::default();
-        let mut ctx = model.ctx_max.unwrap_or(0);
+        // The checkpoint's training limit can already be in `model.ctx_max`.
+        // The server's own window is the one on screen; the checkpoint is
+        // only the fallback when `/v1/models` does not answer.
+        let mut ctx = 0usize;
+        let mut asked_ctx = false;
         let mut misses = 0u32;
         loop {
-            if ctx == 0 {
+            if !asked_ctx {
+                asked_ctx = true;
                 ctx = rapid_mlx::poll_context(&model.host, port, &auth)
                     .await
                     .unwrap_or(0);
+                if ctx == 0 {
+                    ctx = model.ctx_max.unwrap_or(0);
+                }
             }
             let status = rapid_mlx::poll_v1_status(&model.host, port, &auth).await;
             if let Some(sb) = status {

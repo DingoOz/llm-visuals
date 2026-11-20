@@ -277,7 +277,15 @@ fn stable_request_hash(id: &str) -> i64 {
 pub struct Tracker {
     /// Completion-token total at the first `/metrics` fallback sample.
     /// Later samples report the growth since this base, not the lifetime.
+    /// Cleared on a successful `/v1/status` poll, so the next fallback
+    /// starts its own episode.
     metrics_base: Option<u64>,
+    /// Previous fallback total. Activity is "the counter moved since
+    /// this", which is separate from the episode baseline.
+    metrics_prev: Option<u64>,
+    /// Request whose completed prefill has already been published, so a
+    /// later generation poll does not bill it again.
+    prefill_published: Option<i64>,
     last_focused: Option<StatusRequest>,
 }
 
@@ -292,6 +300,10 @@ impl Tracker {
         ctx: usize,
         scrape: &Option<Scrape>,
     ) -> LiveStats {
+        // Status is answering, so a later metrics fallback must not
+        // inherit this episode's baseline.
+        self.metrics_base = None;
+        self.metrics_prev = None;
         let n_slots = status.num_running + status.num_waiting;
         let slots_busy = status
             .requests
@@ -321,11 +333,28 @@ impl Tracker {
             // must survive the last request in the log).
             self.last_focused = Some(row.clone());
 
+            // Prefill work is the uncached prompt. Publish it once, on
+            // the first generation sample, with the rate TTFT already
+            // measured. A later generation poll must not divide that
+            // total by the poll interval.
+            let uncached = row.prompt_tokens.saturating_sub(row.cached_tokens);
+            let publish_prefill = is_generation && self.prefill_published != Some(id_task);
+            if publish_prefill {
+                self.prefill_published = Some(id_task);
+            }
+            let prefill_tps = if publish_prefill {
+                row.ttft_s
+                    .filter(|t| *t > 0.0)
+                    .map(|t| uncached as f32 / t as f32)
+            } else {
+                None
+            };
+
             let s = LiveStats {
                 ctx_max: ctx,
                 prompt_tokens: row.prompt_tokens,
-                prompt_processed: if is_generation { row.prompt_tokens } else { 0 },
-                prefill_tps: None, // None during prefill and during generation.
+                prompt_processed: if publish_prefill { uncached } else { 0 },
+                prefill_tps,
                 decoded: row.completion_tokens,
                 decoded_present: true,
                 cache_tokens: row.cached_tokens,
@@ -379,13 +408,18 @@ impl Tracker {
     /// Build a blended sample from `/metrics` counters (fallback when
     /// `/v1/status` is unavailable or refuses).
     pub fn observe_metrics(&mut self, scrape: &Scrape) -> LiveStats {
-        if self.metrics_base.is_none() {
-            self.metrics_base = Some(scrape.completion_tokens_total);
-        }
-        let base = self.metrics_base.unwrap_or(0);
         let total = scrape.completion_tokens_total;
+        if self.metrics_base.is_none() {
+            self.metrics_base = Some(total);
+            self.metrics_prev = Some(total);
+        }
+        let base = self.metrics_base.unwrap_or(total);
+        let prev = self.metrics_prev.unwrap_or(base);
         let decoded = total.saturating_sub(base) as usize;
-        let processing = total > base;
+        // Stopped counters are idle. The decoded total stays, so the
+        // next increase adds to it instead of starting a second copy.
+        let processing = total > prev;
+        self.metrics_prev = Some(total);
         let spec_types = spec_types_of(scrape);
         let spec_depth = scrape.spec_depth;
         if !processing {
@@ -550,7 +584,10 @@ mod tests {
         let s = t.observe(&status, 65536, &None);
         assert!(s.processing);
         assert_eq!(s.prompt_tokens, 1000);
-        assert_eq!(s.prompt_processed, 1000);
+        // 1000 prompt tokens, 200 of them cached: 800 of prefill work,
+        // over the 0.5s TTFT.
+        assert_eq!(s.prompt_processed, 800);
+        assert_eq!(s.prefill_tps, Some(1600.0));
         assert_eq!(s.decoded, 500);
         assert!(s.decoded_present);
         assert_eq!(s.cache_tokens, 200);
@@ -561,8 +598,12 @@ mod tests {
         assert!((s.ttft_secs - 0.5).abs() < 1e-9);
         assert!(s.weight_gb.is_none());
         assert!(s.kv_cache_gb.is_none());
-        assert!(s.prefill_tps.is_none());
         assert_eq!(s.spec_types, "");
+
+        // The same request does not bill that prefill a second time.
+        let again = t.observe(&status, 65536, &None);
+        assert_eq!(again.prompt_processed, 0);
+        assert!(again.prefill_tps.is_none());
     }
 
     #[test]
@@ -886,6 +927,18 @@ rapid_mlx_suffix_decode_verify_steps_total 2\n";
         let s3 = t.observe_metrics(&third);
         assert_eq!(s3.decoded, 700);
         assert_eq!(s3.id_task, 1);
+
+        // The counter stopped. The total stays, and the panel goes idle.
+        let stopped = parse_metrics(&metrics_body(1700, 0, 40, 10, 8)).expect("metrics");
+        let s4 = t.observe_metrics(&stopped);
+        assert!(!s4.processing);
+        assert_eq!(s4.decoded, 700);
+
+        // Resuming adds to that total. It does not count 700 again.
+        let resumed = parse_metrics(&metrics_body(1800, 0, 40, 10, 8)).expect("metrics");
+        let s5 = t.observe_metrics(&resumed);
+        assert!(s5.processing);
+        assert_eq!(s5.decoded, 800);
     }
 
     #[test]
@@ -902,5 +955,23 @@ rapid_mlx_suffix_decode_verify_steps_total 2\n";
         assert_eq!(s.cache_tokens, 200);
         assert_eq!(s.decoded, 500);
         assert_eq!(s.id_task, stable_request_hash("req-42"));
+    }
+
+    #[test]
+    fn status_poll_clears_the_metrics_baseline() {
+        let mut t = Tracker::default();
+        let growing = parse_metrics(&metrics_body(1500, 0, 0, 0, 0)).expect("metrics");
+        let _ = t.observe_metrics(&parse_metrics(&metrics_body(1000, 0, 0, 0, 0)).unwrap());
+        let mid = t.observe_metrics(&growing);
+        assert_eq!(mid.decoded, 500);
+
+        let status = parse_status(&generation_status("req-7", 10, 1, 0)).expect("status");
+        t.observe(&status, 1024, &None);
+
+        // 1500 is the new baseline, not growth since the old one of 1000.
+        let _ = t.observe_metrics(&growing);
+        let next = t.observe_metrics(&parse_metrics(&metrics_body(1600, 0, 0, 0, 0)).unwrap());
+        assert!(next.processing);
+        assert_eq!(next.decoded, 100);
     }
 }
