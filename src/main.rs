@@ -25,6 +25,7 @@ mod offload;
 mod ollama;
 mod perf;
 mod pipeline;
+mod rapid_mlx;
 mod regress;
 mod render;
 mod replay;
@@ -507,6 +508,59 @@ async fn poll_server(
                         ..Default::default()
                     };
                     let _ = live_tx.try_send((pid, stats));
+                }
+            }
+            let delay = if misses >= 3 {
+                poll.max(Duration::from_secs(2))
+            } else {
+                poll
+            };
+            tokio::time::sleep(delay).await;
+        }
+    }
+    if model.engine == "rapid_mlx" {
+        let mut tracker = rapid_mlx::Tracker::default();
+        let mut ctx = model.ctx_max.unwrap_or(0);
+        let mut misses = 0u32;
+        loop {
+            if ctx == 0 {
+                ctx = rapid_mlx::poll_context(&model.host, port, &auth)
+                    .await
+                    .unwrap_or(0);
+            }
+            let status = rapid_mlx::poll_v1_status(&model.host, port, &auth).await;
+            if let Some(sb) = status {
+                misses = 0;
+                let scrape = rapid_mlx::poll_metrics(&model.host, port, &auth).await;
+                let stats = tracker.observe(&sb, ctx, &scrape);
+                let _ = live_tx.try_send((pid, stats));
+                if let Some(sp) = tracker.observe_spec(&scrape.unwrap_or_default()) {
+                    let _ = spec_tx.try_send((pid, sp));
+                }
+            } else {
+                // /v1/status refused or missing: fall back to /metrics alone.
+                let scrape = rapid_mlx::poll_metrics(&model.host, port, &auth).await;
+                if let Some(s) = scrape {
+                    misses = 0;
+                    let mut stats = tracker.observe_metrics(&s);
+                    stats.ctx_max = ctx;
+                    let _ = live_tx.try_send((pid, stats));
+                    if let Some(sp) = tracker.observe_spec(&s) {
+                        let _ = spec_tx.try_send((pid, sp));
+                    }
+                } else {
+                    // Both endpoints failed: increment misses, slow down after 3.
+                    misses = misses.saturating_add(1);
+                    if misses == 3 {
+                        let denied =
+                            observe::auth_refusal(&model.host, port, &auth, "/v1/status").await;
+                        let stats = LiveStats {
+                            ctx_max: ctx,
+                            auth_denied: denied,
+                            ..Default::default()
+                        };
+                        let _ = live_tx.try_send((pid, stats));
+                    }
                 }
             }
             let delay = if misses >= 3 {

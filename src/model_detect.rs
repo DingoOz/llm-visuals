@@ -804,6 +804,9 @@ pub fn detect_models() -> Vec<DetectedModel> {
                 m.port = Some(port);
             }
         }
+        if m.path.is_none() && m.engine == "rapid_mlx" {
+            m.path = cached_snapshot(&m.name);
+        }
         if let Some(path) = m.path.clone() {
             // A containerized server reports the model path as seen from
             // its own mount namespace (e.g. /model); re-anchor it through
@@ -867,7 +870,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
         let has_model = m.path.is_some() || m.gguf.is_some();
         let engine_rank = match m.engine.as_str() {
             "llama.cpp" | "vllm" | "sglang" | "strata" | "maya" | "ninfer" | "tensorfold"
-            | "exllamav2" => 2,
+            | "rapid_mlx" | "exllamav2" => 2,
             "ollama" => 0,
             _ => 1,
         };
@@ -982,6 +985,7 @@ fn looks_like_llm(process_name: &str, cmdline: &str) -> bool {
         || c.split_whitespace().any(token_matches)
         || crate::strata::is_server(cmdline)
         || crate::tensorfold::is_server(cmdline)
+        || crate::rapid_mlx::is_server(cmdline)
         || names_a_model(cmdline)
 }
 
@@ -1065,6 +1069,8 @@ fn engine_from(process_name: &str, cmdline: &str) -> String {
         "ninfer".into()
     } else if blob.contains("llama-server") || blob.contains("llama.cpp") {
         "llama.cpp".into()
+    } else if crate::rapid_mlx::is_server(cmdline) {
+        "rapid_mlx".into()
     } else if blob.contains("ollama") {
         "ollama".into()
     } else if blob.contains("vllm") {
@@ -1294,6 +1300,11 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
         i += 1;
     }
 
+    if parsed.engine == "rapid_mlx" {
+        if let Some(name) = crate::rapid_mlx::serve_model_name(cmdline) {
+            parsed.name = name;
+        }
+    }
     if parsed.name.is_empty() {
         parsed.name = Path::new(process_name)
             .file_name()
@@ -1316,6 +1327,9 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
     }
     if parsed.port.is_none() && parsed.engine == "tensorfold" {
         parsed.port = Some(crate::tensorfold::DEFAULT_PORT);
+    }
+    if parsed.port.is_none() && parsed.engine == "rapid_mlx" {
+        parsed.port = Some(crate::rapid_mlx::DEFAULT_PORT);
     }
     if parsed.port.is_none() && parsed.engine == "strata" {
         parsed.port = Some(crate::strata::DEFAULT_PORT);
@@ -1772,6 +1786,16 @@ pub fn parse_v1_models_json(body: &str) -> Option<(String, Option<String>, Optio
     Some((id, root, max_len, owned_by))
 }
 
+/// The cached snapshot for a repo id or a server alias, searching every hub root.
+fn cached_snapshot(name: &str) -> Option<PathBuf> {
+    if name.is_empty() {
+        return None;
+    }
+    hf_hub_roots()
+        .into_iter()
+        .find_map(|hub| hf_hub_snapshot(&hub, &[name]))
+}
+
 /// Hugging Face hub cache roots to search for a repo snapshot.
 fn hf_hub_roots() -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -2129,6 +2153,8 @@ pub async fn probe_endpoint(
             }
         } else if body.contains("llamacpp:") {
             engine = "llama.cpp".to_string();
+        } else if body.contains("rapid_mlx_completion_tokens_total") {
+            engine = "rapid_mlx".to_string();
         } else if body.contains("sglang:") {
             engine = "sglang".to_string();
         }
@@ -2189,6 +2215,10 @@ pub async fn probe_endpoint(
         None if saw_vllm_metrics => format!("vllm-{port}"),
         None => return None,
     };
+
+    if model_path.is_none() {
+        model_path = cached_snapshot(&final_name);
+    }
 
     let mut resolved_path = model_path.clone();
     let mut gguf_info = None;
@@ -2348,6 +2378,22 @@ mod tests {
             "tensorfold-nati",
             "tensorfold-native pull TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP"
         ));
+    }
+
+    #[test]
+    fn rapid_mlx_launch_uses_the_serve_model() {
+        let cmd = "rapid-mlx serve qwen3.5-4b-4bit --port 8000";
+        assert!(super::looks_like_llm("rapid-mlx", cmd));
+        let model = super::parse_cmdline("rapid-mlx", cmd);
+        assert_eq!(model.engine, "rapid_mlx");
+        assert_eq!(model.name, "qwen3.5-4b-4bit");
+        assert_eq!(model.port, Some(8000));
+
+        // `python -m` must not become the model name.
+        let py = super::parse_cmdline("python", "python -m rapid_mlx serve qwen3.5-4b-4bit");
+        assert_eq!(py.engine, "rapid_mlx");
+        assert_eq!(py.name, "qwen3.5-4b-4bit");
+        assert_eq!(py.port, Some(8000));
     }
 
     #[test]
