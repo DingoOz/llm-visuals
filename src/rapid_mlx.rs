@@ -308,6 +308,11 @@ pub struct Tracker {
     bridge_id: Option<i64>,
     seen_completion: Option<usize>,
     metrics_billed: usize,
+    /// Last `decoded` handed to the request tracker for `bridge_id`.
+    /// Later polls, including an unchanged status sample and the idle
+    /// replay, continue from this. Jumping back to the raw completion
+    /// count bills tokens that were already counted.
+    reported: Option<usize>,
 }
 
 impl Tracker {
@@ -348,23 +353,29 @@ impl Tracker {
             if self.bridge_id != Some(id_task) {
                 self.seen_completion = None;
                 self.metrics_billed = 0;
+                self.reported = None;
             }
             self.bridge_id = Some(id_task);
-            // The metrics fallback already billed some of this request's
-            // new tokens under task id 1. Publishing the full completion
-            // count again would add those, plus everything before them.
-            let billed = self.metrics_billed;
-            let gap = row
+            // Tokens the metrics fallback already handed to the tracker
+            // are inside this completion count. `reported` is the decoded
+            // value the tracker has. The sample after a fallback is a new
+            // request there, so it must carry only the unbilled growth.
+            // Every later sample, changed or not, steps from `reported`.
+            let from_fallback = self.metrics_billed > 0;
+            let add = row
                 .completion_tokens
-                .saturating_sub(self.seen_completion.unwrap_or(0));
-            let add = gap.saturating_sub(billed);
+                .saturating_sub(self.seen_completion.unwrap_or(0))
+                .saturating_sub(self.metrics_billed);
             self.metrics_billed = 0;
             self.seen_completion = Some(row.completion_tokens);
-            let decoded = if billed > 0 {
+            let decoded = if from_fallback {
                 add
+            } else if let Some(reported) = self.reported {
+                reported.saturating_add(add)
             } else {
                 row.completion_tokens
             };
+            self.reported = Some(decoded);
 
             let (spec_types, spec_depth) = scrape
                 .as_ref()
@@ -425,6 +436,14 @@ impl Tracker {
             .map(|s| (spec_types_of(s), s.spec_depth))
             .unwrap_or_default();
         if let Some(ref row) = self.last_focused {
+            let id_task = stable_request_hash(&row.request_id);
+            // Same baseline as the last generation sample. The row's
+            // completion count still includes tokens the fallback billed.
+            let decoded = if self.bridge_id == Some(id_task) {
+                self.reported.unwrap_or(row.completion_tokens)
+            } else {
+                row.completion_tokens
+            };
             LiveStats {
                 ctx_max: ctx,
                 processing: false,
@@ -434,8 +453,8 @@ impl Tracker {
                 spec_depth,
                 prompt_tokens: row.prompt_tokens,
                 cache_tokens: row.cached_tokens,
-                id_task: stable_request_hash(&row.request_id),
-                decoded: row.completion_tokens,
+                id_task,
+                decoded,
                 decoded_present: true,
                 ttft_secs: row.ttft_s.unwrap_or(0.0),
                 ..Default::default()
@@ -1061,20 +1080,41 @@ rapid_mlx_suffix_decode_verify_steps_total 2\n";
         let mut t = Tracker::default();
         let mut perf = PerfTracker::new();
         let mut at = Instant::now();
-        let mut feed = |stats: LiveStats| {
-            perf.observe(&stats, at);
-            at += Duration::from_millis(1000);
-        };
+        macro_rules! feed {
+            ($stats:expr) => {{
+                perf.observe(&$stats, at);
+                at += Duration::from_millis(1000);
+            }};
+        }
         let status = |completion: usize| {
             parse_status(&generation_status("req-7", 1000, completion, 0)).expect("status")
         };
-        feed(t.observe(&status(100), 1024, &None));
-        feed(t.observe(&status(200), 1024, &None));
-        feed(t.observe_metrics(&parse_metrics(&metrics_body(1000, 0, 0, 0, 0)).unwrap()));
-        feed(t.observe_metrics(&parse_metrics(&metrics_body(1100, 0, 0, 0, 0)).unwrap()));
-        feed(t.observe(&status(400), 1024, &None));
+        feed!(t.observe(&status(100), 1024, &None));
+        feed!(t.observe(&status(200), 1024, &None));
+        feed!(t.observe_metrics(&parse_metrics(&metrics_body(1000, 0, 0, 0, 0)).unwrap()));
+        feed!(t.observe_metrics(&parse_metrics(&metrics_body(1100, 0, 0, 0, 0)).unwrap()));
+        let recovered = t.observe(&status(400), 1024, &None);
+        assert_eq!(recovered.decoded, 100);
+        feed!(recovered);
         // 100 while status was up, 100 from the fallback, 100 after it
         // returned. The recovered count of 400 must not be billed whole.
+        assert_eq!(perf.session_decoded, 300);
+
+        // The adjustment holds. An unchanged poll must not jump to 400.
+        let held = t.observe(&status(400), 1024, &None);
+        assert_eq!(held.decoded, 100);
+        feed!(held);
+        assert_eq!(perf.session_decoded, 300);
+
+        // Idle replays that same baseline, not the raw completion count.
+        let idle = t.observe(
+            &parse_status(r#"{"num_running":0,"num_waiting":0,"requests":[]}"#).unwrap(),
+            1024,
+            &None,
+        );
+        assert_eq!(idle.decoded, 100);
+        assert!(!idle.processing);
+        feed!(idle);
         assert_eq!(perf.session_decoded, 300);
     }
 
