@@ -302,6 +302,12 @@ pub struct Tracker {
     /// later generation poll does not bill it again.
     prefill_published: Option<i64>,
     last_focused: Option<StatusRequest>,
+    /// Focused request the status polls were accounting, and how many
+    /// completion tokens that accounting had already reached. Metrics
+    /// tokens billed since then are inside the next status count.
+    bridge_id: Option<i64>,
+    seen_completion: Option<usize>,
+    metrics_billed: usize,
 }
 
 impl Tracker {
@@ -339,6 +345,26 @@ impl Tracker {
             let is_prefill = row.phase == "prefill";
             let is_processing = is_generation || is_prefill;
             let id_task = stable_request_hash(&row.request_id);
+            if self.bridge_id != Some(id_task) {
+                self.seen_completion = None;
+                self.metrics_billed = 0;
+            }
+            self.bridge_id = Some(id_task);
+            // The metrics fallback already billed some of this request's
+            // new tokens under task id 1. Publishing the full completion
+            // count again would add those, plus everything before them.
+            let billed = self.metrics_billed;
+            let gap = row
+                .completion_tokens
+                .saturating_sub(self.seen_completion.unwrap_or(0));
+            let add = gap.saturating_sub(billed);
+            self.metrics_billed = 0;
+            self.seen_completion = Some(row.completion_tokens);
+            let decoded = if billed > 0 {
+                add
+            } else {
+                row.completion_tokens
+            };
 
             let (spec_types, spec_depth) = scrape
                 .as_ref()
@@ -377,7 +403,7 @@ impl Tracker {
                 prompt_tokens: row.prompt_tokens,
                 prompt_processed: if publish_prefill { uncached } else { 0 },
                 prefill_tps,
-                decoded: row.completion_tokens,
+                decoded,
                 decoded_present: true,
                 cache_tokens: row.cached_tokens,
                 processing: is_processing,
@@ -448,6 +474,14 @@ impl Tracker {
         let processing = total > prev;
         if processing && !self.metrics_busy {
             self.stretch_base = Some(prev);
+        }
+        if processing {
+            let moved = (total - prev) as usize;
+            self.metrics_billed = self.metrics_billed.saturating_add(moved);
+            // The saved status row is the previous request. Replaying it
+            // when this run goes idle switches the task id back and bills
+            // that row's tokens again.
+            self.last_focused = None;
         }
         self.metrics_busy = processing;
         self.metrics_prev = Some(total);
@@ -1020,6 +1054,49 @@ rapid_mlx_suffix_decode_verify_steps_total 2\n";
         let s2 = t.observe_metrics(&again);
         assert!(s2.processing);
         assert_eq!(s2.decoded, 30);
+    }
+
+    #[test]
+    fn status_after_fallback_bills_only_the_new_tokens() {
+        let mut t = Tracker::default();
+        let mut perf = PerfTracker::new();
+        let mut at = Instant::now();
+        let mut feed = |stats: LiveStats| {
+            perf.observe(&stats, at);
+            at += Duration::from_millis(1000);
+        };
+        let status = |completion: usize| {
+            parse_status(&generation_status("req-7", 1000, completion, 0)).expect("status")
+        };
+        feed(t.observe(&status(100), 1024, &None));
+        feed(t.observe(&status(200), 1024, &None));
+        feed(t.observe_metrics(&parse_metrics(&metrics_body(1000, 0, 0, 0, 0)).unwrap()));
+        feed(t.observe_metrics(&parse_metrics(&metrics_body(1100, 0, 0, 0, 0)).unwrap()));
+        feed(t.observe(&status(400), 1024, &None));
+        // 100 while status was up, 100 from the fallback, 100 after it
+        // returned. The recovered count of 400 must not be billed whole.
+        assert_eq!(perf.session_decoded, 300);
+    }
+
+    #[test]
+    fn fallback_idle_does_not_rebill_the_status_row() {
+        let mut t = Tracker::default();
+        let mut perf = PerfTracker::new();
+        let mut at = Instant::now();
+        let mut feed = |stats: LiveStats| {
+            perf.observe(&stats, at);
+            at += Duration::from_millis(1000);
+        };
+        let status = parse_status(&generation_status("req-42", 1000, 500, 200)).expect("status");
+        feed(t.observe(&status, 1024, &None));
+        feed(t.observe_metrics(&parse_metrics(&metrics_body(9000, 0, 0, 0, 0)).unwrap()));
+        feed(t.observe_metrics(&parse_metrics(&metrics_body(9100, 0, 0, 0, 0)).unwrap()));
+        let idle = t.observe_metrics(&parse_metrics(&metrics_body(9100, 0, 0, 0, 0)).unwrap());
+        assert_eq!(idle.id_task, 1);
+        assert_eq!(idle.decoded, 100);
+        assert!(idle.prompt_tokens == 0);
+        feed(idle);
+        assert_eq!(perf.session_decoded, 100);
     }
 
     #[test]
