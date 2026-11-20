@@ -1142,8 +1142,8 @@ Rapid-MLX exposes three endpoints the dashboard uses:
   only when the MTP counters are still zero, and the panel is then titled
   SPECULATIVE suffix. The two series are not added together. When `/v1/status`
   refuses or is missing, the poller falls back to `/metrics` and reports
-  tokens generated since that fallback started, not the server's lifetime
-  total.
+  tokens generated during the current run, not the server's lifetime
+  total. A counter that drops, as on a restart, starts that run over.
 - **`GET /v1/models`** — context window (`context_window` or
   `context_length`), used to fill the context panel when the command line
   omits `--context`. A repo id with no local path is resolved in the

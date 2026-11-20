@@ -805,7 +805,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
             }
         }
         if m.path.is_none() && m.engine == "rapid_mlx" {
-            m.path = cached_snapshot(&m.name);
+            m.path = rapid_mlx_weights(m.pid, &m.name);
         }
         if let Some(path) = m.path.clone() {
             // A containerized server reports the model path as seen from
@@ -1801,6 +1801,22 @@ fn local_weights_path(name: &str) -> Option<PathBuf> {
     path_shaped.then(|| PathBuf::from(name))
 }
 
+/// A local directory of weights if the serve argument names one, including
+/// a relative path from the server's working directory. The hub cache is
+/// the fallback, so a repo id still resolves and a local `models/qwen`
+/// is not replaced by a cached alias.
+fn rapid_mlx_weights(pid: u32, name: &str) -> Option<PathBuf> {
+    if name.is_empty() {
+        return None;
+    }
+    let resolved = resolve_model_path(pid, Path::new(name), name);
+    if resolved.exists() {
+        Some(resolved)
+    } else {
+        cached_snapshot(name)
+    }
+}
+
 /// The cached snapshot for a repo id or a server alias, searching every hub root.
 fn cached_snapshot(name: &str) -> Option<PathBuf> {
     if name.is_empty() {
@@ -2426,6 +2442,17 @@ mod tests {
         );
         assert!(repo.path.is_none());
         assert_eq!(repo.name, "mlx-community/Qwen3.5-4B-MLX-4bit");
+    }
+
+    #[test]
+    fn rapid_mlx_relative_dir_is_the_weights_path() {
+        let name = format!("rapid-mlx-rel-{}", std::process::id());
+        std::fs::create_dir(&name).unwrap();
+        let found = super::rapid_mlx_weights(0, &name);
+        let _ = std::fs::remove_dir(&name);
+        let found = found.expect("local dir");
+        assert!(found.ends_with(&name));
+        assert!(super::rapid_mlx_weights(0, "org/not-a-local-rapid-mlx-dir-zz").is_none());
     }
 
     #[test]

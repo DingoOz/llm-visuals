@@ -69,8 +69,17 @@ pub fn is_server(cmdline: &str) -> bool {
             .and_then(|f| f.to_str())
             .is_some_and(|f| matches!(f, "rapid-mlx" | "rmlx"))
     };
+    let interpreter = |t: &str| {
+        Path::new(t)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .is_some_and(|f| f.starts_with("python"))
+    };
     match toks.as_slice() {
         [bin, "serve", ..] => named(bin),
+        // `/venv/bin/python /venv/bin/rapid-mlx serve …` keeps the
+        // interpreter as argv0. The launcher is the next token.
+        [py, bin, "serve", ..] if interpreter(py) && named(bin) => true,
         [_, "-m", "rapid_mlx", "serve", ..] => true,
         _ => false,
     }
@@ -283,6 +292,12 @@ pub struct Tracker {
     /// Previous fallback total. Activity is "the counter moved since
     /// this", which is separate from the episode baseline.
     metrics_prev: Option<u64>,
+    /// Counter at the start of the current busy stretch. `decoded` is
+    /// growth since this, so a stretch that resumes after idle does not
+    /// hand the whole episode total to the request tracker again.
+    stretch_base: Option<u64>,
+    /// Whether the previous fallback sample was still generating.
+    metrics_busy: bool,
     /// Request whose completed prefill has already been published, so a
     /// later generation poll does not bill it again.
     prefill_published: Option<i64>,
@@ -304,6 +319,8 @@ impl Tracker {
         // inherit this episode's baseline.
         self.metrics_base = None;
         self.metrics_prev = None;
+        self.stretch_base = None;
+        self.metrics_busy = false;
         let n_slots = status.num_running + status.num_waiting;
         let slots_busy = status
             .requests
@@ -342,10 +359,15 @@ impl Tracker {
             if publish_prefill {
                 self.prefill_published = Some(id_task);
             }
+            // `None` lets the tracker infer a rate from whatever prefill
+            // count is still in its window. After the one measured sample,
+            // hold the rate at zero instead.
             let prefill_tps = if publish_prefill {
                 row.ttft_s
                     .filter(|t| *t > 0.0)
                     .map(|t| uncached as f32 / t as f32)
+            } else if is_generation && self.prefill_published == Some(id_task) {
+                Some(0.0)
             } else {
                 None
             };
@@ -409,17 +431,30 @@ impl Tracker {
     /// `/v1/status` is unavailable or refuses).
     pub fn observe_metrics(&mut self, scrape: &Scrape) -> LiveStats {
         let total = scrape.completion_tokens_total;
+        // A restart counts from zero again. The old lifetime is not a
+        // baseline the new process has to climb back through.
+        if self.metrics_prev.is_some_and(|prev| total < prev) {
+            self.metrics_base = None;
+            self.metrics_prev = None;
+            self.stretch_base = None;
+            self.metrics_busy = false;
+        }
         if self.metrics_base.is_none() {
             self.metrics_base = Some(total);
             self.metrics_prev = Some(total);
+            self.stretch_base = Some(total);
         }
-        let base = self.metrics_base.unwrap_or(total);
-        let prev = self.metrics_prev.unwrap_or(base);
-        let decoded = total.saturating_sub(base) as usize;
-        // Stopped counters are idle. The decoded total stays, so the
-        // next increase adds to it instead of starting a second copy.
+        let prev = self.metrics_prev.unwrap_or(total);
         let processing = total > prev;
+        if processing && !self.metrics_busy {
+            self.stretch_base = Some(prev);
+        }
+        self.metrics_busy = processing;
         self.metrics_prev = Some(total);
+        // Tokens since this stretch started. The request tracker bills a
+        // new request's `decoded` in full, so a resume must not repeat
+        // the tokens already billed before the idle sample.
+        let decoded = total.saturating_sub(self.stretch_base.unwrap_or(prev)) as usize;
         let spec_types = spec_types_of(scrape);
         let spec_depth = scrape.spec_depth;
         if !processing {
@@ -444,7 +479,10 @@ impl Tracker {
             processing,
             spec_types,
             spec_depth,
-            id_task: if processing { 1 } else { 0 },
+            // One id for the whole fallback episode, including the idle
+            // sample. Flipping it makes the request tracker treat the
+            // same tokens as a second request.
+            id_task: 1,
             ..Default::default()
         }
     }
@@ -571,6 +609,10 @@ mod tests {
         assert!(is_server("rapid-mlx serve some/model"));
         assert!(is_server("/usr/bin/rmlx serve /models/qwen"));
         assert!(is_server("python -m rapid_mlx serve some/model"));
+        assert!(is_server(
+            "/venv/bin/python /venv/bin/rapid-mlx serve some/model --port 9000"
+        ));
+        assert!(!is_server("python /usr/bin/echo rapid-mlx serve"));
         assert!(!is_server("rapid-mlx pull some/model"));
         assert!(!is_server("rapid-mlx chat some/model"));
         assert!(!is_server("echo rapid-mlx serve"));
@@ -603,7 +645,9 @@ mod tests {
         // The same request does not bill that prefill a second time.
         let again = t.observe(&status, 65536, &None);
         assert_eq!(again.prompt_processed, 0);
-        assert!(again.prefill_tps.is_none());
+        // Zero, not absent: an absent rate lets the tracker infer one
+        // from the prefill count still in its window.
+        assert_eq!(again.prefill_tps, Some(0.0));
     }
 
     #[test]
@@ -913,7 +957,7 @@ rapid_mlx_suffix_decode_verify_steps_total 2\n";
         assert!(!s1.processing);
         assert_eq!(s1.decoded, 0);
         assert!(s1.decoded_present);
-        assert_eq!(s1.id_task, 0);
+        assert_eq!(s1.id_task, 1);
         assert_eq!(s1.spec_types, "");
 
         let second = parse_metrics(&metrics_body(1500, 0, 40, 10, 8)).expect("metrics");
@@ -928,17 +972,54 @@ rapid_mlx_suffix_decode_verify_steps_total 2\n";
         assert_eq!(s3.decoded, 700);
         assert_eq!(s3.id_task, 1);
 
-        // The counter stopped. The total stays, and the panel goes idle.
+        // The counter stopped. This stretch's total stays, and the id
+        // does not change, so the request tracker does not rebill it.
         let stopped = parse_metrics(&metrics_body(1700, 0, 40, 10, 8)).expect("metrics");
         let s4 = t.observe_metrics(&stopped);
         assert!(!s4.processing);
         assert_eq!(s4.decoded, 700);
+        assert_eq!(s4.id_task, s3.id_task);
 
-        // Resuming adds to that total. It does not count 700 again.
+        // The next run reports only the new tokens.
         let resumed = parse_metrics(&metrics_body(1800, 0, 40, 10, 8)).expect("metrics");
         let s5 = t.observe_metrics(&resumed);
         assert!(s5.processing);
-        assert_eq!(s5.decoded, 800);
+        assert_eq!(s5.decoded, 100);
+        assert_eq!(s5.id_task, s3.id_task);
+    }
+
+    #[test]
+    fn metrics_fallback_bills_each_token_once_across_idle() {
+        let mut t = Tracker::default();
+        let mut perf = PerfTracker::new();
+        let mut at = Instant::now();
+        for total in [1000, 1500, 1700, 1700, 1800] {
+            let scrape = parse_metrics(&metrics_body(total, 0, 0, 0, 0)).expect("metrics");
+            perf.observe(&t.observe_metrics(&scrape), at);
+            at += Duration::from_millis(1000);
+        }
+        // 800 generated. The idle sample and the resume must not bill
+        // the earlier 700 a second time.
+        assert_eq!(perf.session_decoded, 800);
+    }
+
+    #[test]
+    fn metrics_fallback_restarts_when_the_counter_drops() {
+        let mut t = Tracker::default();
+        let first = parse_metrics(&metrics_body(1000, 0, 0, 0, 0)).expect("metrics");
+        let _ = t.observe_metrics(&first);
+        let grown = parse_metrics(&metrics_body(1500, 0, 0, 0, 0)).expect("metrics");
+        assert_eq!(t.observe_metrics(&grown).decoded, 500);
+
+        let restarted = parse_metrics(&metrics_body(10, 0, 0, 0, 0)).expect("metrics");
+        let s = t.observe_metrics(&restarted);
+        assert!(!s.processing);
+        assert_eq!(s.decoded, 0);
+
+        let again = parse_metrics(&metrics_body(40, 0, 0, 0, 0)).expect("metrics");
+        let s2 = t.observe_metrics(&again);
+        assert!(s2.processing);
+        assert_eq!(s2.decoded, 30);
     }
 
     #[test]
