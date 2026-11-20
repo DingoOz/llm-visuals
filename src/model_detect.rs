@@ -804,6 +804,9 @@ pub fn detect_models() -> Vec<DetectedModel> {
                 m.port = Some(port);
             }
         }
+        if m.path.is_none() && m.engine == "rapid_mlx" {
+            m.path = rapid_mlx_weights(m.pid, &m.name);
+        }
         if let Some(path) = m.path.clone() {
             // A containerized server reports the model path as seen from
             // its own mount namespace (e.g. /model); re-anchor it through
@@ -867,7 +870,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
         let has_model = m.path.is_some() || m.gguf.is_some();
         let engine_rank = match m.engine.as_str() {
             "llama.cpp" | "vllm" | "sglang" | "strata" | "maya" | "ninfer" | "tensorfold"
-            | "exllamav2" => 2,
+            | "rapid_mlx" | "exllamav2" => 2,
             "ollama" => 0,
             _ => 1,
         };
@@ -982,6 +985,7 @@ fn looks_like_llm(process_name: &str, cmdline: &str) -> bool {
         || c.split_whitespace().any(token_matches)
         || crate::strata::is_server(cmdline)
         || crate::tensorfold::is_server(cmdline)
+        || crate::rapid_mlx::is_server(cmdline)
         || names_a_model(cmdline)
 }
 
@@ -1065,6 +1069,8 @@ fn engine_from(process_name: &str, cmdline: &str) -> String {
         "ninfer".into()
     } else if blob.contains("llama-server") || blob.contains("llama.cpp") {
         "llama.cpp".into()
+    } else if crate::rapid_mlx::is_server(cmdline) {
+        "rapid_mlx".into()
     } else if blob.contains("ollama") {
         "ollama".into()
     } else if blob.contains("vllm") {
@@ -1294,6 +1300,15 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
         i += 1;
     }
 
+    if parsed.engine == "rapid_mlx" {
+        if let Some(name) = crate::rapid_mlx::serve_model_name(cmdline) {
+            parsed.name = name.clone();
+            // `-m rapid_mlx` is the module, not the weights. A repo id
+            // stays a name so the hub cache can resolve it. A local
+            // directory is the path the tensor table is read from.
+            parsed.path = local_weights_path(&name);
+        }
+    }
     if parsed.name.is_empty() {
         parsed.name = Path::new(process_name)
             .file_name()
@@ -1316,6 +1331,9 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
     }
     if parsed.port.is_none() && parsed.engine == "tensorfold" {
         parsed.port = Some(crate::tensorfold::DEFAULT_PORT);
+    }
+    if parsed.port.is_none() && parsed.engine == "rapid_mlx" {
+        parsed.port = Some(crate::rapid_mlx::DEFAULT_PORT);
     }
     if parsed.port.is_none() && parsed.engine == "strata" {
         parsed.port = Some(crate::strata::DEFAULT_PORT);
@@ -1772,6 +1790,43 @@ pub fn parse_v1_models_json(body: &str) -> Option<(String, Option<String>, Optio
     Some((id, root, max_len, owned_by))
 }
 
+/// A `serve` argument that names a directory of weights. A hub repo id
+/// (`org/name`) is not one: that stays a name and is resolved in the cache.
+fn local_weights_path(name: &str) -> Option<PathBuf> {
+    let path_shaped = name.starts_with('/')
+        || name.starts_with('.')
+        || name.starts_with('~')
+        || name.ends_with(".gguf")
+        || name.ends_with(".safetensors");
+    path_shaped.then(|| PathBuf::from(name))
+}
+
+/// A local directory of weights if the serve argument names one, including
+/// a relative path from the server's working directory. The hub cache is
+/// the fallback, so a repo id still resolves and a local `models/qwen`
+/// is not replaced by a cached alias.
+fn rapid_mlx_weights(pid: u32, name: &str) -> Option<PathBuf> {
+    if name.is_empty() {
+        return None;
+    }
+    let resolved = resolve_model_path(pid, Path::new(name), name);
+    if resolved.exists() {
+        Some(resolved)
+    } else {
+        cached_snapshot(name)
+    }
+}
+
+/// The cached snapshot for a repo id or a server alias, searching every hub root.
+fn cached_snapshot(name: &str) -> Option<PathBuf> {
+    if name.is_empty() {
+        return None;
+    }
+    hf_hub_roots()
+        .into_iter()
+        .find_map(|hub| hf_hub_snapshot(&hub, &[name]))
+}
+
 /// Hugging Face hub cache roots to search for a repo snapshot.
 fn hf_hub_roots() -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -2129,6 +2184,8 @@ pub async fn probe_endpoint(
             }
         } else if body.contains("llamacpp:") {
             engine = "llama.cpp".to_string();
+        } else if body.contains("rapid_mlx_completion_tokens_total") {
+            engine = "rapid_mlx".to_string();
         } else if body.contains("sglang:") {
             engine = "sglang".to_string();
         }
@@ -2187,8 +2244,15 @@ pub async fn probe_endpoint(
     let final_name = match model_name {
         Some(n) => n,
         None if saw_vllm_metrics => format!("vllm-{port}"),
+        // `/metrics` named the engine and `/v1/models` did not. The
+        // aggregate counters are still worth polling.
+        None if engine == "rapid_mlx" => format!("rapid-mlx-{port}"),
         None => return None,
     };
+
+    if model_path.is_none() {
+        model_path = cached_snapshot(&final_name);
+    }
 
     let mut resolved_path = model_path.clone();
     let mut gguf_info = None;
@@ -2348,6 +2412,47 @@ mod tests {
             "tensorfold-nati",
             "tensorfold-native pull TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP"
         ));
+    }
+
+    #[test]
+    fn rapid_mlx_launch_uses_the_serve_model() {
+        let cmd = "rapid-mlx serve qwen3.5-4b-4bit --port 8000";
+        assert!(super::looks_like_llm("rapid-mlx", cmd));
+        let model = super::parse_cmdline("rapid-mlx", cmd);
+        assert_eq!(model.engine, "rapid_mlx");
+        assert_eq!(model.name, "qwen3.5-4b-4bit");
+        assert_eq!(model.port, Some(8000));
+
+        // `python -m` must not become the model name, and the module
+        // token must not stay behind as the weights path.
+        let py = super::parse_cmdline("python", "python -m rapid_mlx serve qwen3.5-4b-4bit");
+        assert_eq!(py.engine, "rapid_mlx");
+        assert_eq!(py.name, "qwen3.5-4b-4bit");
+        assert_eq!(py.port, Some(8000));
+        assert!(py.path.is_none());
+
+        let local = super::parse_cmdline("rmlx", "rmlx serve /models/qwen");
+        assert_eq!(
+            local.path.as_deref(),
+            Some(std::path::Path::new("/models/qwen"))
+        );
+        let repo = super::parse_cmdline(
+            "rapid-mlx",
+            "rapid-mlx serve mlx-community/Qwen3.5-4B-MLX-4bit",
+        );
+        assert!(repo.path.is_none());
+        assert_eq!(repo.name, "mlx-community/Qwen3.5-4B-MLX-4bit");
+    }
+
+    #[test]
+    fn rapid_mlx_relative_dir_is_the_weights_path() {
+        let name = format!("rapid-mlx-rel-{}", std::process::id());
+        std::fs::create_dir(&name).unwrap();
+        let found = super::rapid_mlx_weights(0, &name);
+        let _ = std::fs::remove_dir(&name);
+        let found = found.expect("local dir");
+        assert!(found.ends_with(&name));
+        assert!(super::rapid_mlx_weights(0, "org/not-a-local-rapid-mlx-dir-zz").is_none());
     }
 
     #[test]
