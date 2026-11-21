@@ -729,9 +729,10 @@ fn announce(mode: alerts::Mode, alert: &alerts::Alert, notify_ok: &mut bool, sta
 }
 
 /// Re-derives every model's RAM and VRAM weight streams from its step rate
-/// and weight layout. The dashboard does it once per drawn frame; a headless
-/// run does it before each export, since the verdict and the streams the
-/// export carries are made from it.
+/// and weight layout. The dashboard does it once per drawn frame; with an
+/// export (headless or not) it is done before each export instead, since
+/// the verdict and the streams the export carries are made from it and an
+/// idle dashboard draws no frames.
 fn tick_bandwidth(
     slots: &mut [ModelSlot],
     gpus: &[GpuStats],
@@ -2027,13 +2028,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         // nothing to draw must still refresh the file and keep the heartbeat,
         // or a consumer reads the silence as a dead dashboard.
         if let Some(ex) = exporter.as_mut() {
-            if headless {
-                // No frame draws, so nothing else keeps the weight streams
-                // and the verdict current.
-                let dt = (now - last_bw_tick).as_secs_f32().clamp(0.0, 1.0);
-                last_bw_tick = now;
-                tick_bandwidth(&mut slots, &latest_gpu, replay.as_ref(), now, dt);
-            }
+            // Headless no frame draws, and an idle dashboard stops drawing:
+            // either way frames cannot be what keeps the exported weight
+            // streams and the verdict current. With an export the streams
+            // are ticked here, every pass, and the frame below leaves them.
+            let dt = (now - last_bw_tick).as_secs_f32().clamp(0.0, 1.0);
+            last_bw_tick = now;
+            tick_bandwidth(&mut slots, &latest_gpu, replay.as_ref(), now, dt);
             ex.set_system(&sys_stats);
             let rows = slots.iter().map(|s| {
                 (
@@ -2126,7 +2127,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         if view_mode == ViewMode::Landscape {
             camera.tick(frame_dt);
         }
-        tick_bandwidth(&mut slots, &latest_gpu, replay.as_ref(), now, frame_dt);
+        if exporter.is_none() {
+            tick_bandwidth(&mut slots, &latest_gpu, replay.as_ref(), now, frame_dt);
+        }
         for slot in &mut slots {
             if slot.live.ctx_max == 0 {
                 slot.live.ctx_max = slot.ctx_max;
