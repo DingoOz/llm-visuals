@@ -163,7 +163,9 @@ curl -N -H "Authorization: Bearer $(cat token)" http://host:9464/stream
   The socket file is removed on a clean exit.
 - An export error never stops the dashboard. The first error shows in the
   status line (`--export-json: ...` or `--export-sock: ...`). File writes
-  are tried again on every later export.
+  are tried again on every later export; a file error shows once three
+  writes in a row have failed, so one that clears by the next export (a
+  reader holding the file open on Windows) is not reported.
 
 ## Fields
 

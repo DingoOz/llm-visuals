@@ -481,12 +481,36 @@ fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let r = opts
         .open(&tmp)
         .and_then(|mut f| f.write_all(data))
-        .and_then(|()| std::fs::rename(&tmp, path));
+        .and_then(|()| replace(&tmp, path));
     if r.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
     r
 }
+
+/// Renames `tmp` over `path`. Windows refuses while a reader has `path`
+/// open without `FILE_SHARE_DELETE`, as most readers do; that lasts only as
+/// long as the read, so it is tried again for a few milliseconds.
+fn replace(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    for _ in 0..RENAME_RETRIES {
+        match std::fs::rename(tmp, path) {
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            r => return r,
+        }
+    }
+    std::fs::rename(tmp, path)
+}
+
+#[cfg(windows)]
+const RENAME_RETRIES: usize = 5;
+
+/// Failed `--export-json` writes in a row before the error is shown. One
+/// that clears on the next export (a reader holding the file on Windows)
+/// is not worth a message, nor the "writing again" that would follow it.
+const JSON_FAILS_SHOWN: u32 = 3;
 
 #[cfg(unix)]
 mod sock {
@@ -609,7 +633,8 @@ pub struct Exporter {
     seq: u64,
     source: &'static str,
     host: Option<String>,
-    json_failed: bool,
+    /// Failed `--export-json` writes in a row.
+    json_fails: u32,
     #[cfg(unix)]
     sock_failed: bool,
 }
@@ -727,7 +752,7 @@ impl Exporter {
             seq: 0,
             source,
             host: hostname(),
-            json_failed: false,
+            json_fails: 0,
             #[cfg(unix)]
             sock_failed: false,
         })
@@ -782,16 +807,16 @@ impl Exporter {
         if let Some(path) = &self.json {
             match write_atomic(path, line.as_bytes()) {
                 Ok(()) => {
-                    if self.json_failed {
+                    if self.json_fails >= JSON_FAILS_SHOWN {
                         note = Some("--export-json: writing again".into());
                     }
-                    self.json_failed = false;
+                    self.json_fails = 0;
                 }
                 Err(e) => {
-                    if !self.json_failed {
+                    self.json_fails = self.json_fails.saturating_add(1);
+                    if self.json_fails == JSON_FAILS_SHOWN {
                         note = Some(format!("--export-json: {}: {e}", path.display()));
                     }
-                    self.json_failed = true;
                 }
             }
         }
@@ -996,13 +1021,34 @@ mod tests {
         let path = dir.join("no-such-dir").join("s.json");
         let mut ex = Exporter::open(Some(&path), None, Duration::ZERO, "live").unwrap();
         let t = Instant::now();
-        let first = ex.tick(std::iter::empty(), &[], t);
-        assert!(first.unwrap().starts_with("--export-json:"));
+        // Not on the first failures, which may be a reader holding the file.
+        for _ in 1..JSON_FAILS_SHOWN {
+            assert!(ex.tick(std::iter::empty(), &[], t).is_none());
+        }
+        let shown = ex.tick(std::iter::empty(), &[], t);
+        assert!(shown.unwrap().starts_with("--export-json:"));
         assert!(ex.tick(std::iter::empty(), &[], t).is_none());
         std::fs::create_dir(dir.join("no-such-dir")).unwrap();
         let back = ex.tick(std::iter::empty(), &[], t);
         assert_eq!(back.as_deref(), Some("--export-json: writing again"));
         assert!(ex.tick(std::iter::empty(), &[], t).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_passing_file_error_is_not_reported() {
+        let dir = tmpdir("blip");
+        let sub = dir.join("d");
+        let path = sub.join("s.json");
+        let mut ex = Exporter::open(Some(&path), None, Duration::ZERO, "live").unwrap();
+        let t = Instant::now();
+        // Failing and succeeding in turn: no error, and no "writing again".
+        for _ in 0..4 {
+            assert!(ex.tick(std::iter::empty(), &[], t).is_none());
+            std::fs::create_dir(&sub).unwrap();
+            assert!(ex.tick(std::iter::empty(), &[], t).is_none());
+            std::fs::remove_dir_all(&sub).unwrap();
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
