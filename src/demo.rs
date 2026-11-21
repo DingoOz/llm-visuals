@@ -452,6 +452,7 @@ fn spawn_hardware(
         let mut gpus: Vec<DemoGpu> = (0..n).map(DemoGpu::new).collect();
         let mut host = DemoHost::new(n);
         let tick = Duration::from_millis(200);
+        let started = std::time::Instant::now();
         loop {
             let (load, cold) = {
                 let mut sh = match shared.lock() {
@@ -467,11 +468,36 @@ fn spawn_hardware(
                 ((peak + 0.35 * (sum - peak)).min(1.0), cold)
             };
             host.cold_ticks = if cold { 1 } else { 0 };
-            let g: Vec<GpuStats> = gpus.iter_mut().map(|d| d.step(load)).collect();
+            let mut g: Vec<GpuStats> = gpus.iter_mut().map(|d| d.step(load)).collect();
+            // While a request runs, the pipeline's weak link moves on every
+            // 12 s, round and round (a minute), so a panel that draws the
+            // bottleneck has every stage to show.
+            let scenario = (load > 0.1).then(|| ((started.elapsed().as_secs() % 60) / 12) as u8);
+            let links: Vec<f32> = g
+                .iter()
+                .map(|s| crate::perf::pcie_link_mb_s(s.pcie_gen, s.pcie_width).unwrap_or(16_000.0))
+                .collect();
+            for s in &mut g {
+                match scenario {
+                    Some(SCENARIO_COMPUTE) => {
+                        s.utilization_gpu = s.utilization_gpu.max(92.0);
+                        s.utilization_mem = 35.0;
+                    }
+                    Some(SCENARIO_VRAM) => {
+                        s.utilization_gpu = 70.0;
+                        s.utilization_mem = 88.0;
+                    }
+                    Some(SCENARIO_RAM) => {
+                        s.utilization_gpu = 25.0;
+                        s.utilization_mem = 20.0;
+                    }
+                    _ => {}
+                }
+            }
             if gpu_tx.send(Ok(g)).await.is_err() {
                 return;
             }
-            let base = host.step(load, load > 0.1);
+            let base = host.step(load, load > 0.1, scenario, &links);
             let batch: Vec<(u32, HostSample)> = models
                 .iter()
                 .map(|m| {
@@ -583,7 +609,19 @@ struct DemoHost {
     cold_ticks: u32,
     /// Bytes in use beyond the baseline, eased toward a load-driven target.
     ram_extra: f32,
+    /// Cumulative CPU jiffies, as `/proc/stat` counts them.
+    cpu_busy: u64,
+    cpu_iowait: u64,
+    cpu_total: u64,
+    proc_cpu: u64,
 }
+
+// The 12-second stages of the demo's bottleneck cycle.
+const SCENARIO_COMPUTE: u8 = 0;
+const SCENARIO_VRAM: u8 = 1;
+const SCENARIO_PCIE: u8 = 2;
+const SCENARIO_DISK: u8 = 3;
+const SCENARIO_RAM: u8 = 4;
 
 impl DemoHost {
     fn new(n_gpus: usize) -> Self {
@@ -595,10 +633,20 @@ impl DemoHost {
             majflt: 1200,
             cold_ticks: 0,
             ram_extra: 0.0,
+            cpu_busy: 0,
+            cpu_iowait: 0,
+            cpu_total: 0,
+            proc_cpu: 0,
         }
     }
 
-    fn step(&mut self, load: f32, processing: bool) -> HostSample {
+    fn step(
+        &mut self,
+        load: f32,
+        processing: bool,
+        scenario: Option<u8>,
+        link_mb_s: &[f32],
+    ) -> HostSample {
         let jitter = next_f(&mut self.seed);
         if self.cold_ticks > 0 {
             self.cold_ticks -= 1;
@@ -610,10 +658,19 @@ impl DemoHost {
         } else {
             self.disk_bytes += (jitter * 400_000.0) as u64;
         }
+        if scenario == Some(SCENARIO_DISK) {
+            // The weights paging in at ~300 MB/s.
+            let burst = 60_000_000;
+            self.disk_bytes += burst;
+            self.proc_bytes += burst;
+            self.majflt += 120;
+        }
         let pcie_mb_s = (0..self.n_gpus)
             .map(|i| {
                 let base = if !processing {
                     2.0
+                } else if scenario == Some(SCENARIO_PCIE) {
+                    0.7 * link_mb_s.get(i).copied().unwrap_or(16_000.0)
                 } else if i == 1 {
                     180.0 + 900.0 * load
                 } else {
@@ -623,6 +680,22 @@ impl DemoHost {
                 (i as u32, rx, rx * 0.12)
             })
             .collect();
+        // CPU time: sixteen logical CPUs for a fifth of a second. The inference
+        // process takes a few cores while it works; the CPU-side layers of the
+        // RAM scenario take most of the machine.
+        let cpu_heavy = scenario == Some(SCENARIO_RAM);
+        let total_inc = 16 * 100 / 5;
+        let busy_frac = 0.04 + if cpu_heavy { 0.7 } else { 0.45 } * load * (0.8 + 0.4 * jitter);
+        let iowait_frac = if scenario == Some(SCENARIO_DISK) || self.cold_ticks > 0 {
+            0.12
+        } else {
+            0.004
+        };
+        self.cpu_total += total_inc;
+        self.cpu_busy += (total_inc as f32 * busy_frac) as u64;
+        self.cpu_iowait += (total_inc as f32 * iowait_frac) as u64;
+        let cores = 0.15 + load * if cpu_heavy { 11.0 } else { 6.0 } * (0.9 + 0.2 * jitter);
+        self.proc_cpu += (cores * 100.0 / 5.0) as u64;
         let target = 6e9 * load + 0.6e9 * jitter;
         self.ram_extra += (target - self.ram_extra) * 0.08;
         let extra = self.ram_extra.max(0.0) as u64;
@@ -637,6 +710,12 @@ impl DemoHost {
             page_cache_bytes: Some(22_000_000_000),
             pcie_mb_s,
             pcie_ok: true,
+            cpu_busy_jiffies: Some(self.cpu_busy),
+            cpu_iowait_jiffies: Some(self.cpu_iowait),
+            cpu_total_jiffies: Some(self.cpu_total),
+            cpu_logical: Some(16),
+            proc_cpu_jiffies: Some(self.proc_cpu),
+            proc_cpu_parts: Vec::new(),
         }
     }
 }

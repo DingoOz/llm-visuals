@@ -20,6 +20,12 @@ pub enum StageId {
 pub struct Verdict {
     /// The stage flagged as the bound, if one stands out.
     pub stage: Option<StageId>,
+    /// The card the stage is about, when it is about one: the busiest link
+    /// for PCIe, the busiest memory controller for VRAM, the busiest GPU
+    /// for compute.
+    pub gpu: Option<usize>,
+    /// A real bound, not an idle pipeline or a plain "prefill" label.
+    pub bound: bool,
     pub headline: String,
     pub detail: String,
 }
@@ -177,6 +183,14 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
         .iter()
         .map(|g| g.utilization_gpu)
         .fold(0.0f32, f32::max);
+    let busiest_util_gpu = gpus
+        .iter()
+        .max_by(|a, b| {
+            a.utilization_gpu
+                .partial_cmp(&b.utilization_gpu)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|g| g.index as usize);
     let pcie_frac = bw.pcie_rx.iter().map(|m| m.frac()).fold(0.0f32, f32::max);
     let pcie_busiest = bw
         .pcie_rx
@@ -206,12 +220,16 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
             if disk_busy && bw.host_seen {
                 return Verdict {
                     stage: Some(StageId::Disk),
+                    gpu: None,
+                    bound: true,
                     headline: "loading weights from disk".into(),
                     detail: format!("{:.0} MB/s into the page cache", bw.disk.value),
                 };
             }
             Verdict {
                 stage: None,
+                gpu: None,
+                bound: false,
                 headline: "idle".into(),
                 detail: "send a request to see where the tokens wait".into(),
             }
@@ -220,6 +238,8 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
             if disk_busy {
                 return Verdict {
                     stage: Some(StageId::Disk),
+                    gpu: None,
+                    bound: true,
                     headline: "paging weights from disk during prefill".into(),
                     detail: format!(
                         "{:.0} MB/s, {:.0} major faults/s — the model does not fit in RAM",
@@ -230,6 +250,8 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
             if pcie_frac > 0.5 && !unified {
                 return Verdict {
                     stage: Some(StageId::Pcie),
+                    gpu: Some(pcie_busiest),
+                    bound: true,
                     headline: format!("PCIe link to GPU {pcie_busiest} is the bound"),
                     detail: format!(
                         "{:.0}% of the link, prompt batches are crossing the bus",
@@ -240,6 +262,8 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
             if max_gpu_util >= 60.0 {
                 return Verdict {
                     stage: Some(StageId::Prefill),
+                    gpu: busiest_util_gpu,
+                    bound: true,
                     headline: "compute bound: prefill is matmul throughput".into(),
                     detail: format!(
                         "GPU {:.0}% busy, memory controller {:.0}%",
@@ -250,6 +274,8 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
             if cpu_side {
                 return Verdict {
                     stage: Some(StageId::Ram),
+                    gpu: None,
+                    bound: true,
                     headline: "CPU-side layers are doing the prefill".into(),
                     detail: format!(
                         "~{:.1} GB of weights did not fit in VRAM; GPU only {:.0}% busy",
@@ -260,6 +286,8 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
             }
             Verdict {
                 stage: Some(StageId::Prefill),
+                gpu: None,
+                bound: false,
                 headline: "prefill".into(),
                 detail: format!("{:.0} tok/s ingest", p.prefill_tps_smooth),
             }
@@ -268,6 +296,8 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
             if disk_busy {
                 return Verdict {
                     stage: Some(StageId::Disk),
+                    gpu: None,
+                    bound: true,
                     headline: "weights are streaming from DISK every token".into(),
                     detail: format!(
                         "{:.0} MB/s, {:.0} major faults/s — add RAM, a smaller quant, or fewer CPU layers",
@@ -279,6 +309,8 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
             if pcie_frac > 0.35 && !unified {
                 return Verdict {
                     stage: Some(StageId::Pcie),
+                    gpu: Some(pcie_busiest),
+                    bound: true,
                     headline: format!("PCIe to GPU {pcie_busiest} is the bound"),
                     detail: format!(
                         "{:.0}% of the link — weights or activations crossing the bus each token",
@@ -289,6 +321,8 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
             if max_mem_busy >= 75.0 && !unified {
                 return Verdict {
                     stage: Some(StageId::Vram),
+                    gpu: Some(busiest_gpu),
+                    bound: true,
                     headline: format!("VRAM bandwidth bound on GPU {busiest_gpu}"),
                     detail: format!(
                         "memory controller {:.0}% busy; {:.1} GB of weights per step — a smaller quant is faster",
@@ -300,6 +334,8 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
             if let Some((gb_s, peak, frac)) = vram_peak.filter(|v| v.2 >= VRAM_PEAK_BOUND) {
                 return Verdict {
                     stage: Some(StageId::Vram),
+                    gpu: Some(busiest_gpu),
+                    bound: true,
                     headline: "VRAM bandwidth bound: weights stream near the cards' peak".into(),
                     detail: format!(
                         "~{gb_s:.0} of {peak:.0} GB/s est ({:.0}% of peak; decode kernels top out near 80%) — a smaller quant is faster",
@@ -310,6 +346,8 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
             if cpu_side && max_gpu_util < 60.0 {
                 return Verdict {
                     stage: Some(StageId::Ram),
+                    gpu: None,
+                    bound: true,
                     headline: "RAM bound: CPU-side layers gate every token".into(),
                     detail: format!(
                         "~{:.1} GB of weights on the CPU side, ~{:.1} GB/s from RAM; GPU only {:.0}% busy",
@@ -322,6 +360,8 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
             if max_gpu_util >= 85.0 {
                 return Verdict {
                     stage: Some(StageId::Decode),
+                    gpu: busiest_util_gpu,
+                    bound: true,
                     headline: "GPU compute bound".into(),
                     detail: if unified {
                         format!(
@@ -338,6 +378,8 @@ pub fn assess(p: &PerfTracker, gpus: &[GpuStats]) -> Verdict {
             }
             Verdict {
                 stage: None,
+                gpu: None,
+                bound: false,
                 headline: "no link saturated".into(),
                 detail: if unified {
                     format!(
@@ -662,5 +704,164 @@ mod tests {
         assert_eq!(l.cpu_bytes, 0);
         // With no card at all the weights can only be in RAM.
         assert_eq!(weight_layout(Some(&m), &[]).cpu_bytes, 20_000_000_000);
+    }
+
+    fn two_gpus(util: [f32; 2], mem: [f32; 2]) -> Vec<GpuStats> {
+        (0..2)
+            .map(|i| GpuStats {
+                index: i as u32,
+                utilization_gpu: util[i],
+                utilization_mem: mem[i],
+                mem_total_mb: 24_000,
+                mem_used_mb: 20_000,
+                pcie_gen: 3,
+                pcie_width: 16,
+                ..Default::default()
+            })
+            .collect()
+    }
+
+    /// A decoding tracker that has seen `g`.
+    fn seen(g: &[GpuStats]) -> (PerfTracker, Instant) {
+        let (mut p, now) = decoding();
+        p.observe_gpu(g, now);
+        (p, now)
+    }
+
+    #[test]
+    fn every_branch_says_which_gpu_and_whether_it_is_a_bound() {
+        use crate::perf::Phase;
+        // Idle: nothing to flag.
+        let g = two_gpus([5.0, 5.0], [5.0, 5.0]);
+        let (mut p, now) = seen(&g);
+        p.phase = Phase::Idle;
+        let v = assess(&p, &g);
+        assert_eq!((v.stage, v.gpu, v.bound), (None, None, false));
+        // Idle while the weights load from disk.
+        p.bw.host_seen = true;
+        p.bw.disk.update(300.0, now, 0.2);
+        let v = assess(&p, &g);
+        assert_eq!((v.stage, v.gpu, v.bound), (Some(StageId::Disk), None, true));
+        p.bw.disk.update(0.0, now, 0.2);
+
+        // Decode, nothing standing out.
+        p.phase = Phase::Decode;
+        let g = two_gpus([50.0, 40.0], [30.0, 30.0]);
+        p.observe_gpu(&g, now);
+        let v = assess(&p, &g);
+        assert_eq!((v.stage, v.gpu, v.bound), (None, None, false));
+        // Compute bound: the busier card.
+        let g = two_gpus([88.0, 95.0], [30.0, 30.0]);
+        p.observe_gpu(&g, now);
+        let v = assess(&p, &g);
+        assert_eq!(
+            (v.stage, v.gpu, v.bound),
+            (Some(StageId::Decode), Some(1), true)
+        );
+        // VRAM bound: the card whose controller is busier, not the busier GPU.
+        let g = two_gpus([95.0, 60.0], [80.0, 90.0]);
+        p.observe_gpu(&g, now);
+        let v = assess(&p, &g);
+        assert_eq!(
+            (v.stage, v.gpu, v.bound),
+            (Some(StageId::Vram), Some(1), true)
+        );
+        // PCIe bound: the fuller link.
+        let g = two_gpus([95.0, 60.0], [10.0, 10.0]);
+        p.observe_gpu(&g, now);
+        p.bw.pcie_rx[0].update(2000.0, now, 0.2);
+        p.bw.pcie_rx[1].update(9000.0, now, 0.2);
+        let v = assess(&p, &g);
+        assert_eq!(
+            (v.stage, v.gpu, v.bound),
+            (Some(StageId::Pcie), Some(1), true)
+        );
+        p.bw.pcie_rx[0].update(0.0, now, 0.2);
+        p.bw.pcie_rx[1].update(0.0, now, 0.2);
+        // RAM bound: CPU-side layers and a card with time to spare.
+        let g = two_gpus([20.0, 20.0], [10.0, 10.0]);
+        p.observe_gpu(&g, now);
+        p.bw.layout = WeightLayout {
+            known: true,
+            total_bytes: 10_000_000_000,
+            active_bytes: 10_000_000_000,
+            cpu_bytes: 5_000_000_000,
+            ..Default::default()
+        };
+        let v = assess(&p, &g);
+        assert_eq!((v.stage, v.gpu, v.bound), (Some(StageId::Ram), None, true));
+        p.bw.layout = WeightLayout::default();
+        // Disk wins over everything while the weights page in.
+        p.bw.disk.update(120.0, now, 0.2);
+        let v = assess(&p, &g);
+        assert_eq!((v.stage, v.gpu, v.bound), (Some(StageId::Disk), None, true));
+        p.bw.disk.update(0.0, now, 0.2);
+
+        // Prefill: the bare label is no bound; a busy card is compute.
+        p.phase = Phase::Prefill;
+        let v = assess(&p, &g);
+        assert_eq!(
+            (v.stage, v.gpu, v.bound),
+            (Some(StageId::Prefill), None, false)
+        );
+        let g = two_gpus([40.0, 75.0], [10.0, 10.0]);
+        p.observe_gpu(&g, now);
+        let v = assess(&p, &g);
+        assert_eq!(
+            (v.stage, v.gpu, v.bound),
+            (Some(StageId::Prefill), Some(1), true)
+        );
+        // Prefill over a full PCIe link.
+        p.bw.pcie_rx[0].update(9000.0, now, 0.2);
+        let v = assess(&p, &g);
+        assert_eq!(
+            (v.stage, v.gpu, v.bound),
+            (Some(StageId::Pcie), Some(0), true)
+        );
+        p.bw.pcie_rx[0].update(0.0, now, 0.2);
+        // Prefill on CPU-side layers.
+        let g = two_gpus([20.0, 20.0], [10.0, 10.0]);
+        p.observe_gpu(&g, now);
+        p.bw.layout = WeightLayout {
+            known: true,
+            total_bytes: 10_000_000_000,
+            active_bytes: 10_000_000_000,
+            cpu_bytes: 5_000_000_000,
+            ..Default::default()
+        };
+        let v = assess(&p, &g);
+        assert_eq!((v.stage, v.gpu, v.bound), (Some(StageId::Ram), None, true));
+        p.bw.layout = WeightLayout::default();
+        // Prefill paging from disk.
+        p.bw.disk.update(200.0, now, 0.2);
+        let v = assess(&p, &g);
+        assert_eq!((v.stage, v.gpu, v.bound), (Some(StageId::Disk), None, true));
+    }
+
+    #[test]
+    fn vram_stream_near_the_peak_names_the_busiest_controller() {
+        let (mut p, now) = decoding();
+        let mut g = two_gpus([70.0, 70.0], [50.0, 60.0]);
+        g[0].mem_peak_gb_s = Some(549.0);
+        g[1].mem_peak_gb_s = Some(549.0);
+        p.observe_gpu(&g, now);
+        p.decode_tps_smooth = 10.0;
+        p.tick_bandwidth(
+            &WeightLayout {
+                known: true,
+                total_bytes: 40_000_000_000,
+                active_bytes: 40_000_000_000,
+                gpu_bytes: vec![(0, 20_000_000_000), (1, 20_000_000_000)],
+                ubatch: 512,
+                ..Default::default()
+            },
+            now,
+            0.2,
+        );
+        let v = assess(&p, &g);
+        assert_eq!(
+            (v.stage, v.gpu, v.bound),
+            (Some(StageId::Vram), Some(1), true)
+        );
     }
 }

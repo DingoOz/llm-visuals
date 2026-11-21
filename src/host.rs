@@ -29,7 +29,47 @@ pub struct HostSample {
     /// Per GPU index: PCIe receive and transmit in MB/s (host → device is rx).
     pub pcie_mb_s: Vec<(u32, f32, f32)>,
     pub pcie_ok: bool,
+    /// Cumulative CPU time of every logical CPU, in jiffies (`/proc/stat`,
+    /// the `cpu` line): busy (user, nice, system, irq, softirq, steal),
+    /// iowait, and the sum of all of them with idle. Linux only.
+    pub cpu_busy_jiffies: Option<u64>,
+    pub cpu_iowait_jiffies: Option<u64>,
+    pub cpu_total_jiffies: Option<u64>,
+    /// Logical CPUs (`cpuN` lines of `/proc/stat`).
+    pub cpu_logical: Option<u32>,
+    /// The inference process's own CPU time, user + system, in jiffies
+    /// (`/proc/<pid>/stat`), with its direct children's.
+    pub proc_cpu_jiffies: Option<u64>,
+    /// The same time per process, `(pid, jiffies)`, the server first. The
+    /// set of children changes as they come and go, so a rate is taken per
+    /// pid (see [`proc_cpu_delta`]) rather than from the changing sum.
+    pub proc_cpu_parts: Vec<(u32, u64)>,
 }
+
+/// CPU jiffies the process and its children spent between two samples.
+/// Only pids in both samples count: a child that exited takes its time
+/// with it, and a new one (or one whose read failed last time) would bring
+/// its whole lifetime in one interval. Samples without per-pid parts (not
+/// Linux) fall back to the difference of the sums.
+pub fn proc_cpu_delta(cur: &HostSample, prev: &HostSample) -> Option<u64> {
+    if cur.proc_cpu_parts.is_empty() || prev.proc_cpu_parts.is_empty() {
+        let (a, b) = (cur.proc_cpu_jiffies?, prev.proc_cpu_jiffies?);
+        return Some(a.saturating_sub(b));
+    }
+    Some(
+        cur.proc_cpu_parts
+            .iter()
+            .filter_map(|(pid, now)| {
+                let (_, then) = prev.proc_cpu_parts.iter().find(|(p, _)| p == pid)?;
+                Some(now.saturating_sub(*then))
+            })
+            .sum(),
+    )
+}
+
+/// Jiffies per second of `/proc` CPU times. The kernel's `USER_HZ` is 100 on
+/// every Linux platform in use; `sysconf(_SC_CLK_TCK)` would say the same.
+pub const CLK_TCK: f32 = 100.0;
 
 pub struct HostMonitor {
     interval: Duration,
@@ -197,6 +237,14 @@ fn collect(
 
 #[cfg(target_os = "linux")]
 fn read_system(base: &mut HostSample) {
+    if let Ok(txt) = std::fs::read_to_string("/proc/stat") {
+        if let Some(c) = parse_proc_stat_cpu(&txt) {
+            base.cpu_busy_jiffies = Some(c.busy);
+            base.cpu_iowait_jiffies = Some(c.iowait);
+            base.cpu_total_jiffies = Some(c.total);
+        }
+        base.cpu_logical = count_logical_cpus(&txt);
+    }
     if let Ok(txt) = std::fs::read_to_string("/proc/diskstats") {
         base.disk_read_bytes = Some(parse_diskstats_read_bytes(&txt));
     }
@@ -217,6 +265,26 @@ fn read_proc(pid: u32, s: &mut HostSample) {
     }
     if let Ok(txt) = std::fs::read_to_string(Path::new(&dir).join("stat")) {
         s.proc_majflt = parse_proc_stat_majflt(&txt);
+        // A server that hands the work to a child (Maya's `server.py` runs
+        // `maya-ds4`, vLLM an engine core) spends its CPU there: count the
+        // direct children too.
+        if let Some(own) = parse_proc_stat_cpu_time(&txt) {
+            let kids =
+                std::fs::read_to_string(Path::new(&dir).join(format!("task/{pid}/children")))
+                    .map(|t| parse_children(&t))
+                    .unwrap_or_default();
+            s.proc_cpu_parts = std::iter::once((pid, own))
+                .chain(kids.into_iter().filter_map(|k| {
+                    let t = std::fs::read_to_string(format!("/proc/{k}/stat")).ok()?;
+                    Some((k, parse_proc_stat_cpu_time(&t)?))
+                }))
+                .collect();
+            s.proc_cpu_jiffies = Some(
+                s.proc_cpu_parts
+                    .iter()
+                    .fold(0, |a, (_, j)| a.saturating_add(*j)),
+            );
+        }
     }
     if let Ok(txt) = std::fs::read_to_string(Path::new(&dir).join("status")) {
         s.rss_file_bytes = status_kb(&txt, "RssFile:");
@@ -362,6 +430,190 @@ pub fn parse_proc_stat_majflt(txt: &str) -> Option<u64> {
     rest.split_whitespace().nth(9).and_then(|v| v.parse().ok())
 }
 
+/// Fields 14 and 15 of `/proc/<pid>/stat` (`utime`, `stime`), in jiffies.
+pub fn parse_proc_stat_cpu_time(txt: &str) -> Option<u64> {
+    let rest = txt.rsplit(')').next()?;
+    let mut f = rest.split_whitespace().skip(11);
+    let utime: u64 = f.next()?.parse().ok()?;
+    let stime: u64 = f.next()?.parse().ok()?;
+    Some(utime.saturating_add(stime))
+}
+
+/// `/proc/<pid>/task/<pid>/children`: the pids of the direct children.
+pub fn parse_children(txt: &str) -> Vec<u32> {
+    txt.split_whitespace()
+        .filter_map(|p| p.parse().ok())
+        .collect()
+}
+
+/// The aggregate `cpu` line of `/proc/stat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuJiffies {
+    /// user + nice + system + irq + softirq + steal.
+    pub busy: u64,
+    pub iowait: u64,
+    /// Every counted state, idle and iowait included. `guest` and
+    /// `guest_nice` are left out: the kernel already counts them in
+    /// `user` and `nice`.
+    pub total: u64,
+}
+
+pub fn parse_proc_stat_cpu(txt: &str) -> Option<CpuJiffies> {
+    let line = txt.lines().find(|l| l.starts_with("cpu "))?;
+    let f: Vec<u64> = line
+        .split_whitespace()
+        .skip(1)
+        .take(8)
+        .map(|v| v.parse().ok())
+        .collect::<Option<_>>()?;
+    // user nice system idle are on every kernel; iowait since 2.5.41.
+    if f.len() < 4 {
+        return None;
+    }
+    let get = |i: usize| f.get(i).copied().unwrap_or(0);
+    let total: u64 = f.iter().sum();
+    let (idle, iowait) = (get(3), get(4));
+    Some(CpuJiffies {
+        busy: total.saturating_sub(idle).saturating_sub(iowait),
+        iowait,
+        total,
+    })
+}
+
+/// Number of `cpuN` lines of `/proc/stat`.
+pub fn count_logical_cpus(txt: &str) -> Option<u32> {
+    let n = txt
+        .lines()
+        .filter(|l| {
+            l.strip_prefix("cpu")
+                .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()))
+        })
+        .count();
+    (n > 0).then_some(n as u32)
+}
+
+/// Distinct (package, core) pairs of `/proc/cpuinfo`: the physical cores.
+/// A block without `physical id` counts as package 0; with no `core id` at
+/// all (some Arm kernels) there is no answer.
+pub fn parse_cpuinfo_cores(txt: &str) -> Option<u32> {
+    let mut pairs = std::collections::BTreeSet::new();
+    let (mut package, mut core) = (0i64, None);
+    let mut flush = |package: i64, core: &mut Option<i64>| {
+        if let Some(c) = core.take() {
+            pairs.insert((package, c));
+        }
+    };
+    for line in txt.lines() {
+        if line.trim().is_empty() {
+            flush(package, &mut core);
+            package = 0;
+            continue;
+        }
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let v = v.trim().parse::<i64>().ok();
+        match k.trim() {
+            "physical id" => package = v.unwrap_or(0),
+            "core id" => core = v,
+            _ => {}
+        }
+    }
+    flush(package, &mut core);
+    (!pairs.is_empty()).then_some(pairs.len() as u32)
+}
+
+/// The same count from sysfs topology (`cpuN/topology/{physical_package_id,
+/// core_id}` under `root`, normally `/sys/devices/system/cpu`). Offline CPUs
+/// have no topology directory and are skipped.
+pub fn sysfs_cores(root: &std::path::Path) -> Option<u32> {
+    let mut pairs = std::collections::BTreeSet::new();
+    for e in std::fs::read_dir(root).ok()?.flatten() {
+        let name = e.file_name();
+        let name = name.to_string_lossy();
+        if !name
+            .strip_prefix("cpu")
+            .is_some_and(|r| !r.is_empty() && r.bytes().all(|b| b.is_ascii_digit()))
+        {
+            continue;
+        }
+        let read = |f: &str| -> Option<i64> {
+            std::fs::read_to_string(e.path().join("topology").join(f))
+                .ok()?
+                .trim()
+                .parse()
+                .ok()
+        };
+        if let Some(core) = read("core_id") {
+            pairs.insert((read("physical_package_id").unwrap_or(0), core));
+        }
+    }
+    (!pairs.is_empty()).then_some(pairs.len() as u32)
+}
+
+/// Physical cores of this machine, read once. Linux only.
+pub fn physical_cores() -> Option<u32> {
+    static CORES: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *CORES.get_or_init(|| {
+        if !cfg!(target_os = "linux") {
+            return None;
+        }
+        std::fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|t| parse_cpuinfo_cores(&t))
+            .or_else(|| sysfs_cores(std::path::Path::new("/sys/devices/system/cpu")))
+    })
+}
+
+/// Host-wide CPU and RAM figures, from consecutive `HostSample`s. One per
+/// dashboard, not per model: the counters are the machine's.
+#[derive(Debug, Clone, Default)]
+pub struct SystemStats {
+    /// Busy % of all logical CPUs, iowait excluded. `None` until two samples.
+    pub cpu_pct: Option<f32>,
+    pub iowait_pct: Option<f32>,
+    pub cpu_logical: Option<u32>,
+    pub cpu_physical: Option<u32>,
+    /// MiB.
+    pub ram_used_mb: Option<u64>,
+    pub ram_total_mb: Option<u64>,
+    prev: Option<(u64, u64, u64)>,
+}
+
+impl SystemStats {
+    pub fn observe(&mut self, s: &HostSample) {
+        self.cpu_logical = s.cpu_logical.or(self.cpu_logical);
+        self.cpu_physical = physical_cores();
+        if let (Some(t), Some(a)) = (s.mem_total_bytes, s.mem_available_bytes) {
+            self.ram_total_mb = Some(t / (1024 * 1024));
+            self.ram_used_mb = Some(t.saturating_sub(a) / (1024 * 1024));
+        }
+        let now = match (
+            s.cpu_busy_jiffies,
+            s.cpu_iowait_jiffies,
+            s.cpu_total_jiffies,
+        ) {
+            (Some(b), Some(w), Some(t)) => Some((b, w, t)),
+            _ => None,
+        };
+        match (self.prev, now) {
+            (Some((b0, w0, t0)), Some((b1, w1, t1))) if t1 > t0 && b1 >= b0 && w1 >= w0 => {
+                let dt = (t1 - t0) as f32;
+                self.cpu_pct = Some(((b1 - b0) as f32 / dt * 100.0).clamp(0.0, 100.0));
+                self.iowait_pct = Some(((w1 - w0) as f32 / dt * 100.0).clamp(0.0, 100.0));
+            }
+            // The same sample twice: nothing new to say.
+            (Some((_, _, t0)), Some((_, _, t1))) if t1 == t0 => {}
+            // A counter went backwards, or there is none: no figure.
+            _ => {
+                self.cpu_pct = None;
+                self.iowait_pct = None;
+            }
+        }
+        self.prev = now;
+    }
+}
+
 fn status_kb(txt: &str, key: &str) -> Option<u64> {
     txt.lines()
         .find_map(|l| l.strip_prefix(key))
@@ -417,5 +669,142 @@ mod tests {
         let status = "Name:\tllama-server\nVmRSS:\t 9259636 kB\nRssAnon:\t 1742616 kB\nRssFile:\t 7414208 kB\n";
         assert_eq!(status_kb(status, "RssFile:"), Some(7414208 * 1024));
         assert_eq!(status_kb(status, "VmRSS:"), Some(9259636 * 1024));
+    }
+
+    const PROC_STAT: &str = "cpu  4705 150 1120 16250 520 30 40 10 0 0\n\
+        cpu0 1000 30 300 4000 100 10 10 2 0 0\n\
+        cpu1 3705 120 820 12250 420 20 30 8 0 0\n\
+        intr 1 2 3\n\
+        ctxt 99\n";
+
+    #[test]
+    fn proc_stat_cpu_line_splits_busy_idle_and_iowait() {
+        let c = parse_proc_stat_cpu(PROC_STAT).unwrap();
+        assert_eq!(c.total, 4705 + 150 + 1120 + 16250 + 520 + 30 + 40 + 10);
+        assert_eq!(c.iowait, 520);
+        // iowait is idle time, not work.
+        assert_eq!(c.busy, 4705 + 150 + 1120 + 30 + 40 + 10);
+        assert_eq!(count_logical_cpus(PROC_STAT), Some(2));
+        assert_eq!(parse_proc_stat_cpu("cpu0 1 2 3 4\n"), None);
+        assert_eq!(parse_proc_stat_cpu("cpu  1 2 3\n"), None);
+        // An old kernel without iowait.
+        let old = parse_proc_stat_cpu("cpu  10 0 10 80\n").unwrap();
+        assert_eq!((old.busy, old.iowait, old.total), (20, 0, 100));
+        assert_eq!(count_logical_cpus("cpu  1 2 3 4\n"), None);
+    }
+
+    #[test]
+    fn process_cpu_counts_only_pids_in_both_samples() {
+        let parts = |p: &[(u32, u64)]| HostSample {
+            proc_cpu_parts: p.to_vec(),
+            proc_cpu_jiffies: Some(p.iter().map(|(_, j)| j).sum()),
+            ..Default::default()
+        };
+        // server.py (100) runs maya-ds4 (200) with 50,000 jiffies behind it.
+        let a = parts(&[(100, 1_000), (200, 50_000)]);
+        // The children read races and comes back empty: the server's own
+        // time still counts, not a drop to zero.
+        let b = parts(&[(100, 1_010)]);
+        assert_eq!(proc_cpu_delta(&b, &a), Some(10));
+        // The child is back: its lifetime is not counted in one interval.
+        let c = parts(&[(100, 1_020), (200, 50_400)]);
+        assert_eq!(proc_cpu_delta(&c, &b), Some(10));
+        let d = parts(&[(100, 1_030), (200, 50_800)]);
+        assert_eq!(proc_cpu_delta(&d, &c), Some(410));
+        // No per-pid parts (not Linux): the sums.
+        let sum = |j| HostSample {
+            proc_cpu_jiffies: Some(j),
+            ..Default::default()
+        };
+        assert_eq!(proc_cpu_delta(&sum(500), &sum(100)), Some(400));
+        assert_eq!(proc_cpu_delta(&sum(500), &HostSample::default()), None);
+    }
+
+    fn cpu_sample(busy: u64, iowait: u64, total: u64) -> HostSample {
+        HostSample {
+            cpu_busy_jiffies: Some(busy),
+            cpu_iowait_jiffies: Some(iowait),
+            cpu_total_jiffies: Some(total),
+            cpu_logical: Some(8),
+            mem_total_bytes: Some(64 << 30),
+            mem_available_bytes: Some(24 << 30),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn system_cpu_is_a_delta_between_samples() {
+        let mut s = SystemStats::default();
+        s.observe(&cpu_sample(1000, 100, 5000));
+        assert_eq!(s.cpu_pct, None, "one sample has no delta");
+        assert_eq!(s.cpu_logical, Some(8));
+        assert_eq!((s.ram_total_mb, s.ram_used_mb), (Some(65536), Some(40960)));
+        s.observe(&cpu_sample(1600, 200, 6000));
+        assert!((s.cpu_pct.unwrap() - 60.0).abs() < 1e-3);
+        assert!((s.iowait_pct.unwrap() - 10.0).abs() < 1e-3);
+        // The same counters again (a second model's sample of one batch).
+        s.observe(&cpu_sample(1600, 200, 6000));
+        assert!((s.cpu_pct.unwrap() - 60.0).abs() < 1e-3);
+        // A counter that went backwards is no figure, not a wrap.
+        s.observe(&cpu_sample(10, 1, 100));
+        assert_eq!((s.cpu_pct, s.iowait_pct), (None, None));
+        // No counters at all (not Linux): RAM still, CPU never.
+        let mut s = SystemStats::default();
+        let mut none = cpu_sample(0, 0, 0);
+        none.cpu_busy_jiffies = None;
+        s.observe(&none);
+        s.observe(&none);
+        assert_eq!(s.cpu_pct, None);
+        assert_eq!(s.ram_used_mb, Some(40960));
+    }
+
+    #[test]
+    fn process_cpu_time_is_utime_plus_stime() {
+        let stat = "288647 (llama-server) S 1 288647 288647 0 -1 4194560 5193983 0 10 0 12 3 0 0 20 0 111 0 1 2 3";
+        assert_eq!(parse_proc_stat_cpu_time(stat), Some(15));
+        // A name with spaces and parentheses does not shift the fields.
+        let odd = "42 (my (odd) name) R 1 2 3 0 -1 0 0 0 7 0 100 50 0 0";
+        assert_eq!(parse_proc_stat_cpu_time(odd), Some(150));
+        assert_eq!(parse_proc_stat_majflt(odd), Some(7));
+        assert_eq!(parse_proc_stat_cpu_time("42 (x) S 1 2"), None);
+        assert_eq!(parse_children("1925952 1926607 \n"), vec![1925952, 1926607]);
+        assert_eq!(parse_children(""), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn physical_cores_from_cpuinfo() {
+        // Two sockets, two cores each, two threads per core: 8 logical CPUs.
+        let mut txt = String::new();
+        for cpu in 0..8 {
+            let (pkg, core) = ((cpu / 4) % 2, cpu % 2);
+            txt.push_str(&format!(
+                "processor\t: {cpu}\nmodel name\t: X\nphysical id\t: {pkg}\ncore id\t\t: {core}\n\n"
+            ));
+        }
+        assert_eq!(parse_cpuinfo_cores(&txt), Some(4));
+        // No `physical id`: one package.
+        let single = "processor : 0\ncore id : 0\n\nprocessor : 1\ncore id : 0\n\nprocessor : 2\ncore id : 1\n";
+        assert_eq!(parse_cpuinfo_cores(single), Some(2));
+        // Arm: no ids at all.
+        assert_eq!(parse_cpuinfo_cores("processor : 0\nBogoMIPS : 50\n"), None);
+        assert_eq!(parse_cpuinfo_cores(""), None);
+    }
+
+    #[test]
+    fn physical_cores_from_sysfs_topology() {
+        let root = std::env::temp_dir().join(format!("llmv-topo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // cpu0/cpu2 and cpu1/cpu3 are hyperthread siblings; cpu4 is offline.
+        for (cpu, core) in [(0, 0), (1, 1), (2, 0), (3, 1)] {
+            let d = root.join(format!("cpu{cpu}/topology"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("core_id"), format!("{core}\n")).unwrap();
+            std::fs::write(d.join("physical_package_id"), "0\n").unwrap();
+        }
+        std::fs::create_dir_all(root.join("cpu4")).unwrap();
+        std::fs::create_dir_all(root.join("cpufreq")).unwrap();
+        assert_eq!(sysfs_cores(&root), Some(2));
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(sysfs_cores(&root), None);
     }
 }

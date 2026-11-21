@@ -526,6 +526,10 @@ pub struct BandwidthStats {
     /// The inference process's own storage reads, MB/s.
     pub proc_disk_mb_s: f32,
     pub majflt_per_s: f32,
+    /// The inference process's CPU use over the last host interval, in cores
+    /// (`/proc/<pid>/stat` utime + stime). `None` before two samples, or
+    /// where the host has no such counter.
+    pub proc_cpu_cores: Option<f32>,
     /// Estimated CPU-side weight stream out of system RAM, GB/s.
     pub ram: Meter,
     /// PCIe host→device per GPU index, MB/s; scale is the link cap when known.
@@ -636,6 +640,7 @@ impl BandwidthStats {
             disk: Meter::auto(500.0),
             proc_disk_mb_s: 0.0,
             majflt_per_s: 0.0,
+            proc_cpu_cores: None,
             ram: Meter::auto(20.0),
             pcie_rx: Vec::new(),
             pcie_tx: Vec::new(),
@@ -685,6 +690,15 @@ impl BandwidthStats {
             self.proc_disk_mb_s =
                 rate(s.proc_read_bytes, prev.proc_read_bytes).unwrap_or(0.0) / 1e6;
             self.majflt_per_s = rate(s.proc_majflt, prev.proc_majflt).unwrap_or(0.0);
+            // Never more cores than the machine has: a sample that still
+            // overshoots (a pid reused between samples) is clamped.
+            self.proc_cpu_cores = crate::host::proc_cpu_delta(s, prev).map(|j| {
+                let cores = j as f32 / dt / crate::host::CLK_TCK;
+                match s.cpu_logical {
+                    Some(n) if n > 0 => cores.min(n as f32),
+                    _ => cores,
+                }
+            });
             let n = s
                 .pcie_mb_s
                 .iter()

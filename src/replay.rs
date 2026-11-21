@@ -587,6 +587,11 @@ impl Replay {
         }
     }
 
+    /// Playback has reached the end of the log and stopped.
+    pub fn finished(&self) -> bool {
+        self.paused && self.pos >= self.end()
+    }
+
     /// A message for the status line, once.
     pub fn take_note(&mut self) -> Option<String> {
         self.note.take()

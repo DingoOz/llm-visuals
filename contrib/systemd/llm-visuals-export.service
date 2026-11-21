@@ -1,0 +1,43 @@
+# llm-visuals as a headless stats exporter (systemd user unit).
+#
+# Serves the live stats over HTTP on port 9464 WITHOUT a token, for a
+# trusted LAN: anyone who can reach the port can read the stats (read-only;
+# model names, GPU and CPU figures). Without a token the daemon only answers
+# requests whose Host header is an IP address, localhost, or this machine's
+# own name (DNS-rebinding protection); add `--export-allow-host NAME` for
+# aliases. For an untrusted network, add `--export-token-file`.
+#
+# Install:
+#   install -Dm755 llm-visuals ~/.local/bin/llm-visuals
+#   install -Dm644 llm-visuals-export.service ~/.config/systemd/user/llm-visuals-export.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now llm-visuals-export.service
+#   loginctl enable-linger "$USER"   # start at boot without a login session
+#
+# Check:  curl http://HOST:9464/health   ·   curl http://HOST:9464/stats
+# Logs:   journalctl --user -u llm-visuals-export -f
+
+[Unit]
+Description=llm-visuals stats exporter (headless, HTTP :9464)
+Documentation=https://github.com/DingoOz/llm-visuals/blob/main/docs/export-schema.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# --log-db off: an interactive llm-visuals may already log the history to the
+# same SQLite file; the exporter does not need to log it twice.
+# Per-host extra flags (e.g. aliases when the DNS name differs from the
+# hostname): ~/.config/llm-visuals/export.env, for instance
+#   LLMV_EXPORT_ARGS=--export-allow-host gpubox2.example.lan --export-allow-host gpubox2
+EnvironmentFile=-%h/.config/llm-visuals/export.env
+ExecStart=%h/.local/bin/llm-visuals --log-db off --export-listen 0.0.0.0:9464 --export-json %t/llm-visuals/stats.json $LLMV_EXPORT_ARGS
+RuntimeDirectory=llm-visuals
+Restart=on-failure
+RestartSec=5
+# The daemon logs to stderr; nothing on stdout.
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=default.target

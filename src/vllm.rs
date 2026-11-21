@@ -538,6 +538,8 @@ impl VllmAdapter {
             auth_denied: None,
             ollama: None,
             tiers: None,
+            engine_label: None,
+            engine_threads: None,
         };
 
         let spec = spec_active.then(|| SpecMetrics {
