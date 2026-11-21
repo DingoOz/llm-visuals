@@ -38,8 +38,33 @@ pub struct HostSample {
     /// Logical CPUs (`cpuN` lines of `/proc/stat`).
     pub cpu_logical: Option<u32>,
     /// The inference process's own CPU time, user + system, in jiffies
-    /// (`/proc/<pid>/stat`).
+    /// (`/proc/<pid>/stat`), with its direct children's.
     pub proc_cpu_jiffies: Option<u64>,
+    /// The same time per process, `(pid, jiffies)`, the server first. The
+    /// set of children changes as they come and go, so a rate is taken per
+    /// pid (see [`proc_cpu_delta`]) rather than from the changing sum.
+    pub proc_cpu_parts: Vec<(u32, u64)>,
+}
+
+/// CPU jiffies the process and its children spent between two samples.
+/// Only pids in both samples count: a child that exited takes its time
+/// with it, and a new one (or one whose read failed last time) would bring
+/// its whole lifetime in one interval. Samples without per-pid parts (not
+/// Linux) fall back to the difference of the sums.
+pub fn proc_cpu_delta(cur: &HostSample, prev: &HostSample) -> Option<u64> {
+    if cur.proc_cpu_parts.is_empty() || prev.proc_cpu_parts.is_empty() {
+        let (a, b) = (cur.proc_cpu_jiffies?, prev.proc_cpu_jiffies?);
+        return Some(a.saturating_sub(b));
+    }
+    Some(
+        cur.proc_cpu_parts
+            .iter()
+            .filter_map(|(pid, now)| {
+                let (_, then) = prev.proc_cpu_parts.iter().find(|(p, _)| p == pid)?;
+                Some(now.saturating_sub(*then))
+            })
+            .sum(),
+    )
 }
 
 /// Jiffies per second of `/proc` CPU times. The kernel's `USER_HZ` is 100 on
@@ -243,16 +268,23 @@ fn read_proc(pid: u32, s: &mut HostSample) {
         // A server that hands the work to a child (Maya's `server.py` runs
         // `maya-ds4`, vLLM an engine core) spends its CPU there: count the
         // direct children too.
-        s.proc_cpu_jiffies = parse_proc_stat_cpu_time(&txt).map(|own| {
+        if let Some(own) = parse_proc_stat_cpu_time(&txt) {
             let kids =
                 std::fs::read_to_string(Path::new(&dir).join(format!("task/{pid}/children")))
                     .map(|t| parse_children(&t))
                     .unwrap_or_default();
-            kids.into_iter()
-                .filter_map(|k| std::fs::read_to_string(format!("/proc/{k}/stat")).ok())
-                .filter_map(|t| parse_proc_stat_cpu_time(&t))
-                .fold(own, u64::saturating_add)
-        });
+            s.proc_cpu_parts = std::iter::once((pid, own))
+                .chain(kids.into_iter().filter_map(|k| {
+                    let t = std::fs::read_to_string(format!("/proc/{k}/stat")).ok()?;
+                    Some((k, parse_proc_stat_cpu_time(&t)?))
+                }))
+                .collect();
+            s.proc_cpu_jiffies = Some(
+                s.proc_cpu_parts
+                    .iter()
+                    .fold(0, |a, (_, j)| a.saturating_add(*j)),
+            );
+        }
     }
     if let Ok(txt) = std::fs::read_to_string(Path::new(&dir).join("status")) {
         s.rss_file_bytes = status_kb(&txt, "RssFile:");
@@ -659,6 +691,33 @@ mod tests {
         let old = parse_proc_stat_cpu("cpu  10 0 10 80\n").unwrap();
         assert_eq!((old.busy, old.iowait, old.total), (20, 0, 100));
         assert_eq!(count_logical_cpus("cpu  1 2 3 4\n"), None);
+    }
+
+    #[test]
+    fn process_cpu_counts_only_pids_in_both_samples() {
+        let parts = |p: &[(u32, u64)]| HostSample {
+            proc_cpu_parts: p.to_vec(),
+            proc_cpu_jiffies: Some(p.iter().map(|(_, j)| j).sum()),
+            ..Default::default()
+        };
+        // server.py (100) runs maya-ds4 (200) with 50,000 jiffies behind it.
+        let a = parts(&[(100, 1_000), (200, 50_000)]);
+        // The children read races and comes back empty: the server's own
+        // time still counts, not a drop to zero.
+        let b = parts(&[(100, 1_010)]);
+        assert_eq!(proc_cpu_delta(&b, &a), Some(10));
+        // The child is back: its lifetime is not counted in one interval.
+        let c = parts(&[(100, 1_020), (200, 50_400)]);
+        assert_eq!(proc_cpu_delta(&c, &b), Some(10));
+        let d = parts(&[(100, 1_030), (200, 50_800)]);
+        assert_eq!(proc_cpu_delta(&d, &c), Some(410));
+        // No per-pid parts (not Linux): the sums.
+        let sum = |j| HostSample {
+            proc_cpu_jiffies: Some(j),
+            ..Default::default()
+        };
+        assert_eq!(proc_cpu_delta(&sum(500), &sum(100)), Some(400));
+        assert_eq!(proc_cpu_delta(&sum(500), &HostSample::default()), None);
     }
 
     fn cpu_sample(busy: u64, iowait: u64, total: u64) -> HostSample {

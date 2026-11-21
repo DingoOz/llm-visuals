@@ -690,8 +690,15 @@ impl BandwidthStats {
             self.proc_disk_mb_s =
                 rate(s.proc_read_bytes, prev.proc_read_bytes).unwrap_or(0.0) / 1e6;
             self.majflt_per_s = rate(s.proc_majflt, prev.proc_majflt).unwrap_or(0.0);
-            self.proc_cpu_cores = rate(s.proc_cpu_jiffies, prev.proc_cpu_jiffies)
-                .map(|jiffies_per_s| jiffies_per_s / crate::host::CLK_TCK);
+            // Never more cores than the machine has: a sample that still
+            // overshoots (a pid reused between samples) is clamped.
+            self.proc_cpu_cores = crate::host::proc_cpu_delta(s, prev).map(|j| {
+                let cores = j as f32 / dt / crate::host::CLK_TCK;
+                match s.cpu_logical {
+                    Some(n) if n > 0 => cores.min(n as f32),
+                    _ => cores,
+                }
+            });
             let n = s
                 .pcie_mb_s
                 .iter()

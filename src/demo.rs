@@ -715,6 +715,7 @@ impl DemoHost {
             cpu_total_jiffies: Some(self.cpu_total),
             cpu_logical: Some(16),
             proc_cpu_jiffies: Some(self.proc_cpu),
+            proc_cpu_parts: Vec::new(),
         }
     }
 }
