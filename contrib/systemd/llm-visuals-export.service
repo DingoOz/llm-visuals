@@ -19,7 +19,7 @@
 
 [Unit]
 Description=llm-visuals stats exporter (headless, HTTP :9464)
-Documentation=https://github.com/Pix13/llm-visuals/blob/feature/export-json/docs/export-schema.md
+Documentation=https://github.com/DingoOz/llm-visuals/blob/main/docs/export-schema.md
 After=network-online.target
 Wants=network-online.target
 

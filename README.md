@@ -1242,8 +1242,8 @@ in the status line.
 `--export-json PATH` rewrites a JSON file with the live numbers (per-model
 rates, phase, context, current and last request; per-GPU load, memory, power,
 temperatures, clocks) on every poll, and at least once per second even when
-idle. The file is written to `PATH.tmp` and renamed, so a reader never sees a
-partial file. `--export-sock PATH` serves the same object, one per line, on a
+idle. The file is written to a temporary file beside it
+(`.NAME.PID.N.tmp`) and renamed, so a reader never sees a partial file. `--export-sock PATH` serves the same object, one per line, on a
 Unix socket (Linux and macOS); a client that does not read is dropped and the
 dashboard never waits for it. Both work with `--demo` and `--replay`. Missing
 values are `null`, never 0. The format (`llm-visuals.stats/1`) is in
@@ -1268,8 +1268,10 @@ so a remote panel can draw where the tokens wait; see
 [docs/export-schema.md](docs/export-schema.md). In `--demo` the bottleneck
 moves through every stage once a minute. `--bench` and `--model` need
 `--tui`. A
-`systemd --user` unit (`llm-visuals-export@.service`) is in
-[docs/export-schema.md](docs/export-schema.md).
+ready `systemd --user` unit for a headless HTTP exporter is in
+[contrib/systemd/llm-visuals-export.service](contrib/systemd/llm-visuals-export.service),
+and a template unit (`llm-visuals-export@.service`) for file and socket
+exports is in [docs/export-schema.md](docs/export-schema.md).
 
 ### SQLite log
 
