@@ -91,7 +91,16 @@ pub fn read_info(path: &Path) -> Result<GgufInfo, String> {
     let n_layers = kv_usize(&map, &format!("{prefix}block_count"))
         .or_else(|| kv_usize(&map, "llama.block_count"))
         .unwrap_or(0);
-    let n_heads = kv_usize(&map, &format!("{prefix}attention.head_count")).unwrap_or(0);
+    // Per-layer head counts (Hy4-Flash mixes 32- and 64-head layers) come as
+    // an array; the widest layer stands for the model.
+    let n_heads = kv_usize(&map, &format!("{prefix}attention.head_count"))
+        .or_else(|| {
+            kv_arr(&map, &format!("{prefix}attention.head_count"))
+                .into_iter()
+                .max()
+                .map(|n| n as usize)
+        })
+        .unwrap_or(0);
     let n_kv_heads = kv_usize(&map, &format!("{prefix}attention.head_count_kv")).unwrap_or(n_heads);
     let n_experts = kv_usize(&map, &format!("{prefix}expert_count")).unwrap_or(0);
     let n_experts_used = kv_usize(&map, &format!("{prefix}expert_used_count")).unwrap_or(0);

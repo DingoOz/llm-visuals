@@ -453,14 +453,30 @@ fn argv0_base(process_name: &str, cmdline: &str) -> String {
         .unwrap_or(base)
 }
 
-/// `serve/server.py --engine strata`: the process that serves HTTP.
+/// `serve/server.py --engine strata` (or Maya's `--engine maya`): the
+/// process that serves HTTP.
 pub fn is_server(cmdline: &str) -> bool {
+    server_engine(cmdline).is_some()
+}
+
+/// The `--engine` a Strata-family `serve/server.py` was started with:
+/// `strata` or `maya`. Newer Maya servers (the Hy4 engine) name themselves.
+pub fn server_engine(cmdline: &str) -> Option<&'static str> {
     let toks: Vec<&str> = cmdline.split_whitespace().collect();
-    toks.iter().enumerate().any(|(i, t)| {
-        *t == "--engine=strata" || (*t == "--engine" && toks.get(i + 1) == Some(&"strata"))
-    }) && toks
+    if !toks
         .iter()
         .any(|t| Path::new(t).file_name().is_some_and(|f| f == "server.py"))
+    {
+        return None;
+    }
+    toks.iter().enumerate().find_map(|(i, t)| {
+        let v = t.strip_prefix("--engine=").or_else(|| {
+            (*t == "--engine")
+                .then(|| toks.get(i + 1).copied())
+                .flatten()
+        })?;
+        ["strata", "maya"].into_iter().find(|e| *e == v)
+    })
 }
 
 /// The native `strata --serve` child (Maya's `maya` / `maya-ds4`). It holds
@@ -572,11 +588,16 @@ fn sources_gguf(pack: &Path) -> Option<PathBuf> {
         .as_array()?
         .iter()
         .filter_map(|f| f.get("name")?.as_str())
-        .filter(|n| n.ends_with(".gguf"))
+        .filter(|n| n.ends_with(".gguf") && !is_mmproj(n))
         .collect();
     // `-00001-of-` sorts first; the header is in that shard.
     names.sort_unstable();
     Some(pack.parent()?.join(names.first()?))
+}
+
+/// A vision projector (`mmproj-….gguf`) listed beside the model's shards.
+fn is_mmproj(name: &str) -> bool {
+    name.to_lowercase().starts_with("mmproj")
 }
 
 /// `tensors.txt` opens with `file <n> <name>` lines (the model's shards, then
@@ -600,7 +621,7 @@ fn ds4_gguf(pack: &Path) -> Option<PathBuf> {
             (t.next() == Some("file")).then_some(())?;
             let n: u32 = t.next()?.parse().ok()?;
             let name = t.next()?.to_string();
-            name.ends_with(".gguf").then_some((n, name))
+            (name.ends_with(".gguf") && !is_mmproj(&name)).then_some((n, name))
         })
         .min()?
         .1;
@@ -1072,6 +1093,26 @@ mod tests {
     }
 
     #[test]
+    fn maya_hy4_metrics_carry_the_tiers_without_a_gpu_map() {
+        // A real Maya 1.1.70 reply (Hy4-Flash · Maya-M on one card),
+        // histories cut. Hy4 computes most experts on the CPU and reports
+        // no gpu_map.
+        let body = std::fs::read_to_string("fixtures/maya-hy4-metrics.json").unwrap();
+        let m = parse_metrics(&body).unwrap();
+        assert_eq!(m.maya_version.as_deref(), Some("1.1.70"));
+        assert_eq!(m.model.as_deref(), Some("Hy4-flash"));
+        assert_eq!(m.max_context, 32768);
+        assert_eq!(m.requests_done, 1);
+        let t = m.tiers.unwrap();
+        assert!(t.vram_hit.is_some_and(|h| h > 0.0 && h < 0.1));
+        assert!(t.cpu.is_some_and(|c| c > 600.0));
+        assert_eq!((t.ram_fetch, t.disk, t.promo), (None, None, None));
+        assert_eq!(t.hit_history.len(), 4);
+        assert_eq!(m.vram, None);
+        assert_eq!(m.spec, None);
+    }
+
+    #[test]
     fn maya_health_is_recognised_by_its_shape() {
         // serve/server.py's /health in Maya 1.1.25, as served.
         let h = parse_health(
@@ -1105,6 +1146,48 @@ mod tests {
         assert!(is_helper("maya-vision", vision));
         assert!(!is_helper("maya", glm));
         assert!(is_family("maya") && is_family("strata") && !is_family("vllm"));
+    }
+
+    #[test]
+    fn recognises_a_maya_hy4_server_and_engine() {
+        // Maya 1.1.70 serving Hy4-Flash: the server names its engine `maya`.
+        let server = "/opt/maya/.venv/bin/python /opt/maya/serve/server.py --engine maya \
+                      --config /opt/maya/maya-hy4-flash-maya-m.json --port 8081 --parent-pipe";
+        let engine = "/opt/maya/build/maya-hy4 --serve --pack /m/Hy4-Flash-Maya-M/maya-hy4 \
+                      --max-context 32768 --dfly2";
+        assert!(is_server(server));
+        assert_eq!(server_engine(server), Some("maya"));
+        assert_eq!(
+            server_engine("python serve/server.py --engine=strata"),
+            Some("strata")
+        );
+        assert_eq!(server_engine("python serve/server.py --engine vllm"), None);
+        // The launcher beside it takes the same --config but serves nothing.
+        assert!(!is_server(
+            "python /opt/maya/maya.py --config c.json --port 8081"
+        ));
+        assert!(is_engine("maya-hy4", engine));
+    }
+
+    #[test]
+    fn hy4_pack_skips_the_vision_projector() {
+        let dir = std::env::temp_dir().join(format!("lv-hy4-pack-{}", std::process::id()));
+        let pack = dir.join("maya-hy4");
+        std::fs::create_dir_all(&pack).unwrap();
+        std::fs::write(
+            pack.join("sources.json"),
+            r#"{"files": [
+                {"name": "mmproj-Hy4-Flash-Maya-XS.gguf"},
+                {"name": "Hy4-Flash-Maya-XS-IQ2_XXS-00002-of-00002.gguf"},
+                {"name": "Hy4-Flash-Maya-M-drafter.dfly2"},
+                {"name": "Hy4-Flash-Maya-M-IQ3_XXS-00001-of-00002.gguf"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            pack_gguf(&pack),
+            Some(dir.join("Hy4-Flash-Maya-M-IQ3_XXS-00001-of-00002.gguf"))
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

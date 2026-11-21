@@ -1,0 +1,273 @@
+{
+ "engine": {
+  "model": "Hy4-flash",
+  "model_label": "Hy4-Flash \u00b7 Maya-M",
+  "max_context": 32768,
+  "images": true,
+  "version": "hy4",
+  "engine": "hy4",
+  "engine_kind": "hy4",
+  "ctx": 32768,
+  "vram_gb": "15.39",
+  "dspark": 0,
+  "mtp": 0,
+  "experts": 20992,
+  "vram_slots": 451,
+  "vision": "hy4",
+  "image_token": 120120,
+  "image_start": 120118,
+  "image_end": 120119,
+  "vision_patch": 16,
+  "vision_merge": 2,
+  "vision_max_pixels": 4194304,
+  "vision_min_pixels": 4096,
+  "vision_room": "chunk",
+  "vision_room_mib": 828,
+  "maya_version": "1.1.70",
+  "trained_context": 1048576,
+  "speculation": []
+ },
+ "live": {
+  "state": "idle",
+  "queued": 0,
+  "active": 0,
+  "writing": 0,
+  "spec_off": false,
+  "phase": null,
+  "prompt_tokens": null,
+  "prompt_read": null,
+  "prompt_total": null,
+  "generated": null,
+  "max_tokens": null,
+  "elapsed_s": null,
+  "tok_s": null,
+  "tok_s_mean": null,
+  "prefill_tok_s_mean": null,
+  "tok_s_window_s": null,
+  "prompt_reused": null
+ },
+ "tiers": {
+  "now": {
+   "tok_s": 13.45,
+   "ms_tok": 74.35,
+   "vram_hit": 0.0241,
+   "cpu": 637.943,
+   "engram_ms": 13.879,
+   "time": 1795231262.7667484
+  },
+  "history": {
+   "tok_s": [
+    13.36,
+    13.42,
+    13.44,
+    13.45
+   ],
+   "ms_tok": [
+    74.84,
+    74.53,
+    74.4,
+    74.35
+   ],
+   "vram_hit": [
+    0.0239,
+    0.024,
+    0.0241,
+    0.0241
+   ],
+   "ram_fetch": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "disk": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "promo": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "cpu": [
+    637.905,
+    637.926,
+    637.932,
+    637.943
+   ],
+   "ram": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "disk_mb": [
+    null,
+    null,
+    null,
+    null
+   ],
+   "engram_ms": [
+    14.463,
+    14.105,
+    13.929,
+    13.879
+   ]
+  }
+ },
+ "gpu_map": null,
+ "requests": [
+  {
+   "projection": null,
+   "time": 1795231241.3307486,
+   "duration_s": 21.4,
+   "finish": "stop",
+   "api": "web",
+   "prefill_tok_s": 40.6,
+   "prompt_tokens": 22,
+   "reused": 0,
+   "output_tokens": 281,
+   "engine_generated": 281,
+   "prompt_ms": 541.6,
+   "decode_ms": 20892.0,
+   "decode_tok_s": 13.5,
+   "hit_rate": null,
+   "drafts_offered": 0,
+   "drafts_accepted": 0,
+   "spec_off": false,
+   "loop_guard": null
+  }
+ ],
+ "requests_kept": 1,
+ "totals": {
+  "since": 1795231007.3901584,
+  "requests": 1,
+  "prompt_tokens": 22,
+  "reused": 0,
+  "output_tokens": 281,
+  "prompt_ms": 541.6,
+  "decode_ms": 20892.0,
+  "peak_decode": {
+   "tok_s": 13.7,
+   "tokens": 273,
+   "time": 1795231262.360753
+  }
+ },
+ "loop_guard": {
+  "detected": 0,
+  "penalised": 0,
+  "thinking_closed": 0,
+  "stopped": 0,
+  "tool_repeats": 0,
+  "tool_blocked": 0,
+  "collapsed": 0,
+  "kept_going": 0,
+  "on": true
+ },
+ "hardware": {
+  "gpu_util": 0,
+  "gpu_mem_used": 16888627200,
+  "gpu_mem_total": 17103323136,
+  "gpu_temp": 35,
+  "gpu_power": 3.083,
+  "gpu_power_limit": 180.0,
+  "gpu_pcie_gen": 1,
+  "gpu_pcie_gen_max": 3,
+  "gpu_pcie_width": 8,
+  "gpu_pcie_rx_mb": 0.544921875,
+  "gpu_pcie_tx_mb": 0.7646484375,
+  "cpu": 1.3,
+  "ram_used": 10786418688,
+  "ram_total": 198132883456,
+  "disk_read_mb": 0.0,
+  "disk_write_mb": 0.0,
+  "tok_s": 0.0,
+  "tok_s_mean": 0.0,
+  "prefill_tok_s_mean": 0.0
+ },
+ "hardware_static": {
+  "gpu_name": "NVIDIA GeForce RTX 5060 Ti",
+  "gpu_count": 1,
+  "cpu_name": "Intel(R) Xeon(R) CPU E5-2680 v4 @ 2.40GHz",
+  "cores": 28,
+  "threads": 56,
+  "psutil": true
+ },
+ "history": {
+  "gpu_util": [
+   0,
+   0,
+   0,
+   0
+  ],
+  "gpu_mem_used": [
+   16888627200,
+   16888627200,
+   16888627200,
+   16888627200
+  ],
+  "gpu_temp": [
+   35,
+   35,
+   35,
+   35
+  ],
+  "gpu_power": [
+   3.19,
+   3.14,
+   3.16,
+   3.08
+  ],
+  "gpu_pcie_rx_mb": [
+   0.58,
+   0.57,
+   0.6,
+   0.54
+  ],
+  "cpu": [
+   0.4,
+   0.5,
+   0.8,
+   1.3
+  ],
+  "ram_used": [
+   10809856000,
+   10802507776,
+   10804813824,
+   10786418688
+  ],
+  "disk_read_mb": [
+   0.0,
+   0.0,
+   0.0,
+   0.0
+  ],
+  "tok_s": [
+   0.0,
+   0.0,
+   0.0,
+   0.0
+  ],
+  "prefill_tok_s_mean": [
+   0.0,
+   0.0,
+   0.0,
+   0.0
+  ]
+ },
+ "time": 1795231566.8394275,
+ "reload": null,
+ "storage": {
+  "path": "/mnt/nvme0/Maya-data/models/Hy4-Flash-Maya-M",
+  "free": 134025764864,
+  "total": 399719534592
+ },
+ "savings": {
+  "usd": 0.0,
+  "start_usd": 0.0,
+  "priced": false
+ }
+}

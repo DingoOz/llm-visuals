@@ -1057,8 +1057,8 @@ fn names_a_model(cmdline: &str) -> bool {
 
 fn engine_from(process_name: &str, cmdline: &str) -> String {
     let blob = format!("{process_name} {cmdline}").to_lowercase();
-    if crate::strata::is_server(cmdline) {
-        "strata".into()
+    if let Some(engine) = crate::strata::server_engine(cmdline) {
+        engine.into()
     } else if crate::tensorfold::is_server(cmdline) {
         "tensorfold".into()
     } else if blob.contains("ninfer-serve") {
@@ -1317,7 +1317,7 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
     if parsed.port.is_none() && parsed.engine == "tensorfold" {
         parsed.port = Some(crate::tensorfold::DEFAULT_PORT);
     }
-    if parsed.port.is_none() && parsed.engine == "strata" {
+    if parsed.port.is_none() && crate::strata::is_family(&parsed.engine) {
         parsed.port = Some(crate::strata::DEFAULT_PORT);
     }
     if parsed.host.is_empty() {
