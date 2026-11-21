@@ -245,15 +245,18 @@ impl Ctx {
         let _ = self.events.try_send(msg);
     }
 
-    /// The head of a response; the body, if any, follows it.
-    fn head(&self, status: u16, ctype: &str, len: Option<usize>) -> String {
+    /// The head of a response; the body, if any, follows it. With no
+    /// length the body is chunked, or for an HTTP/1.0 client (which has no
+    /// chunked encoding) runs until the connection closes.
+    fn head(&self, status: u16, ctype: &str, len: Option<usize>, http11: bool) -> String {
         let mut h = format!(
             "HTTP/1.1 {status} {}\r\nContent-Type: {ctype}\r\n",
             reason(status)
         );
         match len {
             Some(n) => h.push_str(&format!("Content-Length: {n}\r\n")),
-            None => h.push_str("Transfer-Encoding: chunked\r\n"),
+            None if http11 => h.push_str("Transfer-Encoding: chunked\r\n"),
+            None => {}
         }
         h.push_str("Cache-Control: no-store\r\nConnection: close\r\n");
         match status {
@@ -266,7 +269,9 @@ impl Ctx {
     }
 
     fn response(&self, status: u16, ctype: &str, body: &str) -> Vec<u8> {
-        let mut r = self.head(status, ctype, Some(body.len())).into_bytes();
+        let mut r = self
+            .head(status, ctype, Some(body.len()), true)
+            .into_bytes();
         r.extend_from_slice(body.as_bytes());
         r
     }
@@ -379,7 +384,13 @@ async fn handle(mut s: TcpStream, peer: SocketAddr, ctx: Arc<Ctx>) {
                     let mut seen = ctx.last_401.lock().unwrap_or_else(|e| e.into_inner());
                     let now = Instant::now();
                     seen.retain(|_, t| now.duration_since(*t) < LOG_401_EVERY);
-                    seen.insert(peer.ip(), now).is_none()
+                    // Stamped only when logged, so a client that keeps
+                    // trying is logged again once a period has passed.
+                    let due = !seen.contains_key(&peer.ip());
+                    if due {
+                        seen.insert(peer.ip(), now);
+                    }
+                    due
                 };
                 if due {
                     ctx.event(format!("401 from {peer}"));
@@ -387,30 +398,34 @@ async fn handle(mut s: TcpStream, peer: SocketAddr, ctx: Arc<Ctx>) {
             }
             write_and_close(&mut s, &ctx.error(status), DRAIN_TIME).await;
         }
-        Reply::Stream => stream(s, peer, &ctx).await,
+        Reply::Stream => stream(s, peer, &ctx, req.http11).await,
     }
 }
 
-async fn chunk(s: &mut TcpStream, line: &str) -> bool {
+/// One NDJSON line: a chunk for HTTP/1.1, the bare line for HTTP/1.0.
+async fn chunk(s: &mut TcpStream, line: &str, chunked: bool) -> bool {
+    if !chunked {
+        return write(s, line.as_bytes()).await;
+    }
     let mut out = format!("{:X}\r\n", line.len()).into_bytes();
     out.extend_from_slice(line.as_bytes());
     out.extend_from_slice(b"\r\n");
     write(s, &out).await
 }
 
-async fn stream(mut s: TcpStream, peer: SocketAddr, ctx: &Arc<Ctx>) {
+async fn stream(mut s: TcpStream, peer: SocketAddr, ctx: &Arc<Ctx>, chunked: bool) {
     // Subscribed before the latest line is read, so no export falls between.
     let mut rx = ctx.bcast.subscribe();
     let mut stop = ctx.shutdown.clone();
     let n = ctx.streams.fetch_add(1, Ordering::SeqCst) + 1;
     ctx.event(format!("client {peer} connected to /stream ({n} now)"));
-    let head = ctx.head(200, "application/x-ndjson", None);
+    let head = ctx.head(200, "application/x-ndjson", None, chunked);
     let mut alive = write(&mut s, head.as_bytes()).await;
     let mut last: Option<Arc<str>> = None;
     if alive {
         let first = ctx.latest.borrow().clone();
         if let Some(line) = first {
-            alive = chunk(&mut s, &line).await;
+            alive = chunk(&mut s, &line, chunked).await;
             last = Some(line);
         }
     }
@@ -427,7 +442,7 @@ async fn stream(mut s: TcpStream, peer: SocketAddr, ctx: &Arc<Ctx>) {
                     if last.as_ref().is_some_and(|l| Arc::ptr_eq(l, &line)) {
                         continue;
                     }
-                    alive = chunk(&mut s, &line).await;
+                    alive = chunk(&mut s, &line, chunked).await;
                     last = Some(line);
                 }
                 // Too far behind: dropped, not waited for.
@@ -443,7 +458,7 @@ async fn stream(mut s: TcpStream, peer: SocketAddr, ctx: &Arc<Ctx>) {
             }
         }
     }
-    if clean {
+    if clean && chunked {
         write(&mut s, b"0\r\n\r\n").await;
     }
     let n = ctx.streams.fetch_sub(1, Ordering::SeqCst) - 1;
@@ -988,6 +1003,43 @@ mod tests {
         let mut rest = Vec::new();
         r.read_to_end(&mut rest).await.unwrap();
         assert!(TcpStream::connect(addr).await.is_err(), "port is free");
+    }
+
+    #[tokio::test]
+    async fn http10_stream_is_bare_ndjson_until_close() {
+        let (mut ex, addr) = server();
+        tick(&mut ex);
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        s.write_all(b"GET /stream HTTP/1.0\r\nAuthorization: Bearer tok\r\n\r\n")
+            .await
+            .unwrap();
+        let mut r = BufReader::new(s);
+        let mut head = String::new();
+        loop {
+            let mut l = String::new();
+            r.read_line(&mut l).await.unwrap();
+            if l == "\r\n" {
+                break;
+            }
+            head.push_str(&l);
+        }
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        assert!(!head.contains("Transfer-Encoding"), "{head}");
+        tick(&mut ex);
+        for seq in 0..2 {
+            let mut l = String::new();
+            timeout(Duration::from_secs(5), r.read_line(&mut l))
+                .await
+                .unwrap()
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&l).unwrap();
+            assert_eq!(v["seq"], seq);
+        }
+        // The close ends the body; no closing chunk follows.
+        ex.close().await;
+        let mut rest = Vec::new();
+        r.read_to_end(&mut rest).await.unwrap();
+        assert!(rest.is_empty(), "{:?}", String::from_utf8_lossy(&rest));
     }
 
     #[tokio::test]
