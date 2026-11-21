@@ -1053,11 +1053,13 @@ file-size estimate, which does not fit Strata's RAM-resident experts.
 Project Maya, built on Strata, runs the same `serve/server.py --engine
 strata` front end (port 8080 in its own configs) with its own engine,
 `maya --serve --glm-pack <pack>` (`maya-ds4 --serve --pack <pack>` for
-DeepSeek). A config whose `exe` is `maya…`, a `/metrics` that carries
+DeepSeek, `maya-hy4 --serve --pack <pack>` for Hy4-Flash, whose server is
+started as `--engine maya`). A config whose `exe` is `maya…`, a `/metrics` that carries
 `engine.maya_version`, or a `/health` with Maya's `version` and `mcp_tools`
 keys names the engine `maya` in the header; everything Strata's section says
 holds for it too. The header's layers and experts come from the first GGUF
-shard `pack/sources.json` lists (the shards sit beside the pack), and the
+shard `pack/sources.json` lists (the shards sit beside the pack; a vision
+projector `mmproj-….gguf` listed with them is skipped), and the
 cards from the config's `gpu` list when the driver lists no GPU processes.
 The `maya-vision` encoder the server starts beside the engine holds GPU
 memory but serves no API; it is folded into the server, and the header's
@@ -1069,7 +1071,7 @@ the `gpu_map` parts `weights`, `pool` (the VRAM expert cache), `drafter`,
 the remainder. Its `tiers` block adds an **expert tiers** panel above the
 expert map: the share of routed experts found in VRAM (with its history),
 experts per token fetched from RAM, read from SSD (amber from 0.05 per token,
-when the pack no longer fits in RAM), promoted into VRAM and, for DeepSeek,
+when the pack no longer fits in RAM), promoted into VRAM and, for DeepSeek and Hy4,
 run on the CPU, and how full the VRAM and RAM expert slots are. Between
 requests it holds the last request's figures and says so. The panel needs
 nine rows of expert area; on a shorter terminal only the map is drawn.
