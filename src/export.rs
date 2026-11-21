@@ -528,10 +528,19 @@ mod sock {
     impl Server {
         pub fn bind(path: &Path) -> Result<Self, String> {
             let err = |e: std::io::Error| format!("{}: {e}", path.display());
-            // A socket left by a crashed run is replaced; anything else at
+            // A socket left by a crashed run is replaced; a socket that
+            // still answers belongs to a live instance, and anything else at
             // that path is not ours to delete.
             match std::fs::symlink_metadata(path) {
-                Ok(md) if md.file_type().is_socket() => std::fs::remove_file(path).map_err(err)?,
+                Ok(md) if md.file_type().is_socket() => {
+                    if UnixStream::connect(path).is_ok() {
+                        return Err(format!(
+                            "{}: in use by another running instance",
+                            path.display()
+                        ));
+                    }
+                    std::fs::remove_file(path).map_err(err)?
+                }
                 Ok(_) => return Err(format!("{}: exists and is not a socket", path.display())),
                 Err(e) if e.kind() == ErrorKind::NotFound => {}
                 Err(e) => return Err(err(e)),
@@ -1039,6 +1048,22 @@ mod tests {
         drop(slow);
         drop(ex);
         assert!(!path.exists(), "socket file removed on drop");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_of_a_live_instance_is_not_taken_over() {
+        let dir = tmpdir("live-sock");
+        let path = dir.join("s.sock");
+        let first = Exporter::open(None, Some(&path), Duration::ZERO, "live").unwrap();
+        let second = Exporter::open(None, Some(&path), Duration::ZERO, "live");
+        let err = second.err().expect("second instance refused");
+        assert!(err.contains("in use"), "{err}");
+        // The refusal left the first instance's socket in place.
+        assert!(std::os::unix::net::UnixStream::connect(&path).is_ok());
+        drop(first);
+        assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
