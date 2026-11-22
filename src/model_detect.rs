@@ -887,7 +887,7 @@ pub fn detect_models() -> Vec<DetectedModel> {
         let has_model = m.path.is_some() || m.gguf.is_some();
         let engine_rank = match m.engine.as_str() {
             "llama.cpp" | "vllm" | "sglang" | "strata" | "maya" | "ninfer" | "tensorfold"
-            | "exllamav2" => 2,
+            | "exllamav2" | "tabbyapi" => 2,
             "ollama" => 0,
             _ => 1,
         };
@@ -1003,6 +1003,8 @@ fn looks_like_llm(process_name: &str, cmdline: &str) -> bool {
         || crate::strata::is_server(cmdline)
         || crate::strata::is_native_run(process_name, cmdline)
         || crate::tensorfold::is_server(cmdline)
+        // TabbyAPI: `python main.py --config ...` from its checkout or venv.
+        || (is_tabby_main(cmdline) && (c.contains("tabby") || c.contains("exllama")))
         || names_a_model(cmdline)
 }
 
@@ -1094,11 +1096,21 @@ fn engine_from(process_name: &str, cmdline: &str) -> String {
         "vllm".into()
     } else if blob.contains("sglang") {
         "sglang".into()
+    } else if blob.contains("tabbyapi") || (blob.contains("exllama") && is_tabby_main(cmdline)) {
+        "tabbyapi".into()
     } else if blob.contains("exllama") {
         "exllamav2".into()
     } else {
         "llm".into()
     }
+}
+
+/// TabbyAPI runs as `python main.py` (or `start.py`) from its checkout, so its
+/// command line only names the interpreter's venv and the config file.
+fn is_tabby_main(cmdline: &str) -> bool {
+    cmdline.split_whitespace().any(|t| {
+        t == "main.py" || t == "start.py" || t.ends_with("/main.py") || t.ends_with("/start.py")
+    })
 }
 
 fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
@@ -1341,6 +1353,38 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
     }
     if parsed.port.is_none() && matches!(parsed.engine.as_str(), "llama.cpp" | "ninfer") {
         parsed.port = Some(8080);
+    }
+    if parsed.engine == "tabbyapi" && (parsed.port.is_none() || parsed.host.is_empty()) {
+        // The listen address lives in the YAML config, not on the command line.
+        let config = tokens
+            .iter()
+            .position(|t| *t == "--config")
+            .and_then(|i| tokens.get(i + 1))
+            .map(|v| v.to_string())
+            .or_else(|| {
+                tokens
+                    .iter()
+                    .find_map(|t| t.strip_prefix("--config="))
+                    .map(str::to_string)
+            });
+        if let Some(path) = config {
+            let info = crate::tabby::config_info(Path::new(&path));
+            if parsed.port.is_none() {
+                parsed.port = info.port;
+            }
+            if parsed.host.is_empty() {
+                parsed.host = info.host.unwrap_or_default();
+            }
+            if parsed.ctx_max.is_none() {
+                parsed.ctx_max = info.max_seq_len;
+            }
+            if let Some(name) = info.model_name {
+                parsed.name = name;
+            }
+        }
+        if parsed.port.is_none() {
+            parsed.port = Some(crate::tabby::DEFAULT_PORT);
+        }
     }
     if parsed.port.is_none() && parsed.engine == "ollama" {
         parsed.port = Some(11434);
@@ -2156,6 +2200,8 @@ pub async fn probe_endpoint(
             if let Some(c) = crate::ninfer::parse_metrics(&body) {
                 model_name = c.model_name.or(model_name);
             }
+        } else if body.contains("tabbyapi:tokens_predicted_total") {
+            engine = "tabbyapi".to_string();
         } else if body.contains("vllm:") {
             saw_vllm_metrics = true;
             engine = "vllm".to_string();
@@ -2347,6 +2393,29 @@ fn extra_probe_ips(ips: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tabby_launch_is_detected() {
+        let dir = std::env::temp_dir().join(format!("llmv-tabby-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("model-run-9104.yml");
+        std::fs::write(&cfg, "network:\n  host: 127.0.0.1\n  port: 9104\nmodel:\n  model_name: m\n  max_seq_len: 8192\n").unwrap();
+        let cmd = format!(
+            "/opt/exllamav3/venv/bin/python main.py --config {}",
+            cfg.display()
+        );
+        assert!(super::looks_like_llm("python", &cmd));
+        let model = super::parse_cmdline("python", &cmd);
+        assert_eq!(model.engine, "tabbyapi");
+        assert_eq!(model.port, Some(9104));
+        assert_eq!(model.host, "127.0.0.1");
+        assert_eq!(model.ctx_max, Some(8192));
+        assert_eq!(model.name, "m");
+        let bare = super::parse_cmdline("python", "/srv/tabbyAPI/venv/bin/python main.py");
+        assert_eq!(bare.engine, "tabbyapi");
+        assert_eq!(bare.port, Some(crate::tabby::DEFAULT_PORT));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     #[test]
     fn ninfer_launch_is_detected() {
         let cmd = "ninfer-serve models/qwen.ninfer --model-id qwen-test --max-context 8192";

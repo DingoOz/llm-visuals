@@ -3,7 +3,7 @@
 **A live terminal dashboard for the LLM running on your machine.**
 
 It finds the inference servers you already have up (llama.cpp `llama-server`,
-ollama, vLLM, SGLang, Strata, Maya, NInfer, TensorFold, …), reads their counters and NVIDIA, AMD or Intel
+ollama, vLLM, SGLang, Strata, Maya, NInfer, TensorFold, TabbyAPI, …), reads their counters and NVIDIA, AMD or Intel
 GPU telemetry, and turns them into a truecolor picture of what the model is doing
 right now: tokens per second, time to first token, GPU load and memory, context fill, speculative-decoding
 acceptance, which layers are busy on which GPU, and, with a small server patch,
@@ -1113,6 +1113,25 @@ decode time are that window's counter deltas. Drafting (Flash Next's MTP head,
 or `--drafter`) fills the speculative panel from `mtp_drafted_total` and
 `mtp_accepted_total`. With API keys on, `/metrics` needs the key
 (`--api-key-file`) unless the server runs with `--metrics-open`.
+
+### TabbyAPI
+
+[TabbyAPI](https://github.com/theroyallab/tabbyAPI) (ExLlamaV2 / V3) runs as
+`python main.py` (or `start.py`) from its checkout or venv; a command line
+that names `tabby` or `exllama` is detected as `tabbyapi`. Its listen address,
+model name and `max_seq_len` live in the YAML `--config` (the `network:` and
+`model:` blocks, one key per line), and the port falls back to 5000. It can
+also be selected with `--endpoint`, which recognises its `tabbyapi:` samples.
+
+The live numbers come from TabbyAPI's Prometheus `GET /metrics`, which is off
+by default: set `network.enable_metrics: true` in `config.yml`. It takes the
+API key (`--api-key-file`) unless `disable_auth` is set. Prompt, cached and
+generated tokens, requests in flight, TTFT and the server-measured decode time
+(`tokens_predicted_seconds_total`) feed the same panels as vLLM. The token
+counters move during a generation; the draft counters (MTP or a draft model)
+move when a request finishes, so the speculative panel shows each finished
+request's acceptance and holds it until the next. The draft depth is drafted
+tokens per verify step.
 
 ### Ollama
 
