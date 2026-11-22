@@ -532,24 +532,67 @@ pub fn server_engine(cmdline: &str) -> Option<&'static str> {
     })
 }
 
+/// The native engine binary (`strata`, `strata-q36`, `maya-ds4`, …), not
+/// the Python HTTP front end and not the vision helper.
+pub fn is_native_binary(process_name: &str, cmdline: &str) -> bool {
+    // Per-model builds carry a suffix (`strata-dsv41`, `strata-q36`, `maya-ds4`).
+    let base = argv0_base(process_name, cmdline);
+    if base == "maya-vision" || base == "strata-vision" {
+        return false;
+    }
+    ["strata", "maya"]
+        .iter()
+        .any(|n| base == *n || base.strip_prefix(n).is_some_and(|r| r.starts_with('-')))
+}
+
+/// Engine name for a native binary: `maya` when argv0 is `maya` / `maya-*`,
+/// otherwise `strata`.
+pub fn native_engine_name(process_name: &str, cmdline: &str) -> Option<&'static str> {
+    if !is_native_binary(process_name, cmdline) {
+        return None;
+    }
+    let base = argv0_base(process_name, cmdline);
+    Some(if base == "maya" || base.starts_with("maya-") {
+        "maya"
+    } else {
+        "strata"
+    })
+}
+
+/// A native engine that is actually running a model (`--native` / `--serve`
+/// / `--tokens` / a bench), not `strata --help` or a similarly named tool.
+pub fn is_native_run(process_name: &str, cmdline: &str) -> bool {
+    if !is_native_binary(process_name, cmdline) {
+        return false;
+    }
+    cmdline.split_whitespace().any(|t| {
+        matches!(
+            t,
+            "--native" | "--model" | "--serve" | "--tokens" | "--pack" | "--glm-pack"
+        ) || t.starts_with("--native=")
+            || t.starts_with("--model=")
+            || t.starts_with("--bench")
+    })
+}
+
 /// The native `strata --serve` child (Maya's `maya` / `maya-ds4`). It holds
 /// the GPU memory but speaks only to its parent over a pipe, so it is folded
-/// into the server.
+/// into the Python HTTP server. A standalone native `--serve` (no Python
+/// parent) is the server itself and is not folded.
 pub fn is_engine(process_name: &str, cmdline: &str) -> bool {
-    // Per-model builds carry a suffix (`strata-dsv41`, `maya-ds4`).
-    let base = argv0_base(process_name, cmdline);
-    let named = ["strata", "maya"]
-        .iter()
-        .any(|n| base == *n || base.strip_prefix(n).is_some_and(|r| r.starts_with('-')));
-    named && base != "maya-vision" && cmdline.split_whitespace().any(|t| t == "--serve")
+    is_native_binary(process_name, cmdline) && cmdline.split_whitespace().any(|t| t == "--serve")
 }
 
 /// Maya's vision encoder, which its server runs beside the engine
-/// (`maya-vision --mmproj … --model …-vocab.gguf`). It loads a GGUF and holds
-/// GPU memory, so it looks like a server, but it serves no API: it is the
-/// server's encoder, folded into it like the engine.
+/// (`maya-vision --mmproj … --model …-vocab.gguf`). Strata's helper is the
+/// same shape (`strata-vision`). It loads a GGUF and holds GPU memory, so it
+/// looks like a server, but it serves no API: it is the server's encoder,
+/// folded into it like the engine.
 pub fn is_helper(process_name: &str, cmdline: &str) -> bool {
-    argv0_base(process_name, cmdline) == "maya-vision"
+    matches!(
+        argv0_base(process_name, cmdline).as_str(),
+        "maya-vision" | "strata-vision"
+    )
 }
 
 /// What the server's `--config` JSON says about the model.
@@ -1116,6 +1159,28 @@ mod tests {
         assert!(!is_engine("stratagem", "/bin/stratagem --serve"));
         assert!(!is_engine("strata", "/opt/strata/engine/strata --bench"));
         assert!(!is_engine("python", SERVER));
+        assert!(is_native_run(
+            "strata-q36",
+            "./strata-q36 --native /m/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf --max-context 8192 --mtp 2 --tokens 9707 --n 24"
+        ));
+        assert!(is_native_binary(
+            "strata-q36",
+            "./strata-q36 --serve --native /m/a.gguf"
+        ));
+        assert_eq!(
+            native_engine_name("strata-q36", "./strata-q36 --tokens 1"),
+            Some("strata")
+        );
+        assert!(!is_native_run("strata-q36", "./strata-q36 --help"));
+        assert!(!is_native_binary("stratagem", "/bin/stratagem --serve"));
+        assert!(!is_native_binary(
+            "strata-vision",
+            "strata-vision --mmproj /m/mmproj-F16.gguf --model /m/vocab.gguf"
+        ));
+        assert!(is_helper(
+            "strata-vision",
+            "strata-vision --mmproj /m/mmproj-F16.gguf --model /m/vocab.gguf"
+        ));
     }
 
     #[test]

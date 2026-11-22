@@ -454,6 +454,21 @@ fn parent_pid(_pid: u32) -> Option<u32> {
     None
 }
 
+/// Native `strata --serve` under the Python HTTP front end is the engine
+/// child: fold its GPU memory onto the parent and do not list it. A
+/// standalone native run (timeout wrapping `strata-q36 --native …`, or
+/// `--serve` whose parent is not `server.py`) is the model itself. When
+/// the parent cannot be read, keep the old behaviour and hide the child.
+fn fold_away_strata_engine(pid: u32, process_name: &str, cmdline: &str) -> bool {
+    if !crate::strata::is_engine(process_name, cmdline) {
+        return false;
+    }
+    match parent_pid(pid) {
+        None => true,
+        Some(ppid) => crate::strata::is_server(&read_cmdline(ppid).unwrap_or_default()),
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn process_cwd(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
@@ -644,10 +659,8 @@ pub fn detect_models() -> Vec<DetectedModel> {
     for app in gpu_procs {
         let cmdline = read_cmdline(app.pid).unwrap_or_else(|| app.process_name.clone());
         let helper = crate::strata::is_helper(&app.process_name, &cmdline);
-        if is_sglang_worker(&app.process_name)
-            || crate::strata::is_engine(&app.process_name, &cmdline)
-            || helper
-        {
+        let fold_engine = fold_away_strata_engine(app.pid, &app.process_name, &cmdline);
+        if is_sglang_worker(&app.process_name) || fold_engine || helper {
             if let Some(ppid) = parent_pid(app.pid) {
                 let e = worker_gpu.entry(ppid).or_insert((0, Vec::new()));
                 e.0 = e.0.saturating_add(app.mem_used_mb);
@@ -733,6 +746,13 @@ pub fn detect_models() -> Vec<DetectedModel> {
                     vision::Place::Unknown
                 });
             }
+            continue;
+        }
+        // Native `strata --serve` under the Python HTTP front end is the
+        // engine child, not a second model. A standalone native run
+        // (`strata-q36 --native … --tokens`, or `--serve` with no Python
+        // parent) is the model itself.
+        if fold_away_strata_engine(pid, &name, &cmdline) {
             continue;
         }
         // A vLLM server in a container reports its internal port;
@@ -981,6 +1001,7 @@ fn looks_like_llm(process_name: &str, cmdline: &str) -> bool {
     keys.iter().any(|k| p.contains(k))
         || c.split_whitespace().any(token_matches)
         || crate::strata::is_server(cmdline)
+        || crate::strata::is_native_run(process_name, cmdline)
         || crate::tensorfold::is_server(cmdline)
         || names_a_model(cmdline)
 }
@@ -1059,6 +1080,8 @@ fn engine_from(process_name: &str, cmdline: &str) -> String {
     let blob = format!("{process_name} {cmdline}").to_lowercase();
     if let Some(engine) = crate::strata::server_engine(cmdline) {
         engine.into()
+    } else if let Some(engine) = crate::strata::native_engine_name(process_name, cmdline) {
+        engine.into()
     } else if crate::tensorfold::is_server(cmdline) {
         "tensorfold".into()
     } else if blob.contains("ninfer-serve") {
@@ -1115,7 +1138,7 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
         };
 
         match key {
-            "--model" | "-m" | "--model-path" => {
+            "--model" | "-m" | "--model-path" | "--native" => {
                 if let Some(v) = next() {
                     let p = PathBuf::from(&v);
                     parsed.name = p
@@ -1250,6 +1273,17 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
                     }
                 }
             }
+            // Strata native: `--mtp N` is the draft depth; N>0 means MTP.
+            "--mtp" => {
+                if let Some(v) = next() {
+                    if v.parse::<usize>().ok().is_some_and(|n| n > 0) {
+                        parsed.spec_type = Some("mtp".into());
+                    }
+                    if inline.is_none() {
+                        i += 1;
+                    }
+                }
+            }
             "--n-gpu-layers" | "-ngl" => {
                 if let Some(v) = next() {
                     parsed.n_gpu_layers = v.parse().ok();
@@ -1317,7 +1351,10 @@ fn parse_cmdline(process_name: &str, cmdline: &str) -> ParsedCmd {
     if parsed.port.is_none() && parsed.engine == "tensorfold" {
         parsed.port = Some(crate::tensorfold::DEFAULT_PORT);
     }
-    if parsed.port.is_none() && crate::strata::is_family(&parsed.engine) {
+    // The Python HTTP front end is the process that binds a port. A native
+    // `strata --serve` / `--tokens` child talks over a pipe, so inventing
+    // 8095 would have the poller hammer a port that is not there.
+    if parsed.port.is_none() && crate::strata::is_server(cmdline) {
         parsed.port = Some(crate::strata::DEFAULT_PORT);
     }
     if parsed.host.is_empty() {
@@ -2348,6 +2385,50 @@ mod tests {
             "tensorfold-nati",
             "tensorfold-native pull TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP"
         ));
+    }
+
+    #[test]
+    fn native_strata_q36_run_is_detected() {
+        // The Qwen3.6 engine binary, as launched for a tokens/bench pass:
+        // no Python front end, no HTTP port, GGUF on `--native`.
+        let cmd = "./strata-q36 --native /home/dingo/Programming/Strata-data/models/qwen36-UD-Q4_K_XL/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf --max-context 8192 --prefill auto --mtp 2 --tokens 9707 --n 24";
+        assert!(super::looks_like_llm("strata-q36", cmd));
+        let p = super::parse_cmdline("strata-q36", cmd);
+        assert_eq!(p.engine, "strata");
+        assert_eq!(p.ctx_max, Some(8192));
+        assert_eq!(p.spec_type.as_deref(), Some("mtp"));
+        assert_eq!(p.port, None);
+        assert!(p
+            .path
+            .as_deref()
+            .is_some_and(|p| p.ends_with("Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf")));
+        assert_eq!(p.name, "Qwen3.6-35B-A3B-UD-Q4_K_XL");
+
+        // A timeout(1) wrapper around that command is not the engine.
+        assert!(!super::looks_like_llm(
+            "timeout",
+            "timeout 1500 ./strata-q36 --native /m/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf --tokens 9707 --n 24"
+        ));
+
+        // The Python HTTP front end still gets the default port.
+        let server = super::parse_cmdline(
+            "python",
+            ".venv/bin/python serve/server.py --engine strata --config strata-iq2_xs.json",
+        );
+        assert_eq!(server.engine, "strata");
+        assert_eq!(server.port, Some(crate::strata::DEFAULT_PORT));
+
+        // `--model` is the same GGUF flag on the smaller strata-q36 CLI.
+        let p = super::parse_cmdline(
+            "strata-q36",
+            "strata-q36 --model /m/Qwen3.6-35B-A3B.gguf --serve --max-context 32768",
+        );
+        assert_eq!(p.engine, "strata");
+        assert_eq!(p.port, None);
+        assert!(p
+            .path
+            .as_deref()
+            .is_some_and(|p| p.ends_with("Qwen3.6-35B-A3B.gguf")));
     }
 
     #[test]

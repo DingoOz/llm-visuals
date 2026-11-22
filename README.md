@@ -1023,7 +1023,10 @@ MTP.
 model name, the first GGUF shard (`--native`) and `--max-context` are read
 from the `--config` JSON, so the header shows the model's layers and experts.
 The native `strata --serve` child holds the GPU memory and is folded into the
-server process.
+server process. A standalone native engine (`strata-q36 --native MODEL.gguf`,
+with `--serve`, `--tokens` or `--bench`) is listed as the model itself: the
+GGUF path and `--max-context` come from its command line, and there is no
+HTTP port to poll until the Python front end is in front of it.
 
 Everything live comes from Strata's JSON `GET /metrics`, polled no faster
 than every 400 ms. From Strata 0.1.40.2 that endpoint answers a client that
