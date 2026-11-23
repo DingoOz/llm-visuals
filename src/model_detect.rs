@@ -960,6 +960,9 @@ struct ParsedCmd {
 }
 
 fn looks_like_llm(process_name: &str, cmdline: &str) -> bool {
+    if crate::strata::is_gpu_plan(process_name, cmdline) {
+        return false;
+    }
     let p = process_name.to_lowercase();
     let c = cmdline.to_lowercase();
     let keys = [
@@ -2365,6 +2368,19 @@ mod tests {
         assert_eq!(model.name, "qwen-test");
         assert_eq!(model.ctx_max, Some(8192));
         assert_eq!(model.port, Some(8080));
+    }
+
+    #[test]
+    fn basalt_gpu_plan_is_not_a_model() {
+        // The pack is a directory, so `--model <dir>` alone would read as a model.
+        let pack = std::env::temp_dir();
+        let plan = format!(
+            "/opt/basalt/bin/basalt --model {} --kv fp8 --gpu-plan",
+            pack.display()
+        );
+        assert!(!super::looks_like_llm("basalt", &plan));
+        let serve = format!("/opt/basalt/bin/basalt --serve --model {}", pack.display());
+        assert!(super::looks_like_llm("basalt", &serve));
     }
 
     #[test]

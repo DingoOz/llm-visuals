@@ -695,7 +695,7 @@ pub fn native_engine_name(process_name: &str, cmdline: &str) -> Option<&'static 
 /// A native engine that is actually running a model (`--native` / `--serve`
 /// / `--tokens` / a bench), not `strata --help` or a similarly named tool.
 pub fn is_native_run(process_name: &str, cmdline: &str) -> bool {
-    if !is_native_binary(process_name, cmdline) {
+    if !is_native_binary(process_name, cmdline) || is_gpu_plan(process_name, cmdline) {
         return false;
     }
     cmdline.split_whitespace().any(|t| {
@@ -706,6 +706,14 @@ pub fn is_native_run(process_name: &str, cmdline: &str) -> bool {
             || t.starts_with("--model=")
             || t.starts_with("--bench")
     })
+}
+
+/// Basalt's server asks the engine which cards to use before starting it:
+/// `basalt --model X … --gpu-plan` prints one JSON line and exits. It names a
+/// model but loads none and serves nothing, so it is not a model; counting it
+/// showed a second row for a few moments while the lane loaded.
+pub fn is_gpu_plan(process_name: &str, cmdline: &str) -> bool {
+    is_native_binary(process_name, cmdline) && cmdline.split_whitespace().any(|t| t == "--gpu-plan")
 }
 
 /// The native `strata --serve` child (Maya's `maya` / `maya-ds4`). It holds
@@ -1392,6 +1400,15 @@ mod tests {
             Some("strata")
         );
         assert!(!is_native_run("strata-q36", "./strata-q36 --help"));
+        let plan =
+            "/opt/basalt/bin/basalt --model /m/Inkling-2-Mini-NVFP4-q8.basalt --kv fp8 --gpu-plan";
+        assert!(is_gpu_plan("basalt", plan));
+        assert!(!is_native_run("basalt", plan));
+        assert!(!is_gpu_plan(
+            "basalt",
+            "/opt/basalt/bin/basalt --serve --model /m/x.basalt"
+        ));
+        assert!(!is_gpu_plan("python3", "python3 tool.py --gpu-plan"));
         assert!(!is_native_binary("stratagem", "/bin/stratagem --serve"));
         assert!(!is_native_binary(
             "strata-vision",
