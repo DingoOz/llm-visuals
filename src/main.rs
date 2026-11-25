@@ -35,6 +35,7 @@ mod safetensors;
 mod settings;
 mod sglang;
 mod strata;
+mod tabby;
 mod tensorfold;
 mod vision;
 mod vllm;
@@ -557,7 +558,7 @@ async fn poll_server(
             tokio::time::sleep(sleep).await;
         }
     }
-    if model.engine == "vllm" || model.engine == "ninfer" {
+    if matches!(model.engine.as_str(), "vllm" | "ninfer" | "tabbyapi") {
         // vLLM has no /slots or /experts endpoints; its /metrics counters
         // drive the live stats and the MTP panel. The 'r' rescan drops
         // dead processes (same policy as the llama.cpp path); until then a
@@ -572,6 +573,8 @@ async fn poll_server(
         loop {
             let counters = if model.engine == "ninfer" {
                 ninfer::poll(&model.host, port, &model.name, &others, &auth).await
+            } else if model.engine == "tabbyapi" {
+                tabby::poll(&model.host, port, &auth).await
             } else {
                 vllm::poll_vllm(&model.host, port, &model.name, &others, &auth).await
             };
