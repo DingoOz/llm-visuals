@@ -99,6 +99,10 @@ pub struct StrataMetrics {
     pub last: Option<StrataRequest>,
     /// MTP draft depth (`engine.mtp_max`); 0 when speculation is off.
     pub mtp_max: usize,
+    /// The engine's own name for its drafting (`engine.speculation`, Maya's
+    /// `["MTP"]`). None on Strata and Maya builds that predate the list;
+    /// those name MTP through `mtp_max` instead.
+    pub speculation: Option<String>,
     /// Running draft totals (`totals.drafts_offered` / `drafts_accepted`,
     /// Strata 0.1.35+). None on older servers.
     pub spec: Option<SpecMetrics>,
@@ -320,8 +324,26 @@ pub fn parse_metrics(body: &str) -> Option<StrataMetrics> {
                 busy_secs: totals.and_then(|t| f64_at(t, "decode_ms")).unwrap_or(0.0) / 1000.0,
             })
         }
+        // Maya names no draft totals; its finished requests each carry the
+        // drafts they offered and had accepted. The array is capped, so a
+        // long session's gauge reads as its recent window rather than its
+        // whole life.
+        // Basalt's request list is capped too, and its adapter keeps running
+        // totals of its own instead.
+        _ if !basalt => spec_from_requests(v.get("requests")),
         _ => None,
     };
+    let speculation = engine
+        .get("speculation")
+        .and_then(|s| s.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("+")
+        })
+        .filter(|s| !s.is_empty());
     Some(StrataMetrics {
         model: engine
             .get("model")
@@ -344,6 +366,7 @@ pub fn parse_metrics(body: &str) -> Option<StrataMetrics> {
         requests_done: total("requests").unwrap_or(0),
         last,
         mtp_max: usize_at(engine, "mtp_max").unwrap_or(0),
+        speculation,
         spec,
         maya_version: engine
             .get("maya_version")
@@ -393,6 +416,40 @@ fn parse_basalt_vram(hw: &Value) -> Option<VramSplit> {
 
 fn f64_at(v: &Value, k: &str) -> Option<f64> {
     v.get(k).and_then(|x| x.as_f64())
+}
+
+/// Draft totals summed over a `/metrics` request list (Maya 1.1.69+). Every
+/// entry is a closed request — an in-flight one joins the list only when it
+/// finishes — so the counts are final, never mid-flight partials.
+fn spec_from_requests(requests: Option<&Value>) -> Option<SpecMetrics> {
+    let rows = requests?.as_array()?;
+    let mut offered = 0u64;
+    let mut accepted = 0u64;
+    let mut output = 0u64;
+    let mut busy_ms = 0.0f64;
+    let mut any = false;
+    for r in rows {
+        let (Some(o), Some(a)) = (
+            usize_at(r, "drafts_offered").map(|n| n as u64),
+            usize_at(r, "drafts_accepted").map(|n| n as u64),
+        ) else {
+            continue;
+        };
+        any = true;
+        offered += o;
+        accepted += a;
+        output += usize_at(r, "output_tokens").unwrap_or(0) as u64;
+        busy_ms += f64_at(r, "decode_ms").unwrap_or(0.0);
+    }
+    (any && offered > 0).then(|| SpecMetrics {
+        draft_tokens: offered,
+        accepted,
+        // Each verify step emits one token plus its accepted drafts.
+        verify_steps: output.saturating_sub(accepted),
+        n_decode: output,
+        tokens_predicted: output,
+        busy_secs: busy_ms / 1000.0,
+    })
 }
 
 fn usize_at(v: &Value, k: &str) -> Option<usize> {
@@ -475,13 +532,15 @@ pub fn live_stats(m: &StrataMetrics) -> LiveStats {
         id_task,
         n_slots: m.parallel.max(1),
         slots_busy: m.in_flight(),
-        spec_types: if m.mtp_max > 0 {
-            "mtp".into()
-        } else if m.spec_max > 0 {
-            "dspark".into()
-        } else {
-            "none".into()
-        },
+        spec_types: m.speculation.clone().unwrap_or_else(|| {
+            if m.mtp_max > 0 {
+                "mtp".into()
+            } else if m.spec_max > 0 {
+                "dspark".into()
+            } else {
+                "none".into()
+            }
+        }),
         spec_depth: if m.mtp_max > 0 { m.mtp_max } else { m.spec_max },
         // Live progress includes cache hits and advances by whole chunks.
         // Without an engine clock, wait for the completed request's timing
@@ -1283,6 +1342,61 @@ mod tests {
         assert_eq!(sp.verify_steps, 200);
         assert_eq!(sp.tokens_predicted, 500);
         assert!((sp.busy_secs - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn maya_names_its_speculation_and_sums_the_requests_drafts() {
+        // Maya 1.1.69 has no `engine.mtp_max` and no draft totals: it names
+        // its drafting in `engine.speculation` and reports each finished
+        // request's drafts beside it. `engine.mtp` counts MTP layers, not
+        // draft depth — one layer chains several drafts.
+        let m = parse_metrics(
+            r#"{"engine":{"mtp":1,"dflash":0,"speculation":["MTP"],
+                        "maya_version":"1.1.69","max_context":262144},
+                "live":{"state":"idle"},
+                "totals":{"requests":2,"output_tokens":900,"decode_ms":9000.0},
+                "requests":[
+                    {"finish":"length","drafts_offered":118,"drafts_accepted":105,
+                     "output_tokens":120,"decode_ms":3000.0},
+                    {"finish":"stop","drafts_offered":333,"drafts_accepted":276,
+                     "output_tokens":335,"decode_ms":4000.0}]}"#,
+        )
+        .unwrap();
+        assert_eq!(m.speculation.as_deref(), Some("MTP"));
+        assert_eq!(m.mtp_max, 0);
+        assert_eq!(m.maya_version.as_deref(), Some("1.1.69"));
+        let sp = m.spec.clone().expect("drafts summed over the request list");
+        assert_eq!((sp.draft_tokens, sp.accepted), (451, 381));
+        assert_eq!(sp.verify_steps, 455 - 381);
+        assert_eq!(sp.tokens_predicted, 455);
+        assert!((sp.busy_secs - 7.0).abs() < 1e-9);
+        let s = live_stats(&m);
+        assert_eq!(s.spec_types, "MTP");
+    }
+
+    #[test]
+    fn an_older_maya_without_a_speculation_list_reads_as_before() {
+        // fixtures/maya-metrics.json shape: `mtp` is 0 and nothing names the
+        // drafting, so the panel keeps saying no speculative decoding.
+        let m = parse_metrics(
+            r#"{"engine":{"mtp":0,"dflash":0,"maya_version":"1.1.25",
+                        "max_context":32768},
+                "live":{"state":"idle"},"requests":[{"output_tokens":10}]}"#,
+        )
+        .unwrap();
+        assert_eq!(m.speculation, None);
+        assert!(m.spec.is_none());
+        let s = live_stats(&m);
+        assert_eq!(s.spec_types, "none");
+    }
+
+    #[test]
+    fn strata_depth_still_names_mtp_when_no_list_is_present() {
+        let m = parse_metrics(r#"{"engine":{"mtp_max":4},"live":{"state":"generating"}}"#).unwrap();
+        assert_eq!(m.speculation, None);
+        let s = live_stats(&m);
+        assert_eq!(s.spec_types, "mtp");
+        assert_eq!(s.spec_depth, 4);
     }
 
     #[test]
