@@ -921,7 +921,11 @@ impl PerfTracker {
                     // server's own timeline: TTFT + total inter-token
                     // time spans admission -> last token. `ended`
                     // keeps the detection time.
-                    if done.ttft.map_or(false, |t| t > 0.0) {
+                    // TTFT alone is not the request's wall span. Backdate
+                    // only when the inter-token time is there too, so a
+                    // server that reports TTFT and not decode time keeps
+                    // the span the polls actually covered.
+                    if close.ttft_secs > 0.0 && close.itl_sum > 0.0 {
                         let e2e = close.ttft_secs + close.itl_sum;
                         if let Some(st) = now.checked_sub(Duration::from_secs_f64(e2e)) {
                             done.started = st;
@@ -1060,12 +1064,11 @@ impl PerfTracker {
             if !s.processing {
                 let mut done = self.current.take().unwrap();
                 done.ended = Some(now);
-                // Same backdate as the closing path: vLLM's TTFT +
-                // total inter-token time is the request's true wall
-                // span (admission -> last token). llama.cpp rows have
-                // no histograms and keep the detection-based span.
-                if done.ttft.map_or(false, |t| t > 0.0) {
-                    let e2e = done.ttft.unwrap() as f64 + done.itl_sum.unwrap_or(0.0) as f64;
+                // Same backdate as the closing path. TTFT without the
+                // inter-token time is not a full span: llama.cpp and
+                // Rapid-MLX keep the time the polls covered.
+                if done.ttft.map_or(false, |t| t > 0.0) && done.itl_sum.map_or(false, |t| t > 0.0) {
+                    let e2e = done.ttft.unwrap() as f64 + done.itl_sum.unwrap() as f64;
                     if let Some(st) = now.checked_sub(Duration::from_secs_f64(e2e)) {
                         done.started = st;
                     }

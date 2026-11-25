@@ -2948,7 +2948,7 @@ impl Renderer {
         let mut spans = vec![mark];
         if wide {
             spans.push(Span::styled(
-                format!("{:<8}", format!("#{}", r.id_task)),
+                fit_column(&format!("#{}", r.id_task), 8),
                 base,
             ));
             spans.push(Span::styled(
@@ -2983,7 +2983,7 @@ impl Renderer {
             spans.push(Span::styled(format!("{:>9}", dur), base));
         } else {
             spans.push(Span::styled(
-                format!("{:<7}", format!("#{}", r.id_task)),
+                fit_column(&format!("#{}", r.id_task), 7),
                 base,
             ));
             spans.push(Span::styled(
@@ -5583,6 +5583,17 @@ fn fmt_clock_reasons(reasons: ClockReasons) -> Option<(String, ReasonLevel)> {
     Some((format!("{mark}{}", names.join("+")), worst))
 }
 
+/// Pad a request-table cell, or keep its tail when the value is wider
+/// than the column. The stored id is unchanged.
+fn fit_column(label: &str, width: usize) -> String {
+    let count = label.chars().count();
+    if count <= width {
+        format!("{label:<width$}")
+    } else {
+        label.chars().skip(count - width).collect()
+    }
+}
+
 pub fn fmt_int(n: usize) -> String {
     let s = n.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
@@ -5977,6 +5988,9 @@ mod tests {
     fn formatting() {
         assert_eq!(fmt_int(98304), "98,304");
         assert_eq!(fmt_int(12), "12");
+        assert_eq!(fit_column("#42", 8), "#42     ");
+        assert_eq!(fit_column("#1324819324972857531", 8), "72857531");
+        assert_eq!(fit_column("#1324819324972857531", 7).chars().count(), 7);
         assert_eq!(fmt_rate(42.66), "42.7");
         assert_eq!(fmt_rate(1234.4), "1,234");
         assert_eq!(fmt_dur(Duration::from_millis(820)), "0.82s");

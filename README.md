@@ -1155,6 +1155,50 @@ move when a request finishes, so the speculative panel shows each finished
 request's acceptance and holds it until the next. The draft depth is drafted
 tokens per verify step.
 
+### Rapid-MLX
+
+[Rapid-MLX](https://github.com/rapid-labs/rapid-mlx) is detected from
+`rapid-mlx serve` or `rmlx serve` (port 8000 when `--port` is absent), or
+selected with `--endpoint http://127.0.0.1:8000`, which recognises a
+`/metrics` body containing `rapid_mlx_completion_tokens_total`. The model
+name is the first positional token after `serve`
+(`rapid-mlx serve qwen3.5-4b-4bit`). `--port`, `--host`, `--api-key`,
+`--api-key-file`, and `--served-model-name` may precede it. Any other
+flag that takes a value has to follow the model name, or that value is
+read as the name.
+Context comes from `/v1/models` when the command line has no context flag.
+
+Rapid-MLX exposes three endpoints the dashboard uses:
+
+- **`GET /v1/status`** — preferred source of live progress. Each row carries
+  `request_id`, `phase` (`generation` or `prefill`), `prompt_tokens`,
+  `completion_tokens`, `cached_tokens`, and `ttft_s` (JSON null while queued
+  or before the first token). The dashboard picks the generation row first
+  (prefill row as fallback) and reports its per-request throughput, TTFT, cache
+  hit, and request log entries. An idle server returns `requests: []` — not
+  an error — so the panel shows `processing: false` without back-off.
+- **`GET /metrics`** — plain Prometheus text (no namespace prefix). MTP
+  drafting is `rapid_mlx_spec_decode_attempts_total`,
+  `rapid_mlx_spec_decode_accepts_total`, and
+  `rapid_mlx_spec_decode_verify_calls_total` (`method="mtp"`). Those fill
+  the speculative panel's draft, accepted, and verify counters, and the
+  panel is titled MTP. Depth is the deepest `depth` label on
+  `rapid_mlx_spec_decode_drafted_by_depth_total` with a non-zero count.
+  The older `rapid_mlx_suffix_decode_*` series fills those same counters
+  only when the MTP counters are still zero, and the panel is then titled
+  SPECULATIVE suffix. The two series are not added together. When `/v1/status`
+  refuses or is missing, the poller falls back to `/metrics` and reports
+  tokens generated during the current run, not the server's lifetime
+  total. A counter that drops, as on a restart, starts that run over.
+- **`GET /v1/models`** — context window (`context_window` or
+  `context_length`), used to fill the context panel when the command line
+  omits `--context`. A repo id with no local path is resolved in the
+  Hugging Face cache, and that snapshot's safetensors headers fill the
+  memory pipeline's tensor table.
+
+The expert panel stays `simulated`: Rapid-MLX does not currently export
+per-expert routing data, so expert routing is not available from this server.
+
 ### Ollama
 
 Nothing to configure. Current Ollama runs every loaded GGUF model in a
