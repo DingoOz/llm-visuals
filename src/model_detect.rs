@@ -886,8 +886,8 @@ pub fn detect_models() -> Vec<DetectedModel> {
     models.sort_by_key(|m| {
         let has_model = m.path.is_some() || m.gguf.is_some();
         let engine_rank = match m.engine.as_str() {
-            "llama.cpp" | "vllm" | "sglang" | "strata" | "maya" | "ninfer" | "tensorfold"
-            | "exllamav2" | "tabbyapi" => 2,
+            "llama.cpp" | "vllm" | "sglang" | "strata" | "maya" | "basalt" | "ninfer"
+            | "tensorfold" | "exllamav2" | "tabbyapi" => 2,
             "ollama" => 0,
             _ => 1,
         };
@@ -960,6 +960,9 @@ struct ParsedCmd {
 }
 
 fn looks_like_llm(process_name: &str, cmdline: &str) -> bool {
+    if crate::strata::is_gpu_plan(process_name, cmdline) {
+        return false;
+    }
     let p = process_name.to_lowercase();
     let c = cmdline.to_lowercase();
     let keys = [
@@ -2178,6 +2181,8 @@ pub async fn probe_endpoint(
         if let Some(m) = strata {
             engine = if m.maya_version.is_some() {
                 "maya"
+            } else if m.basalt {
+                "basalt"
             } else {
                 "strata"
             }
@@ -2224,7 +2229,14 @@ pub async fn probe_endpoint(
     // key, since they come from /metrics.
     if model_name.is_none() {
         if let Some(h) = crate::strata::poll_health(host, port, auth).await {
-            engine = if h.maya { "maya" } else { "strata" }.to_string();
+            engine = if h.maya {
+                "maya"
+            } else if h.basalt {
+                "basalt"
+            } else {
+                "strata"
+            }
+            .to_string();
             model_name = h.model;
             if ctx_max.is_none() {
                 ctx_max = (h.max_context > 0).then_some(h.max_context);
@@ -2425,6 +2437,19 @@ mod tests {
         assert_eq!(model.name, "qwen-test");
         assert_eq!(model.ctx_max, Some(8192));
         assert_eq!(model.port, Some(8080));
+    }
+
+    #[test]
+    fn basalt_gpu_plan_is_not_a_model() {
+        // The pack is a directory, so `--model <dir>` alone would read as a model.
+        let pack = std::env::temp_dir();
+        let plan = format!(
+            "/opt/basalt/bin/basalt --model {} --kv fp8 --gpu-plan",
+            pack.display()
+        );
+        assert!(!super::looks_like_llm("basalt", &plan));
+        let serve = format!("/opt/basalt/bin/basalt --serve --model {}", pack.display());
+        assert!(super::looks_like_llm("basalt", &serve));
     }
 
     #[test]

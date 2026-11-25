@@ -535,7 +535,7 @@ async fn poll_server(
                     stats.ctx_max = model.ctx_max.unwrap_or(0);
                 }
                 let _ = live_tx.try_send((pid, stats));
-                if let Some(sp) = m.spec {
+                if let Some(sp) = m.spec.clone().or_else(|| adapter.basalt_spec()) {
                     let _ = spec_tx.try_send((pid, sp));
                 }
             } else {

@@ -224,6 +224,7 @@ impl Tracker {
             vram: None,
             label: None,
             cpu_threads: None,
+            ..Default::default()
         }
     }
 }
