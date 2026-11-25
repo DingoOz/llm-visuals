@@ -108,6 +108,8 @@ fn parse_config(text: &str) -> ConfigInfo {
         let Some((key, value)) = line.trim().split_once(':') else {
             continue;
         };
+        // A trailing ` # comment` is not part of the value.
+        let value = value.split(" #").next().unwrap_or(value);
         let value = value.trim().trim_matches(|ch| ch == '"' || ch == '\'');
         match (block.as_str(), key.trim()) {
             ("network", "port") => info.port = value.parse().ok(),
@@ -184,6 +186,10 @@ mod tests {
                 max_seq_len: Some(262144),
             }
         );
+        let commented =
+            parse_config("network:\n  host: 127.0.0.1 # local only\n  port: 9104  # tabby\n");
+        assert_eq!(commented.host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(commented.port, Some(9104));
         assert_eq!(
             parse_config("sampling:\n  port: 3\n"),
             ConfigInfo::default()
